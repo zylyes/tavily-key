@@ -2,7 +2,7 @@
 
 面向 **Windows 本机/局域网**提供服务，默认监听 `0.0.0.0`，局域网内设备可直接访问。适合个人开发机或内网环境。
 
-提供两种使用形态：**源码运行**（开发/调试）或 **打包成单一 exe**（免安装分发）。
+提供两种使用形态：**源码运行**（开发/调试）或 **打包成 onedir 应用文件夹**（免安装分发）。
 
 ## 一、打包成 Windows 应用（推荐，免安装）
 
@@ -12,21 +12,23 @@
 scripts\build_win.bat
 ```
 
-产物位于 `dist\` 目录：
+产物位于 `out\dist\Tavily\` 目录（onedir 应用文件夹）：
 
-| 文件 | 用途 |
+| 路径 | 用途 |
 | --- | --- |
-| `dist\Tavily.exe` | **单一软件**：双击运行打开控制台面板，内置 MCP 服务开关/设置，MCP 服务默认监听局域网 `0.0.0.0:8001` |
+| `out\dist\Tavily\Tavily.exe` | **主程序**：双击运行打开控制台面板，内置 MCP 服务开关/设置，MCP 服务默认监听局域网 `0.0.0.0:8001` |
+| `out\dist\Tavily\_internal\` | 打包的库与静态资源（必须与 exe 放在一起，勿删） |
+| `out\dist\Tavily\data\` | 运行时数据（首次运行自动生成） |
 
 **特点**：
 
-- 单文件免安装，无需本机装 Python/依赖即可运行；
-- 首次运行会在 **exe 同目录**自动生成 `config.json`（默认局域网模式）与 `tavily_keys.db`；
+- onedir 文件夹免安装，无需本机装 Python/依赖即可运行（启动不再解压临时目录，退出不会弹 `_MEI` 删除失败对话框）；
+- 首次运行会在 **exe 同目录的 `data\` 文件夹**自动生成 `config.json`（默认局域网模式）与 `tavily_keys.db`；
 - 面板「MCP 服务」页可启动/停止 MCP 服务，**服务地址自动复制到剪贴板**；
-- 可通过 Web 设置页或直接编辑 `config.json` 修改端口/域名/访问令牌/MCP 配置；
-- 分发时拷贝 `dist\Tavily.exe` 到目标机器即可。
+- 可通过 Web 设置页或直接编辑 `data\config.json` 修改端口/域名/访问令牌/MCP 配置；
+- 分发时**整体拷贝 `out\dist\Tavily\` 文件夹**（或压缩为 zip）到目标机器即可。
 
-> 打包注意事项：MCP Server 依赖 `mcp` 包（**必须为 1.x**，2.x 已移除 FastMCP API，见 `requirements.txt` 版本约束）。打包脚本优先使用 `.venv` 环境执行。MCP 服务日志写入 exe 同目录 `mcp_server.log`。
+> 打包注意事项：MCP Server 依赖 `mcp` 包（**必须为 1.x**，2.x 已移除 FastMCP API，见 `requirements.txt` 版本约束）。打包脚本优先使用 `.venv` 环境执行。MCP 服务日志写入 exe 同目录 `data\mcp_server.log`。
 
 ## 二、源码运行
 
@@ -35,7 +37,7 @@ scripts\build_win.bat
 deploy\windows-local\start_dashboard.bat
 ```
 
-启动后浏览器访问 `http://127.0.0.1:8000`（端口以 `config.json` 为准，可在设置页修改）。
+启动后浏览器访问 `http://127.0.0.1:8000`（端口以 `data/config.json` 为准，可在设置页修改）。
 MCP 服务在面板「MCP 服务」页启动/停止（SSE / Streamable HTTP，默认 `0.0.0.0:8001`，局域网可用）。
 
 ## 首次使用
@@ -45,8 +47,9 @@ MCP 服务在面板「MCP 服务」页启动/停止（SSE / Streamable HTTP，�
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 
-# 生成 local 模式配置
-Copy-Item deploy\windows-local\config.local.json config.json
+# 生成 local 模式配置（首次启动也会自动生成 data/config.json）
+New-Item -ItemType Directory -Force data | Out-Null
+Copy-Item deploy\windows-local\config.local.json data\config.json
 ```
 
 ## 开机自启（任务计划）
@@ -90,5 +93,5 @@ nssm start TavilyDashboard
 ## 安全建议
 
 - 局域网共享时请在设置页设置**访问令牌**，保护 `/api/*` 接口。
-- 修改 `config.json`（或设置页的 Host/端口/MCP 配置）后需重启服务（或重新启动 MCP 服务）生效。
+- 修改 `data/config.json`（或设置页的 Host/端口/MCP 配置）后需重启服务（或重新启动 MCP 服务）生效。
 - MCP 服务由面板管理；关闭软件时自动停止 MCP 服务。

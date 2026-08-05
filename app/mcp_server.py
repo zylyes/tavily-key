@@ -5,6 +5,7 @@ API keys managed by KeyPool with configurable load-balancing strategy.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from typing import Any
@@ -12,7 +13,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 from tavily import TavilyClient
 
-from key_pool import KeyPool, _mask
+from key_pool import KeyPool, _mask, _classify_error
 from logging_setup import get_logger
 from settings import get_settings
 
@@ -31,10 +32,8 @@ def _key_strategy() -> str:
 
 
 def _get_client() -> tuple[TavilyClient, str]:
-    if _key_strategy() == "least-used":
-        result = pool.next_key_least_used()
-    else:
-        result = pool.next_key()
+    """取一个可用 key（未耗尽、未超限流）；全部受限时内部短暂等待。"""
+    result = pool.next_available_key()
     if result is None:
         raise RuntimeError("No active API keys in pool. Add keys via CLI or dashboard.")
     raw, masked = result
@@ -42,9 +41,74 @@ def _get_client() -> tuple[TavilyClient, str]:
 
 
 def _record(masked: str, endpoint: str, start: float, success: bool,
-            credits: int = 0, error_msg: str = ""):
+            credits: int = 0, error_msg: str = "", request_id: str = ""):
     latency = (time.time() - start) * 1000
-    pool.record_request(masked, endpoint, latency, success, credits, error_msg)
+    pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id)
+
+
+def _usage_credits(resp: Any) -> int:
+    """从响应中提取消耗积分。"""
+    if isinstance(resp, dict) and isinstance(resp.get("usage"), dict):
+        try:
+            return int(resp["usage"].get("credits") or 0)
+        except (TypeError, ValueError):
+            return 0
+    return 0
+
+
+def _usage_request_id(resp: Any) -> str:
+    """从响应中提取 request_id（用于问题定位）。"""
+    if isinstance(resp, dict):
+        rid = resp.get("request_id") or ""
+        return str(rid)
+    return ""
+
+
+def _tool_kwargs(func, kwargs: dict) -> dict:
+    """应用 mcp_default_parameters：未显式传入的参数（值=声明默认）由默认参数覆盖。"""
+    defaults = get_settings().get("mcp_default_parameters") or {}
+    if not isinstance(defaults, dict) or not defaults:
+        return kwargs
+    sig_defaults = {
+        k: v.default for k, v in inspect.signature(func).parameters.items()
+        if v.default is not inspect.Parameter.empty
+    }
+    out = dict(defaults)
+    for k, v in kwargs.items():
+        if k in sig_defaults and v == sig_defaults[k]:
+            continue  # 未显式传入：保留 defaults 的值
+        out[k] = v
+    return out
+
+
+def _run_with_retry(endpoint: str, fn) -> str:
+    """执行工具调用并序列化返回。
+
+    - 记录成功/失败（含 request_id）。
+    - quota(额度耗尽)/auth(认证失效) 类错误自动切换其他 key 重试（最多 2 次）。
+    """
+    last_err = ""
+    for attempt in range(3):
+        try:
+            client, masked = _get_client()
+        except RuntimeError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+        t0 = time.time()
+        try:
+            resp = fn(client)
+            _record(masked, endpoint, t0, True, _usage_credits(resp),
+                    request_id=_usage_request_id(resp))
+            return json.dumps(resp, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+            _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
+            _record(masked, endpoint, t0, False, 0, err)
+            cat = _classify_error(err)
+            last_err = err
+            if cat in ("quota", "auth") and attempt < 2:
+                continue  # 换 key 重试
+            return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
+    return json.dumps({"error": last_err, "key_used": "?"}, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -63,13 +127,14 @@ def tavily_search(
     chunks_per_source: int = 3,
     include_images: bool = False,
     include_image_descriptions: bool = False,
-    include_answer: bool = False,
-    include_raw_content: bool = False,
+    include_answer: bool | str = False,
+    include_raw_content: bool | str = False,
     include_domains: list[str] | None = None,
     exclude_domains: list[str] | None = None,
     country: str = "",
     exact_match: bool = False,
     include_favicon: bool = False,
+    auto_parameters: bool = False,
     include_usage: bool = True,
 ) -> str:
     """Search the web. Returns LLM-optimized results with content, scores, and URLs.
@@ -82,20 +147,19 @@ def tavily_search(
         start_date: YYYY-MM-DD format. Returns results after this date.
         end_date: YYYY-MM-DD format. Returns results before this date.
         max_results: Number of results, 0-20. Default 5.
-        chunks_per_source: Max content chunks per source (1-3). Only with advanced depth.
+        chunks_per_source: Max content chunks per source (1-3). Only with advanced/basic/fast depth.
         include_images: Include images in results.
         include_image_descriptions: Include image descriptions with images.
-        include_answer: Include LLM-generated answer. `basic` or `advanced`.
-        include_raw_content: Include cleaned HTML/markdown content.
+        include_answer: Include LLM-generated answer. `basic`/`true` for quick, `advanced` for detailed.
+        include_raw_content: Include cleaned content. `markdown`/`true` for markdown, `text` for plain text.
         include_domains: List of domains to restrict search to (max 300).
         exclude_domains: List of domains to exclude (max 150).
         country: Prioritize results from this country (only with topic=general).
         exact_match: Only return results with exact quoted phrases.
         include_favicon: Include favicon URLs.
+        auto_parameters: Let Tavily auto-tune parameters based on query intent.
         include_usage: Include credit usage in response (default True for tracking).
     """
-    t0 = time.time()
-    client, masked = _get_client()
     kwargs: dict[str, Any] = {
         "query": query,
         "search_depth": search_depth,
@@ -108,6 +172,7 @@ def tavily_search(
         "include_raw_content": include_raw_content,
         "include_favicon": include_favicon,
         "exact_match": exact_match,
+        "auto_parameters": auto_parameters,
         "include_usage": include_usage,
     }
     # 官方行为（与官方 tavily-mcp 一致）：start_date/end_date 与 time_range
@@ -126,20 +191,12 @@ def tavily_search(
         kwargs["exclude_domains"] = exclude_domains
     if country:
         kwargs["country"] = country
+    kwargs = _tool_kwargs(tavily_search, kwargs)
 
-    try:
-        resp = client.search(**kwargs)
-        credits = 0
-        if isinstance(resp, dict) and "usage" in resp:
-            usage = resp["usage"]
-            if isinstance(usage, dict):
-                credits = usage.get("credits", 0) or _est_credits(search_depth)
-        _record(masked, "search", t0, True, credits)
-        return json.dumps(resp, ensure_ascii=False, indent=2)
-    except Exception as e:
-        _log.warning("search 失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "search", t0, False, 0, str(e))
-        return json.dumps({"error": str(e), "key_used": masked})
+    def _do(client: TavilyClient):
+        return client.search(**kwargs)
+
+    return _run_with_retry("search", _do)
 
 
 @mcp.tool()
@@ -167,8 +224,6 @@ def tavily_extract(
         chunks_per_source: Max chunks per source, 1-5. Requires query.
         timeout: Max seconds per URL, 1-60.
     """
-    t0 = time.time()
-    client, masked = _get_client()
     kwargs: dict[str, Any] = {
         "urls": urls,
         "extract_depth": extract_depth,
@@ -182,18 +237,12 @@ def tavily_extract(
         kwargs["chunks_per_source"] = chunks_per_source
     if timeout:
         kwargs["timeout"] = timeout
+    kwargs = _tool_kwargs(tavily_extract, kwargs)
 
-    try:
-        resp = client.extract(**kwargs)
-        credits = 0
-        if isinstance(resp, dict) and "usage" in resp:
-            credits = resp["usage"].get("credits", 0) if isinstance(resp["usage"], dict) else 0
-        _record(masked, "extract", t0, True, credits)
-        return json.dumps(resp, ensure_ascii=False, indent=2)
-    except Exception as e:
-        _log.warning("extract 失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "extract", t0, False, 0, str(e))
-        return json.dumps({"error": str(e), "key_used": masked})
+    def _do(client: TavilyClient):
+        return client.extract(**kwargs)
+
+    return _run_with_retry("extract", _do)
 
 
 @mcp.tool()
@@ -240,8 +289,6 @@ def tavily_crawl(
         format: `markdown` or `text`.
         timeout: Max seconds for the crawl, 10-150.
     """
-    t0 = time.time()
-    client, masked = _get_client()
     kwargs: dict[str, Any] = {
         "url": url,
         "max_depth": max_depth,
@@ -268,18 +315,12 @@ def tavily_crawl(
         kwargs["exclude_domains"] = exclude_domains
     if timeout:
         kwargs["timeout"] = timeout
+    kwargs = _tool_kwargs(tavily_crawl, kwargs)
 
-    try:
-        resp = client.crawl(**kwargs)
-        credits = 0
-        if isinstance(resp, dict) and "usage" in resp:
-            credits = resp["usage"].get("credits", 0) if isinstance(resp["usage"], dict) else 0
-        _record(masked, "crawl", t0, True, credits)
-        return json.dumps(resp, ensure_ascii=False, indent=2)
-    except Exception as e:
-        _log.warning("crawl 失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "crawl", t0, False, 0, str(e))
-        return json.dumps({"error": str(e), "key_used": masked})
+    def _do(client: TavilyClient):
+        return client.crawl(**kwargs)
+
+    return _run_with_retry("crawl", _do)
 
 
 @mcp.tool()
@@ -316,8 +357,6 @@ def tavily_map(
         include_usage: Include credit usage.
         timeout: Max seconds, 10-150.
     """
-    t0 = time.time()
-    client, masked = _get_client()
     kwargs: dict[str, Any] = {
         "url": url,
         "max_depth": max_depth,
@@ -339,18 +378,12 @@ def tavily_map(
         kwargs["exclude_domains"] = exclude_domains
     if timeout:
         kwargs["timeout"] = timeout
+    kwargs = _tool_kwargs(tavily_map, kwargs)
 
-    try:
-        resp = client.map(**kwargs)
-        credits = 0
-        if isinstance(resp, dict) and "usage" in resp:
-            credits = resp["usage"].get("credits", 0) if isinstance(resp["usage"], dict) else 0
-        _record(masked, "map", t0, True, credits)
-        return json.dumps(resp, ensure_ascii=False, indent=2)
-    except Exception as e:
-        _log.warning("map 失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "map", t0, False, 0, str(e))
-        return json.dumps({"error": str(e), "key_used": masked})
+    def _do(client: TavilyClient):
+        return client.map(**kwargs)
+
+    return _run_with_retry("map", _do)
 
 
 @mcp.tool()
@@ -360,13 +393,15 @@ def tavily_research(
     citation_format: str = "numbered",
     include_domains: list[str] | None = None,
     exclude_domains: list[str] | None = None,
+    wait: bool = True,
     timeout: float = 300.0,
     poll_interval: float = 2.0,
 ) -> str:
     """AI-powered deep research producing a cited report. Takes 30-120 seconds.
 
-    Submits a research task and polls until it completes, returning the cited
-    synthesis report with sources.
+    wait=True（默认）: 提交任务并轮询直到完成，返回带引用的合成报告。
+    wait=False: 提交后立即返回 request_id，配合 tavily_research_status 轮询，
+        避免长时间阻塞当前调用。
 
     Args:
         input: Research question or topic.
@@ -374,30 +409,68 @@ def tavily_research(
         citation_format: `numbered`, `mla`, `apa`, or `chicago`.
         include_domains: Soft preference for source domains (max 20).
         exclude_domains: Hard blocklist of domains to exclude (max 20).
+        wait: If True, poll until the task completes; if False, return request_id immediately.
         timeout: Max seconds to wait for the report (default 300).
         poll_interval: Seconds between status polls.
     """
     t0 = time.time()
-    client, masked = _get_client()
     kwargs: dict[str, Any] = {}
     if include_domains:
         kwargs["include_domains"] = include_domains
     if exclude_domains:
         kwargs["exclude_domains"] = exclude_domains
 
-    try:
-        # tavily-python >= 0.7 的 research 为异步任务式 API：
-        # research(input=...) 提交任务返回 request_id，需用 get_research() 轮询结果。
-        resp = client.research(
-            input=input,
-            model=model,
-            citation_format=citation_format,
-            **kwargs,
-        )
-        request_id = resp.get("request_id") if isinstance(resp, dict) else None
-        if not request_id:
-            raise RuntimeError(f"Unexpected research response: {resp}")
+    # ── 提交任务（quota/auth 错误自动切换其他 key 重试）──────────
+    request_id = None
+    client, masked = _get_client()
+    last_err = ""
+    for attempt in range(3):
+        try:
+            # tavily-python >= 0.7 的 research 为异步任务式 API：
+            # research(input=...) 提交任务返回 request_id，需用 get_research() 轮询结果。
+            resp = client.research(
+                input=input, model=model, citation_format=citation_format, **kwargs,
+            )
+            request_id = resp.get("request_id") if isinstance(resp, dict) else None
+            if not request_id:
+                raise RuntimeError(f"Unexpected research response: {resp}")
+            break
+        except Exception as e:  # noqa: BLE001
+            err = str(e)
+            cat = _classify_error(err)
+            if cat in ("quota", "auth") and attempt < 2:
+                _log.info("research 提交失败(%s)，切换 key 重试: %s", cat, err[:200])
+                try:
+                    client, masked = _get_client()
+                except RuntimeError as e2:
+                    return json.dumps({"error": str(e2)}, ensure_ascii=False)
+                continue
+            last_err = err
+            # 官方要求流式（HTTP 400 research_stream_required）：自动回退 stream=true 组装报告
+            if "research_stream_required" in err or ("stream" in err.lower() and "required" in err.lower()):
+                _log.info("research 要求流式，自动回退 stream=true: %s", err[:200])
+                try:
+                    last = _research_stream(client, input, model, citation_format, timeout, kwargs)
+                    _record(masked, "research", t0, True, 0)
+                    return json.dumps(last, ensure_ascii=False, indent=2)
+                except Exception as e2:  # noqa: BLE001
+                    _log.warning("research 流式回退失败 masked=%s: %s", masked, str(e2)[:300])
+                    _record(masked, "research", t0, False, 0, str(e2))
+                    return json.dumps({"error": str(e2), "key_used": masked}, ensure_ascii=False)
+            _log.warning("research 提交失败 masked=%s: %s", masked, err[:300])
+            _record(masked, "research", t0, False, 0, err)
+            return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
+    if request_id is None:
+        return json.dumps({"error": last_err, "key_used": masked}, ensure_ascii=False)
 
+    # ── wait=False：提交即返回，供客户端用 tavily_research_status 轮询 ──
+    if not wait:
+        _record(masked, "research", t0, True, 0, request_id=request_id)
+        return json.dumps({"request_id": request_id, "status": "submitted", "key_used": masked},
+                          ensure_ascii=False)
+
+    # ── wait=True：轮询直到完成 ─────────────────────────────────
+    try:
         deadline = time.time() + timeout
         last = resp
         while time.time() < deadline:
@@ -406,34 +479,40 @@ def tavily_research(
             status = last.get("status", "") if isinstance(last, dict) else ""
             if status in ("completed", "failed", "error", "cancelled"):
                 break
-
-        credits = 0
-        if isinstance(last, dict) and "usage" in last:
-            credits = last["usage"].get("credits", 0) if isinstance(last["usage"], dict) else 0
-        _record(masked, "research", t0, True, credits)
+        _record(masked, "research", t0, True, _usage_credits(last), request_id=request_id)
         return json.dumps(last, ensure_ascii=False, indent=2)
-    except Exception as e:
-        err_str = str(e)
-        # 官方要求流式（HTTP 400 research_stream_required）：自动回退 stream=true 组装报告
-        if "research_stream_required" in err_str or ("stream" in err_str.lower() and "required" in err_str.lower()):
-            _log.info("research 要求流式，自动回退 stream=true: %s", err_str[:200])
-            try:
-                last = _research_stream(client, input, model, citation_format, timeout, kwargs)
-                _record(masked, "research", t0, True, 0)
-                return json.dumps(last, ensure_ascii=False, indent=2)
-            except Exception as e2:  # noqa: BLE001
-                _log.warning("research 流式回退失败 masked=%s: %s", masked, str(e2)[:300])
-                _record(masked, "research", t0, False, 0, str(e2))
-                return json.dumps({"error": str(e2), "key_used": masked})
-        _log.warning("research 失败 masked=%s: %s", masked, err_str[:300])
-        _record(masked, "research", t0, False, 0, err_str)
-        return json.dumps({"error": err_str, "key_used": masked})
+    except Exception as e:  # noqa: BLE001
+        _log.warning("research 轮询失败 masked=%s: %s", masked, str(e)[:300])
+        _record(masked, "research", t0, False, 0, str(e), request_id=request_id)
+        return json.dumps({"error": str(e), "request_id": request_id, "key_used": masked},
+                          ensure_ascii=False)
+
+
+@mcp.tool()
+def tavily_research_status(request_id: str) -> str:
+    """Check the status/result of a previously submitted research task.
+
+    Args:
+        request_id: The request ID returned by tavily_research (wait=false).
+    """
+    t0 = time.time()
+    try:
+        client, masked = _get_client()
+        resp = client.get_research(request_id)
+        _record(masked, "research-status", t0, True, _usage_credits(resp), request_id=request_id)
+        return json.dumps(resp, ensure_ascii=False, indent=2)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("research-status 失败 masked=%s: %s", masked, str(e)[:300])
+        _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id)
+        return json.dumps({"error": str(e), "request_id": request_id}, ensure_ascii=False)
 
 
 @mcp.tool()
 def tavily_pool_status() -> str:
-    """Get API key pool status — active keys, usage stats, recent activity."""
+    """Get API key pool status — active keys, usage stats, anomalies, aggregate capacity."""
     stats = pool.get_stats()
+    stats["aggregate"] = pool.get_aggregate()
+    stats["anomalies"] = pool.detect_anomalies()
     return json.dumps(stats, ensure_ascii=False, indent=2)
 
 

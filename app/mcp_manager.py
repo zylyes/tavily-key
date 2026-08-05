@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+from paths import runtime_dir
 from settings import get_settings, mcp_is_network, mcp_url
 
 _lock = threading.Lock()
@@ -23,14 +24,7 @@ _proc: subprocess.Popen | None = None
 _owned_pids: set[int] = set()
 
 
-def _app_dir() -> Path:
-    """数据/日志文件目录：打包后为 exe 所在目录，开发时为项目根目录（app 的上级）。"""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
-
-
-LOG_PATH = _app_dir() / "mcp_server.log"
+LOG_PATH = runtime_dir() / "mcp_server.log"
 
 
 def _python_exe() -> str:

@@ -193,6 +193,46 @@ def test_sync_usage_updates_credits(pool, monkeypatch):
     assert k.credits_limit == 1000
 
 
+def test_sync_usage_unlimited_key_falls_back_to_plan_limit(pool, monkeypatch):
+    """key.limit 为 null（无限额）时，回退账户套餐额度作为 credits_limit。"""
+    pool.add_key(KEY1)
+
+    class _UnlimitedResp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "key": {"usage": 30, "limit": None, "search_usage": 30, "crawl_usage": 0,
+                        "extract_usage": 0, "map_usage": 0, "research_usage": 0},
+                "account": {"current_plan": "Bootstrap", "plan_usage": 30, "plan_limit": 1000},
+            }
+
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _UnlimitedResp())
+    results = pool.sync_usage()
+    assert results[0]["ok"] is True
+    k = pool.get_key(MASK1)
+    assert k.credits_limit == 1000  # 回退到 plan_limit
+    assert k.plan_limit == 1000
+    assert round(k.usage_pct, 1) == 3.0  # 30 / 1000
+
+
+def test_usage_pct_falls_back_to_plan_limit(pool):
+    """未同步（credits_limit=0）但已有 plan_limit 时，usage_pct 回退套餐额度计算。"""
+    pool.add_key(KEY1)
+    conn = pool._get_conn()
+    conn.execute(
+        "UPDATE api_keys SET credits_used=150, plan='Bootstrap', plan_usage=150, plan_limit=1000 WHERE masked=?",
+        (MASK1,),
+    )
+    conn.commit()
+    k = pool.get_key(MASK1)
+    assert k.credits_limit == 0
+    assert round(k.usage_pct, 1) == 15.0  # 150 / 1000（回退 plan_limit）
+    agg = pool.get_aggregate()
+    assert agg["total_limit"] == 1000
+    assert agg["remaining"] == 850
+
+
 def test_sync_usage_http_error_reported(pool, monkeypatch):
     pool.add_key(KEY1)
 
@@ -206,3 +246,195 @@ def test_sync_usage_http_error_reported(pool, monkeypatch):
     results = pool.sync_usage()
     assert results[0]["ok"] is False
     assert "401" in results[0]["error"]
+
+
+def test_sync_usage_masked_filters_and_only_updates_selected(pool, monkeypatch):
+    """指定 masked 列表时只更新选中（且 active）的 Key。"""
+    pool.add_keys_batch([KEY1, KEY2])
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _FakeUsageResp())
+    results = pool.sync_usage(masked=[MASK1])
+    assert len(results) == 1
+    assert results[0]["masked"] == MASK1
+    assert results[0]["ok"] is True
+    # 只更新了 KEY1，KEY2 保持原样
+    assert pool.get_key(MASK1).credits_used == 42
+    assert pool.get_key(MASK2).credits_used == 0
+
+
+def test_sync_usage_masked_inactive_skipped(pool, monkeypatch):
+    pool.add_key(KEY1)
+    pool.deactivate_key(MASK1, "manual")
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _FakeUsageResp())
+    assert pool.sync_usage(masked=[MASK1]) == []  # inactive 不发起请求
+    assert pool.sync_usage_one(MASK1) is None
+
+
+def test_sync_usage_one_returns_result(pool, monkeypatch):
+    pool.add_key(KEY1)
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _FakeUsageResp())
+    r = pool.sync_usage_one(MASK1)
+    assert r is not None and r["ok"] is True and r["usage"] == 42
+
+
+# ── 额度耗尽（is_exhausted）与错误分类 ────────────────────────
+def test_classify_error_categories():
+    from key_pool import _classify_error
+    assert _classify_error("401 Unauthorized: invalid api key") == "auth"
+    assert _classify_error("403 Forbidden") == "auth"
+    assert _classify_error("432 This request exceeds your plan limit") == "quota"
+    assert _classify_error("433 paygo limit exceeded") == "quota"
+    assert _classify_error("429 too many requests") == "rate"
+    assert _classify_error("request timed out") == "other"
+
+
+def test_record_quota_marks_exhausted(pool):
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, False, 0, "432: plan limit exceeded")
+    assert pool.get_key(MASK1).is_exhausted is True
+    # 耗尽 key 移出轮询
+    assert pool.next_key() is None
+
+
+def test_exhausted_key_skipped_in_rotation(pool):
+    pool.add_keys_batch([KEY1, KEY2])
+    pool.mark_exhausted(MASK1, "quota")
+    seen = {pool.next_key()[1] for _ in range(3)}
+    assert seen == {MASK2}
+
+
+def test_mark_recovered_clears_exhausted(pool):
+    pool.add_key(KEY1)
+    pool.mark_exhausted(MASK1, "quota")
+    pool.mark_recovered(MASK1)
+    assert pool.get_key(MASK1).is_exhausted is False
+    assert pool.next_key() is not None
+
+
+def test_activate_clears_exhausted(pool):
+    pool.add_key(KEY1)
+    pool.mark_exhausted(MASK1, "quota")
+    pool.activate_key(MASK1)
+    assert pool.get_key(MASK1).is_exhausted is False
+
+
+def test_record_auth_deactivates(pool):
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, False, 0, "401 Unauthorized")
+    assert not pool.get_key(MASK1).is_active
+
+
+def test_record_rate_keeps_active(pool):
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, False, 0, "429 Too Many Requests")
+    k = pool.get_key(MASK1)
+    assert k.is_active and not k.is_exhausted
+    assert k.error_count == 1
+
+
+def test_record_request_id_logged(pool):
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, True, 1, request_id="req-123")
+    logs = pool.get_recent_logs(5)
+    assert logs[0]["request_id"] == "req-123"
+
+
+# ── 令牌桶限流 ───────────────────────────────────────────────
+def test_token_bucket_limits_rate():
+    from key_pool import _TokenBucket
+    b = _TokenBucket(60)  # 60/min = 1/sec，容量 60
+    assert all(b.try_acquire() == 0.0 for _ in range(60))
+    assert b.try_acquire() > 0.0  # 第 61 次需要等待
+
+
+def test_next_available_key_skips_limited(monkeypatch, pool):
+    pool.add_keys_batch([KEY1, KEY2])
+    for _ in range(90):
+        pool._consume_bucket(MASK1)  # 打满 KEY1 令牌桶
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"rate_limit_rpm": 90})
+    _, masked = pool.next_available_key()
+    assert masked == MASK2  # KEY1 受限被跳过
+
+
+# ── /usage 缓存与月度恢复 ────────────────────────────────────
+def test_sync_usage_cache_hits(monkeypatch, pool):
+    pool.add_key(KEY1)
+    calls = {"n": 0}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            calls["n"] += 1
+            return {"key": {"usage": 42, "limit": 1000}, "account": {"current_plan": "Researcher"}}
+
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _Resp())
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"usage_cache_ttl": 60})
+    assert pool.sync_usage()[0]["ok"] is True
+    assert pool.sync_usage()[0]["ok"] is True
+    assert calls["n"] == 1  # 第二次走缓存
+
+
+def test_sync_usage_recovers_exhausted(monkeypatch, pool):
+    pool.add_key(KEY1)
+    pool.mark_exhausted(MASK1, "quota")
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"key": {"usage": 0, "limit": 1000}, "account": {"current_plan": "Researcher"}}
+
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _Resp())
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"usage_cache_ttl": 60})
+    results = pool.sync_usage()
+    assert results[0]["recovered"] is True
+    assert not pool.get_key(MASK1).is_exhausted
+
+
+def test_get_aggregate(pool):
+    pool.add_keys_batch([KEY1, KEY2])
+    conn = pool._get_conn()
+    conn.execute("UPDATE api_keys SET credits_used=400, credits_limit=1000 WHERE masked=?", (MASK1,))
+    conn.execute("UPDATE api_keys SET credits_used=100, credits_limit=1000 WHERE masked=?", (MASK2,))
+    conn.commit()
+    agg = pool.get_aggregate()
+    assert agg["total_limit"] == 2000
+    assert agg["total_used"] == 500
+    assert agg["remaining"] == 1500
+
+
+# ── 异常识别 ────────────────────────────────────────────────
+def test_detect_anomalies_suspected_leak(pool, monkeypatch):
+    pool.add_key(KEY1)
+    conn = pool._get_conn()
+    now = key_pool.time.time()
+    for _ in range(10):
+        conn.execute(
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, created_at) VALUES (?,?,?,?,?)",
+            (MASK1, "search", 1, 1, now),
+        )
+    conn.execute("UPDATE api_keys SET credits_used=200, credits_limit=1000 WHERE masked=?", (MASK1,))
+    conn.commit()
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"anomaly_thresholds": {"leak_diff_credits": 50}})
+    anomalies = pool.detect_anomalies()
+    assert anomalies and "suspected_leak" in anomalies[0]["flags"]
+
+
+def test_detect_anomalies_high_error_rate(pool, monkeypatch):
+    pool.add_key(KEY1)
+    conn = pool._get_conn()
+    now = key_pool.time.time()
+    for _ in range(7):
+        conn.execute(
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, created_at) VALUES (?,?,?,?,?,?)",
+            (MASK1, "search", 0, 0, "request timed out", now),
+        )
+    for _ in range(3):
+        conn.execute(
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, created_at) VALUES (?,?,?,?,?)",
+            (MASK1, "search", 1, 1, now),
+        )
+    conn.commit()
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"anomaly_thresholds": {"error_rate": 0.3}})
+    anomalies = pool.detect_anomalies()
+    assert anomalies and "high_error_rate" in anomalies[0]["flags"]

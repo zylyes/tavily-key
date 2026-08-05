@@ -21,7 +21,7 @@ sudo ./install.sh --domain api.example.com --port 8000 --token 你的访问令�
 | --- | --- |
 | 复制项目 | 复制到 `/opt/tavily`（可用 `--dir` 修改） |
 | 安装依赖 | 创建 `.venv` 并安装 `requirements.txt` |
-| 生成配置 | 生成 `config.json`（mode=server，绑定域名，监听 0.0.0.0） |
+| 生成配置 | 生成 `data/config.json`（mode=server，绑定域名，监听 0.0.0.0） |
 | 安装服务 | 注册并启动 `tavily-dashboard` systemd 服务，注册 `tavily-mcp` |
 | Nginx | 生成 `/etc/nginx/conf.d/tavily.conf` 反向代理绑定域名 |
 
@@ -33,8 +33,9 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
 # 2. 生成 server 模式配置
-cp deploy/linux-server/config.server.json config.json
-# 编辑 config.json: 填写 domain、auth_token，host 保持 0.0.0.0
+mkdir -p data
+cp deploy/linux-server/config.server.json data/config.json
+# 编辑 data/config.json: 填写 domain、auth_token，host 保持 0.0.0.0
 
 # 3. 安装 systemd 服务
 sudo cp deploy/linux-server/tavily-dashboard.service /etc/systemd/system/
@@ -43,7 +44,7 @@ sudo systemctl enable --now tavily-dashboard
 
 # 4. 配置 Nginx 反向代理（绑定域名）
 sudo cp deploy/linux-server/nginx.conf.example /etc/nginx/conf.d/tavily.conf
-# 编辑: server_name 换成你的域名，proxy_pass 端口与 config.json 一致
+# 编辑: server_name 换成你的域名，proxy_pass 端口与 data/config.json 一致
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
@@ -53,7 +54,7 @@ sudo nginx -t && sudo systemctl reload nginx
 | --- | --- |
 | `install.sh` | 一键部署脚本 |
 | `config.server.json` | server 模式配置模板 |
-| `tavily-dashboard.service` | Dashboard systemd 服务（读 config.json 启动） |
+| `tavily-dashboard.service` | Dashboard systemd 服务（读 data/config.json 启动） |
 | `tavily-mcp.service` | MCP Server systemd 服务（默认不启动，需时手动启动） |
 | `nginx.conf.example` | Nginx 反向代理 + 域名绑定模板（含 HTTPS 示例） |
 
@@ -70,4 +71,4 @@ systemctl start tavily-mcp             # 启动 MCP
 
 - 务必在**设置页**设置**访问令牌**，防止公网裸奔。
 - 如需 HTTPS，推荐 `certbot --nginx -d api.example.com` 一键签发并自动续期。
-- 修改 `config.json` 后需 `systemctl restart tavily-dashboard` 生效。
+- 修改 `data/config.json` 后需 `systemctl restart tavily-dashboard` 生效。

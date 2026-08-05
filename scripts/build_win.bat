@@ -2,7 +2,11 @@
 rem ============================================================
 rem  Tavily Key Pool - Windows one-click build script
 rem
-rem  Main output: dist\Tavily.exe (single-file app, no install)
+rem  Main output: out\dist\Tavily\  (onedir app folder)
+rem    - out\dist\Tavily\Tavily.exe : main launcher (windowed)
+rem    - out\dist\Tavily\_internal\ : bundled libs/data (PyInstaller 6)
+rem    - Runtime data (config/db/logs) is written to a data\ folder next
+rem      to the exe (out\dist\Tavily\data) and preserved across rebuilds.
 rem    - Double-click -> native app window (WebView2 wrapper)
 rem    - Panel has MCP service on/off, settings, auto-copy URL
 rem    - Panel spawns "Tavily.exe --mcp" as child process
@@ -16,13 +20,23 @@ echo.
 echo === Tavily Key Pool Windows build ===
 echo.
 
-rem -- Stop any running Tavily.exe (a running instance locks dist\Tavily.exe
+rem -- Stop any running Tavily.exe (a running instance locks the output exe
 rem    so PyInstaller cannot overwrite it; the app must be closed to rebuild).
 taskkill /IM Tavily.exe /F >nul 2>nul
 rem -- Wait briefly so the killed process releases its file handles.
 ping -n 3 127.0.0.1 >nul 2>nul
-rem -- Remove a stale temp file left by an earlier aborted rename, if any.
-del "dist\Tavily.old.tmp" >nul 2>nul
+rem -- Fresh work dir: out\build (PyInstaller intermediate files).
+rem    NOTE: PyInstaller onedir rebuild wipes out\dist\Tavily entirely,
+rem    so its data\ (config/db/logs) is backed up first and restored after.
+rd /s /q "out\build" >nul 2>nul
+if not exist "out\dist" mkdir "out\dist" >nul 2>nul
+set "APP_DIR=out\dist\Tavily"
+set "DATA_BACKUP=out\dist\.data-backup"
+if exist "%APP_DIR%\data" (
+  echo Preserving %APP_DIR%\data across rebuild ...
+  rd /s /q "%DATA_BACKUP%" >nul 2>nul
+  move "%APP_DIR%\data" "%DATA_BACKUP%" >nul 2>nul
+)
 
 rem -- Pick Python (prefer venv; MCP deps only in venv) --------
 set "PY=python"
@@ -43,56 +57,55 @@ if errorlevel 1 (
 )
 
 echo.
-echo [1/1] Building Tavily.exe (Dashboard + MCP service)...
-rem Note: do NOT use --collect-all mcp (mcp.cli exits via sys.exit on import).
-rem       Collect the core subpackages explicitly instead.
-%PY% -m PyInstaller --noconfirm --clean --onefile --noconsole ^
-  --name Tavily ^
-  --icon assets\tavily.ico ^
-  --add-data "app\dashboard.html;." ^
-  --add-data "assets\tavily.ico;." ^
-  --paths app ^
-  --collect-all tavily ^
-  --collect-all webview ^
-  --hidden-import mcp_server ^
-  --hidden-import uvicorn.loops.auto ^
-  --hidden-import uvicorn.loops.asyncio ^
-  --hidden-import uvicorn.protocols.http.auto ^
-  --hidden-import uvicorn.protocols.http.h11_impl ^
-  --hidden-import uvicorn.protocols.websockets.auto ^
-  --hidden-import uvicorn.lifespan.on ^
-  --collect-submodules mcp.server ^
-  --collect-submodules mcp.shared ^
-  --collect-submodules mcp.transport ^
-  --collect-submodules mcp.session ^
-  app\dashboard.py
+echo [1/1] Building Tavily (onedir)...
+rem Build from Tavily.spec (single source of truth: datas/binaries/hiddenimports).
+rem onedir mode has NO %%TEMP%%\_MEI* unpack dir, so there is no
+rem "Failed to remove temporary directory" popup on exit, and startup is faster.
+%PY% -m PyInstaller --noconfirm --clean ^
+  --workpath out\build ^
+  --distpath out\dist ^
+  Tavily.spec
 if errorlevel 1 (
   echo.
   echo *** Build FAILED ***
   echo See the error messages above.
-  echo If it says dist\Tavily.exe is being used by another process,
+  echo If it says out\dist\Tavily is locked by another process,
   echo close the running Tavily app first, then run this script again.
   echo.
-  goto :end
+  goto :restore_data
 )
 
 echo.
 echo === Build complete! ===
-echo   Output: %cd%\dist\Tavily.exe
+echo   Output: %cd%\out\dist\Tavily\
+echo     - Tavily.exe  : double-click to open the native app window
+echo     - _internal\  : bundled libraries/data (keep with the exe)
+echo     - data\       : runtime config/db/logs (auto-created)
 echo.
 echo   Usage:
-echo     - Double-click Tavily.exe - opens native app window (WebView2)
+echo     - Double-click out\dist\Tavily\Tavily.exe - native app window (WebView2)
 echo     - Panel "MCP" tab can start/stop the MCP service, URL auto-copied
 echo     - Listens on 0.0.0.0 by default, LAN devices can access
 echo.
 echo   Notes:
-echo     - First run auto-generates config.json and tavily_keys.db (next to exe).
-echo     - MCP service log: mcp_server.log (next to exe).
+echo     - Runtime data lives in a data\ folder next to the exe:
+echo       data\config.json, data\tavily_keys.db, data\*.log, data\.tavily-secret.key.
+echo     - Old config/db/logs left at the old locations are auto-migrated
+echo       into data\ on first run (no data loss).
+echo     - Distribute by zipping the whole out\dist\Tavily\ folder.
 echo.
 echo   (Optional) To point an AI client at this machine via stdio:
 echo     Set the AI client MCP command to:  Tavily.exe --mcp
-echo     And set mcp_transport to "stdio" in config.json
+echo     And set mcp_transport to "stdio" in data\config.json
 echo.
+goto :restore_data
+
+:restore_data
+rem -- Restore preserved runtime data back next to the freshly built exe.
+if exist "%DATA_BACKUP%" (
+  if not exist "%APP_DIR%" mkdir "%APP_DIR%"
+  move "%DATA_BACKUP%" "%APP_DIR%\data" >nul 2>nul
+)
 goto :end
 
 :end

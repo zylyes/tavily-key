@@ -296,7 +296,7 @@ python app/cli.py remove tvly-xxx****yyy       # 删除
 - **request_log 表**：历史请求日志不会被清除，仍然可以通过 `recent` 命令查询到该 Key 过去的调用记录；
 - **轮询分发**：已删除的 Key 立即从轮询候选集中移除，不再承担任何请求。
 
-数据库为 SQLite 文件 `tavily_keys.db`（位于项目根目录，自动创建），包含 `api_keys` 和 `request_log` 两张表。若整体删除该数据库文件，密钥池会重建为空库，但已录入的 Key 也会全部丢失，操作前建议先备份。
+数据库为 SQLite 文件 `tavily_keys.db`（位于 `data/` 目录，自动创建；路径由 `app/paths.py` 的 `runtime_dir()` 统一管理），包含 `api_keys` 和 `request_log` 两张表。若整体删除该数据库文件，密钥池会重建为空库，但已录入的 Key 也会全部丢失，操作前建议先备份。
 
 ## 相关页面
 

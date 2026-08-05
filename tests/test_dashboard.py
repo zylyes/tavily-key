@@ -58,3 +58,24 @@ def test_settings_accepts_valid_patch(client, monkeypatch, tmp_path):
     r = client.post("/api/settings", json={"mcp_token": "pool-token"})
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def test_anomalies_endpoint(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    monkeypatch.setattr(dashboard, "pool", dashboard.KeyPool())
+    r = client.get("/api/keys/anomalies")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert isinstance(body["anomalies"], list)
+
+
+def test_aggregate_endpoint(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    monkeypatch.setattr(dashboard, "pool", dashboard.KeyPool())
+    r = client.get("/api/usage/aggregate")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    for key in ("total_keys", "active_keys", "remaining", "total_limit", "total_used"):
+        assert key in body["aggregate"]

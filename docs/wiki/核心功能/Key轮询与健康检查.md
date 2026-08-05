@@ -67,7 +67,7 @@ class ApiKey:
 
 ### 数据库表结构
 
-`KeyPool` 使用 SQLite 存储，默认数据库文件为 `key_pool.py` 同目录下的 `tavily_keys.db`，并开启 WAL 模式以提升并发读写性能。两张核心表：
+`KeyPool` 使用 SQLite 存储，默认数据库文件为 `data/` 目录下的 `tavily_keys.db`（路径由 `app/paths.py` 的 `runtime_dir()` 统一管理），并开启 WAL 模式以提升并发读写性能。两张核心表：
 
 - `api_keys`：Key 主表，`key` 为唯一主键，`is_active` 以 0/1 表示停用/启用。
 - `request_log`：请求日志表，记录每次请求的端点、成功与否、延迟与消耗额度，供统计与审计使用。

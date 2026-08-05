@@ -85,3 +85,68 @@ def test_research_stream_helper_parses_sse():
         client, "q", "mini", "numbered", 10.0, {}
     )
     assert result["content"] == "Hello World"
+
+
+# ── 新增：新参数 / 重试 / 异步 research ───────────────────────
+def test_tavily_search_auto_parameters(monkeypatch):
+    captured = {}
+
+    class _C:
+        def search(self, **kw):
+            captured.update(kw)
+            return {"query": kw["query"], "results": []}
+
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    mcp_server.tavily_search("q", auto_parameters=True)
+    assert captured.get("auto_parameters") is True
+
+
+def test_run_with_retry_switches_key_on_quota(monkeypatch):
+    state = {"calls": 0}
+
+    class _Bad:
+        def search(self, **kw):
+            raise Exception("432 plan limit exceeded")
+
+    class _Good:
+        def search(self, **kw):
+            return {"results": [{"title": "t", "url": "u", "content": "c"}]}
+
+    def fake_get_client():
+        state["calls"] += 1
+        if state["calls"] == 1:
+            return _Bad(), "tvly-bad***"
+        return _Good(), "tvly-good***"
+
+    monkeypatch.setattr(mcp_server, "_get_client", fake_get_client)
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    out = json.loads(mcp_server._run_with_retry("search", lambda c: c.search(query="q")))
+    assert state["calls"] == 2
+    assert out["results"][0]["title"] == "t"
+
+
+def test_tavily_research_wait_false_returns_request_id(monkeypatch):
+    class _C:
+        def research(self, **kw):
+            return {"request_id": "rid-1"}
+
+        def get_research(self, request_id):
+            return {"status": "completed", "content": "x"}
+
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    out = json.loads(mcp_server.tavily_research("q", wait=False))
+    assert out["request_id"] == "rid-1"
+    assert out["status"] == "submitted"
+
+
+def test_tavily_research_status_tool(monkeypatch):
+    class _C:
+        def get_research(self, request_id):
+            return {"status": "completed", "content": "done"}
+
+    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    out = json.loads(mcp_server.tavily_research_status("rid-1"))
+    assert out["status"] == "completed"

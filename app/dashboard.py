@@ -134,6 +134,8 @@ def logo():
 def api_stats():
     stats = pool.get_stats()
     stats["logs"] = pool.get_recent_logs(50)
+    stats["aggregate"] = pool.get_aggregate()
+    stats["anomalies"] = pool.detect_anomalies()
     return stats
 
 
@@ -181,12 +183,39 @@ def api_health_one(payload: dict = Body(...)):
     return {"ok": True, "result": {"masked": masked, "alive": False, "skipped": True, "error": "inactive key skipped"}}
 
 
+@app.get("/api/keys/anomalies")
+def api_keys_anomalies():
+    """结合本地调用记录与官方用量，识别异常 Key（泄露/耗尽/高错误率/静默/慢）。"""
+    return {"ok": True, "anomalies": pool.detect_anomalies()}
+
+
+@app.get("/api/usage/aggregate")
+def api_usage_aggregate():
+    """全池聚合容量：剩余总积分、已用总积分、可用 key 数。"""
+    return {"ok": True, "aggregate": pool.get_aggregate()}
+
+
 @app.post("/api/keys/usage-sync")
 def api_keys_usage_sync():
     """从 Tavily 官方 /usage 同步所有 active key 的 billing cycle 真实用量。"""
     results = pool.sync_usage()
     ok_count = sum(1 for r in results if r.get("ok"))
     return {"ok": True, "synced": ok_count, "failed": len(results) - ok_count, "results": results}
+
+
+@app.post("/api/keys/usage-sync/one")
+def api_keys_usage_sync_one(payload: dict = Body(...)):
+    """更新单个 Key 的官方用量（供面板逐个进度展示）。"""
+    masked = (payload.get("masked") or "").strip()
+    k = pool.get_key(masked)
+    if k is None:
+        return {"ok": True, "result": {"masked": masked, "ok": False, "error": "key not found"}}
+    if not k.is_active:
+        return {"ok": True, "result": {"masked": masked, "ok": False, "skipped": True, "error": "inactive key skipped"}}
+    result = pool.sync_usage_one(masked)
+    if result is None:
+        result = {"masked": masked, "ok": False, "error": "sync failed"}
+    return {"ok": True, "result": result}
 
 
 # ── 设置 ───────────────────────────────────────────────────────
@@ -398,11 +427,46 @@ class _WindowApi:
         _invoke_gui(_do)
 
 
+def _work_area() -> tuple[int, int, int, int]:
+    """主屏工作区（排除任务栏）: (left, top, width, height)。
+
+    任意线程均可调用；失败时回退常见 1080p 桌面尺寸。
+    """
+    try:
+        work = ctypes.wintypes.RECT()
+        # SPI_GETWORKAREA = 0x0030
+        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)
+        w = work.right - work.left
+        h = work.bottom - work.top
+        if w > 0 and h > 0:
+            return work.left, work.top, w, h
+    except Exception:
+        pass
+    return 0, 0, 1920, 1080
+
+
+def _centered_pos(width: int, height: int) -> tuple[int, int]:
+    """计算窗口在主屏工作区居中时的 (x, y) 坐标。"""
+    left, top, ww, wh = _work_area()
+    return left + max(0, (ww - width) // 2), top + max(0, (wh - height) // 2)
+
+
 def _center_window(*_args) -> None:
     """将窗口居中于主屏工作区（首次显示时调用，任意线程均可）。"""
     try:
         user32 = ctypes.windll.user32
-        hwnd = _HWND or int(user32.GetForegroundWindow())
+        # 优先用 GUI 线程捕获的真实句柄；未就绪时从 pywebview window 的
+        # native（WinForms Form）取 Handle；最后才回退前台窗口。
+        hwnd = _HWND
+        if not hwnd:
+            try:
+                w = _window()
+                if w is not None:
+                    hwnd = _handle_of(getattr(w, "native", None))
+            except Exception:
+                pass
+        if not hwnd:
+            hwnd = int(user32.GetForegroundWindow())
         if not hwnd:
             return
         rect = ctypes.wintypes.RECT()
@@ -411,10 +475,7 @@ def _center_window(*_args) -> None:
         height = rect.bottom - rect.top
         if width <= 0 or height <= 0:
             return
-        work = ctypes.wintypes.RECT()
-        user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work), 0)  # SPI_GETWORKAREA
-        x = work.left + (work.right - work.left - width) // 2
-        y = work.top + (work.bottom - work.top - height) // 2
+        x, y = _centered_pos(width, height)
         # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
         user32.SetWindowPos(hwnd, 0, x, y, 0, 0, 0x0001 | 0x0004 | 0x0010)
     except Exception:
@@ -521,9 +582,27 @@ def _harden_webview() -> None:
                 settings.IsGeneralAutofillEnabled = False
             except Exception:
                 pass
+            # 禁用缩放（Ctrl+滚轮）并强制 100% 缩放，避免 DPI/缩放导致内容显示不全
+            try:
+                settings.IsZoomControlEnabled = False
+            except Exception:
+                pass
+            try:
+                core.ZoomFactor = 1.0
+            except Exception:
+                pass
             # 事件订阅需持有实例方法引用，防止委托被 GC 回收
             self._on_permission = _on_permission
             core.PermissionRequested += self._on_permission
+        except Exception:
+            pass
+        # 确保 WebView2 控件始终填满窗体客户区（防止内容被窗口边缘截断）
+        try:
+            import System.Windows.Forms as WinForms  # noqa: N812
+            self.webview.Dock = WinForms.DockStyle.Fill
+            self.webview.BringToFront()
+            if self.form is not None:
+                self.webview.Size = self.form.ClientSize
         except Exception:
             pass
         # 在 GUI 线程捕获真实窗口句柄（供后台线程的 _WindowApi 使用）
@@ -548,6 +627,68 @@ def _keep_alive() -> None:
         pass
 
 
+def _cleanup_stale_mei() -> None:
+    """清理 %TEMP% 下残留的 PyInstaller onefile 临时目录（_MEI*）。
+
+    打包版退出时可能残留 _MEI 目录（见 _quiet_exit），下次启动时统一清理：
+      - 仅处理修改时间早于 30 分钟前的目录，避开刚解压的其他实例；
+      - 运行中实例的 _MEI 因 DLL 被占用删除必然失败，删除失败即跳过，
+        天然不会误删正在使用的目录。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        import shutil
+        import tempfile
+        import time
+
+        base = Path(tempfile.gettempdir())
+        cutoff = time.time() - 30 * 60
+        try:
+            mine = str(Path(sys._MEIPASS).resolve())
+        except Exception:  # noqa: BLE001
+            mine = None
+        for p in base.glob("_MEI*"):
+            if not p.is_dir():
+                continue
+            try:
+                if mine is not None and str(p.resolve()) == mine:
+                    continue  # 当前进程自己的临时目录
+            except OSError:
+                continue
+            try:
+                if p.stat().st_mtime > cutoff:
+                    continue  # 可能刚解压（其他实例正在启动）
+            except OSError:
+                continue
+            shutil.rmtree(p, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _quiet_exit() -> None:
+    """打包版退出兜底：onedir 正常返回；onefile 静默终止避免弹窗。
+
+    - onedir：无 %TEMP%\\_MEI* 临时目录，正常返回走 Python 清理即可；
+    - onefile：进程退出时 bootloader 会尝试删除 %TEMP%\\_MEIxxxxx，若退出
+      瞬间仍有 DLL 句柄被占用（pywebview/pythonnet 的 CLR、WebView2、
+      后台线程等）删除失败，会弹出 "Failed to remove temporary directory"
+      对话框。此时用 os._exit 跳过该检查，残留目录由下次启动时的
+      _cleanup_stale_mei() 统一清理。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    # onefile 解压目录名形如 _MEI12345；onedir 为 _internal，无需跳过
+    try:
+        is_onefile = Path(sys._MEIPASS).name.startswith("_MEI")
+    except Exception:  # noqa: BLE001
+        is_onefile = False
+    if is_onefile:
+        import os
+
+        os._exit(0)
+
+
 def run_server(host: str, port: int) -> None:
     """纯服务模式：前台运行 Web 服务（供 --server / 无界面部署）。"""
     import uvicorn
@@ -563,6 +704,9 @@ def run_app() -> None:
     """
     import time
     import webbrowser
+
+    # 清理上次退出残留的 PyInstaller 临时目录（见 _quiet_exit）
+    _cleanup_stale_mei()
 
     cfg = get_settings()
     host = cfg.get("host", "0.0.0.0")
@@ -593,11 +737,16 @@ def run_app() -> None:
             # 「关闭/最小化/启动时进托盘」设置由 _WindowApi 与 shown 事件消费
             tray_icon = TrayIcon(_window_icon_path(), on_show=_tray_show, on_exit=_tray_exit)
             tray_icon.start()
+            # 创建时即传入居中坐标（pywebview 支持 x/y，避免依赖 shown 事件时序）
+            _win_w, _win_h = 1280, 840
+            _win_x, _win_y = _centered_pos(_win_w, _win_h)
             window = webview.create_window(
                 "Tavily Key Pool",
                 url,
-                width=1280,
-                height=840,
+                width=_win_w,
+                height=_win_h,
+                x=_win_x,
+                y=_win_y,
                 min_size=(1024, 640),
                 frameless=True,
                 easy_drag=False,  # EdgeChromium 未实现 easy_drag，由 _WindowApi 自实现
@@ -640,6 +789,13 @@ def run_app() -> None:
         server.should_exit = True
     if thread is not None:
         thread.join(timeout=5)
+    # 兜底：确保 MCP 子进程已终止（lifespan shutdown 可能因超时未完成）
+    try:
+        mcp_manager.stop()
+    except Exception:  # noqa: BLE001
+        pass
+    # 打包版：静默退出，避免 bootloader 删除 _MEI 临时目录失败时弹窗
+    _quiet_exit()
 
 
 if __name__ == "__main__":

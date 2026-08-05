@@ -9,9 +9,9 @@
 - **Web 控制台**：Key 列表、请求日志、健康检查、用量统计、部署设置
 - **MCP 服务一体化管理**：面板内置 MCP 服务开关/设置，支持局域网访问，地址自动复制
 - **访问鉴权**：可设置访问令牌，保护公网部署下的 `/api/*` 接口
-- **两套部署形态**：同一代码库，通过 `config.json` 切换
+- **两套部署形态**：同一代码库，通过 `data/config.json` 切换
   - **Linux Server 版**：云服务器 + 域名对外服务（systemd + Nginx 反向代理）
-  - **Windows Local 版**：单一软件（Tavily.exe），面板 + MCP 服务一体，默认局域网可用
+  - **Windows Local 版**：onedir 应用文件夹（Tavily.exe + _internal），面板 + MCP 服务一体，默认局域网可用
 
 ## 安装
 
@@ -30,10 +30,10 @@ tavily/
 ├── scripts/           # 构建与启动脚本（build_win.bat / run_*.sh / run_dashboard.bat）
 ├── deploy/            # 两套部署包（linux-server / windows-local）
 ├── docs/              # 项目文档（wiki）
-├── dist/              # 打包产物（Tavily.exe）
+├── tests/             # 单元测试
+├── data/              # ★ 运行时数据（自动生成）：config.json / tavily_keys.db / *.log / 密钥
+├── out/               # ★ 构建产物（自动生成）：out/build（中间）+ out/dist/Tavily（onedir 应用文件夹）
 ├── Tavily.spec        # PyInstaller 构建配置（Windows 打包）
-├── config.json        # 运行配置（首次启动自动生成）
-├── tavily_keys.db     # SQLite 数据库（自动创建）
 └── README.md
 
 # 以上为示意结构，未列出全部文件
@@ -60,19 +60,19 @@ Web UI 导入：启动 dashboard 后，点击 "Add API Keys" 粘贴 key。
 
 ## 启动 Dashboard（Web 界面）
 
-启动方式自动读取根目录 `config.json`（首次启动自动生成默认配置）。
+启动方式自动读取 `data/config.json`（首次启动自动生成默认配置）。
 
 ```bash
 # Linux / macOS
-./scripts/run_dashboard.sh            # 按 config.json 启动
+./scripts/run_dashboard.sh            # 按 data/config.json 启动
 ./scripts/run_dashboard.sh 8080       # 覆盖端口
 
 # Windows
 scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard.bat
 ```
 
-> **Windows 打包版（推荐）**：双击 `Tavily.exe` 直接打开**原生应用窗口**（WebView2 网页套壳，
-> 不再跳转系统浏览器），关闭窗口即自动停止服务并退出；
+> **Windows 打包版（推荐）**：进入 `out\dist\Tavily\` 后双击 `Tavily.exe` 直接打开**原生应用窗口**
+> （WebView2 网页套壳，不再跳转系统浏览器），关闭窗口即自动停止服务并退出；
 > 如需无界面纯服务模式（供局域网/远程访问），运行 `Tavily.exe --server`。
 
 或手动启动（host/port 覆盖配置）：
@@ -87,7 +87,7 @@ scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard
 
 对外提供 tavily-search/extract/crawl/map/research 等工具，自动轮询 key。
 
-**Windows 单一软件（推荐）**：双击 `Tavily.exe` 打开**原生应用窗口**（内置面板，WebView2 网页套壳）→ 顶部「**MCP 服务**」标签页：
+**Windows 打包版（推荐）**：双击 `out\dist\Tavily\Tavily.exe` 打开**原生应用窗口**（内置面板，WebView2 网页套壳）→ 顶部「**MCP 服务**」标签页：
 
 - **启动 / 停止开关**：一键启停 MCP 服务（SSE / Streamable HTTP 网络模式）
 - **地址自动复制**：服务启动后自动复制并显示服务地址（局域网内其他设备用同一地址连接）
@@ -131,7 +131,7 @@ Web 控制台右上角「**设置**」标签页可配置：
 | 监听地址 | `0.0.0.0`（局域网） / `127.0.0.1`（仅本机） |
 | 端口 | MCP 服务端口（默认 8001） |
 
-等价地可手动编辑 `config.json`：
+等价地可手动编辑 `data/config.json`：
 
 ```json
 {
@@ -172,7 +172,7 @@ python app/cli.py remove tvly-xxx****yyy      # 删除 key
 
 ## 数据库
 
-SQLite 文件 `tavily_keys.db`，自动创建。含两张表：
+SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 
 - `api_keys` — key 列表、用量、状态
 - `request_log` — 请求日志
@@ -188,7 +188,7 @@ SQLite 文件 `tavily_keys.db`，自动创建。含两张表：
 
 | 文件 | 用途 |
 | --- | --- |
-| `config.json` | 部署 + MCP 设置（mode/domain/host/port/auth_token/mcp_*），首次启动自动生成 |
+| `data/config.json` | 部署 + MCP 设置（mode/domain/host/port/auth_token/mcp_*），首次启动自动生成 |
 | `app/settings.py` | 配置读写模块（含局域网地址推导） |
 | `app/mcp_manager.py` | MCP 服务子进程管理（面板启停、端口检测） |
 | `app/mcp_server.py` | MCP 服务本体（sse / streamable-http / stdio） |

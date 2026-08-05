@@ -17,7 +17,7 @@ Tavily API Key Pool 用于**集中管理多个 Tavily API key**，涉及密钥�
 
 ### 必须
 
-- **设置访问令牌**：Web 控制台「设置」页配置 `auth_token`，或直接编辑根目录 `config.json` 中的 `auth_token` 字段。设置后所有 `/api/*` 请求必须携带 `X-Auth-Token` 请求头。
+- **设置访问令牌**：Web 控制台「设置」页配置 `auth_token`，或直接编辑 `data/config.json` 中的 `auth_token` 字段。设置后所有 `/api/*` 请求必须携带 `X-Auth-Token` 请求头。
 - **公网部署务必启用鉴权**：将服务部署到公网（Linux Server 形态，域名对外服务）之前，**必须**设置 `auth_token`；同时建议配合 Nginx 反向代理限制访问来源。未设置令牌的实例暴露在公网时，任何能访问到端口的人都可以读取、新增、删除你的 API key。
 
 ### 密钥与配置文件管理

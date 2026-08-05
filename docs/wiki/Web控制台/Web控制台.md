@@ -48,7 +48,7 @@ uvicorn dashboard:app --host 0.0.0.0 --port 8000
 python dashboard.py
 ```
 
-启动的 host/port 由 `config.json` 决定（默认 `127.0.0.1:8000`），对应 [`dashboard.py`](file://app/dashboard.py) 末尾的入口：
+启动的 host/port 由 `data/config.json` 决定（默认 `127.0.0.1:8000`），对应 [`dashboard.py`](file://app/dashboard.py) 末尾的入口：
 
 ```python
 if __name__ == "__main__":

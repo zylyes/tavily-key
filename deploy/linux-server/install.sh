@@ -5,7 +5,7 @@
 #
 # 功能:
 #   1. 安装 Python 依赖
-#   2. 生成 server 模式 config.json（绑定域名、0.0.0.0 监听）
+#   2. 生成 server 模式 data/config.json（绑定域名、0.0.0.0 监听）
 #   3. 安装 systemd 服务（dashboard + mcp）
 #   4. 生成 Nginx 反向代理配置（绑定域名）
 set -euo pipefail
@@ -48,8 +48,9 @@ fi
 .venv/bin/pip install --upgrade pip -q
 .venv/bin/pip install -r requirements.txt -q
 
-echo "==> 3/5 生成 config.json（server 模式）"
-cat > config.json <<EOF
+echo "==> 3/5 生成 data/config.json（server 模式）"
+mkdir -p data
+cat > data/config.json <<EOF
 {
   "mode": "server",
   "domain": "$DOMAIN",
@@ -88,5 +89,5 @@ fi
 echo ""
 echo "部署完成！"
 echo "  - 访问地址: http://$DOMAIN"
-echo "  - 配置文件: $APP_DIR/config.json"
+echo "  - 配置文件: $APP_DIR/data/config.json"
 echo "  - 管理命令: systemctl {status|restart|stop} tavily-dashboard"

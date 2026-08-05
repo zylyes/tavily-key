@@ -2,25 +2,18 @@
 App settings — config.json persistence.
 
 提供部署模式(server/local)、绑定域名、监听地址、端口与访问鉴权令牌的
-读取/保存能力。配置文件位于项目根目录 config.json，首次访问时自动生成。
+读取/保存能力。配置文件位于 data/config.json（见 paths.runtime_dir），
+首次访问时自动生成。
 """
 from __future__ import annotations
 
 import json
 import socket
-import sys
 import threading
-from pathlib import Path
 
+from paths import runtime_dir
 
-def _app_dir() -> Path:
-    """配置/数据文件的存放目录：打包后为 exe 所在目录，开发时为项目根目录（app 的上级）。"""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
-
-
-CONFIG_PATH = _app_dir() / "config.json"
+CONFIG_PATH = runtime_dir() / "config.json"
 
 # mode: "server" = Linux 服务器通过域名对外提供服务
 #       "local"  = Windows 本地/局域网提供服务
@@ -43,6 +36,15 @@ DEFAULTS: dict = {
     "mcp_port": 8001,         # MCP 监听端口
     "mcp_token": "",          # MCP 服务访问令牌（非空时要求 Authorization: Bearer <token>，留空不鉴权）
     "key_strategy": "round-robin",  # Key 池负载均衡策略: round-robin | least-used
+    # ── 限流与用量同步 ────────────────────────────────────────
+    "rate_limit_rpm": 90,        # 每 key 令牌桶速率（官方 dev 100 RPM，默认留 10% 余量）
+    "rate_limit_max_wait": 1.0,  # 全部 key 受限时最多等待秒数
+    "usage_cache_ttl": 60,       # /usage 同步结果缓存 TTL（秒）
+    # ── 异常识别阈值 ──────────────────────────────────────────
+    "anomaly_thresholds": {},    # error_rate / leak_diff_credits / stale_days / slow_ratio
+    # ── MCP 默认参数与会话归属 ────────────────────────────────
+    "mcp_default_parameters": {},  # 对 search 类请求注入的默认参数（对齐官方 DEFAULT_PARAMETERS）
+    "mcp_human_id": "",          # 可选：转发 X-Human-Id 头，便于 Tavily 侧会话分析
 }
 
 MODE_DEFAULTS: dict = {
@@ -109,15 +111,18 @@ def save(patch: dict) -> dict:
     return dict(cfg)
 
 
-_INT_FIELDS = ("port", "mcp_port")
+_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl")
 _BOOL_FIELDS = (
     "autostart", "start_to_tray", "close_to_tray", "minimize_to_tray",
     "mcp_auto_start",
 )
 _STR_FIELDS = (
     "mode", "domain", "host", "auth_token",
-    "mcp_transport", "mcp_host", "mcp_token",
+    "mcp_transport", "mcp_host", "mcp_token", "mcp_human_id",
 )
+# 以 JSON 对象存储的字段：接受 dict 或 JSON 字符串
+_DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters")
+_FLOAT_FIELDS = ("rate_limit_max_wait",)
 
 
 def validate_patch(patch: dict) -> dict:
@@ -137,10 +142,27 @@ def validate_patch(patch: dict) -> dict:
             if not (0 <= n <= 65535):
                 raise ValueError(f"{k} must be in range 0-65535")
             out[k] = n
+        elif k in _FLOAT_FIELDS:
+            try:
+                out[k] = float(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{k} must be a number")
         elif k in _BOOL_FIELDS:
             out[k] = bool(v)
         elif k in _STR_FIELDS:
             out[k] = str(v or "").strip()
+        elif k in _DICT_FIELDS:
+            if isinstance(v, dict):
+                out[k] = v
+            else:
+                import json
+                try:
+                    parsed = json.loads(str(v))
+                except Exception as exc:
+                    raise ValueError(f"{k} must be a JSON object") from exc
+                if not isinstance(parsed, dict):
+                    raise ValueError(f"{k} must be a JSON object")
+                out[k] = parsed
         else:
             out[k] = v
     # 枚举/交叉校验

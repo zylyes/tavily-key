@@ -1,5 +1,5 @@
 # Tavily Dashboard 反向代理（绑定域名）
-# 使用前请将 server_name 替换为你的域名，并将 proxy_pass 端口与 config.json 保持一致。
+# 使用前请将 server_name 替换为你的域名，并将 proxy_pass 端口与 data/config.json 保持一致。
 server {
     listen 80;
     server_name your-domain.example.com;

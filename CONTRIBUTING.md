@@ -32,7 +32,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-首次启动会自动生成 `config.json`（运行配置）与 `tavily_keys.db`（SQLite 数据库），无需手动初始化。
+首次启动会自动生成 `data/config.json`（运行配置）与 `data/tavily_keys.db`（SQLite 数据库），无需手动初始化。
 
 ## 运行测试
 
@@ -95,7 +95,7 @@ scripts\run_dashboard.bat
 
   示例：`feat: 支持 least-used 轮询策略`、`fix: 修复健康检查误停用活跃 key`
 
-- 提交前检查：**不要**提交 `config.json`、`keys.txt`、`tavily_keys.db`、日志文件以及任何包含真实 API key 或令牌的内容（参见 [SECURITY.md](SECURITY.md)）
+- 提交前检查：**不要**提交 `data/` 目录（`config.json`、`tavily_keys.db`、日志等）、`keys.txt` 以及任何包含真实 API key 或令牌的内容（参见 [SECURITY.md](SECURITY.md)）
 
 ## 发起 Pull Request
 

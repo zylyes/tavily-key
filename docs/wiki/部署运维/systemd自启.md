@@ -70,9 +70,9 @@ WantedBy=default.target
 | --- | --- |
 | `After=network.target` | 等待网络就绪后再启动服务 |
 | `Type=simple` | 默认类型，`ExecStart` 启动的进程即服务主进程 |
-| `WorkingDirectory` | 工作目录，必须指向项目根目录（示例为 `/home/user/code/Tavily`），确保 `dashboard.py` 可被导入，SQLite 数据库 `tavily_keys.db` 也创建在该目录下 |
+| `WorkingDirectory` | 工作目录，必须指向项目根目录（示例为 `/home/user/code/Tavily`），确保 `dashboard.py` 可被导入，SQLite 数据库 `tavily_keys.db` 创建在 `data/` 目录下（项目根目录/data） |
 | `Environment=PYTHONUNBUFFERED=1` | 关闭 Python 输出缓冲，日志实时写入 journald |
-| `ExecStart` | 直接运行 `python3 dashboard.py`，**监听地址与端口从 `config.json` 读取**（由 `settings.py` 加载），无需在 unit 中指定 host/port |
+| `ExecStart` | 直接运行 `python3 dashboard.py`，**监听地址与端口从 `data/config.json` 读取**（由 `settings.py` 加载），无需在 unit 中指定 host/port |
 | `Restart=on-failure` | 仅当进程非正常退出时自动重启 |
 | `RestartSec=5` | 自动重启前等待 5 秒，防止频繁重启 |
 | `WantedBy=default.target` | 随用户默认会话目标（登录）启动 |
@@ -82,8 +82,8 @@ WantedBy=default.target
 ### 部署时需要注意
 
 - 请按实际环境调整 `WorkingDirectory` 和 `/usr/bin/python3` 路径，可用 `which python3` 确认解释器位置；
-- 该服务直接运行 `dashboard.py`，**不经过** `./scripts/run_dashboard.sh` 脚本，host/port 全部取自 `config.json`；
-- SQLite 数据库 `tavily_keys.db` 会在工作目录下自动创建，删除后重启服务会自动重建空库（表结构见 [数据模型](架构设计/数据模型.md)）。
+- 该服务直接运行 `dashboard.py`，**不经过** `./scripts/run_dashboard.sh` 脚本，host/port 全部取自 `data/config.json`；
+- SQLite 数据库 `tavily_keys.db` 会在 `data/` 目录下自动创建（路径由 `app/paths.py` 的 `runtime_dir()` 统一管理），删除后重启服务会自动重建空库（表结构见 [数据模型](架构设计/数据模型.md)）。
 
 ## 启用与启动
 

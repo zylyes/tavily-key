@@ -36,7 +36,7 @@ API 端点的设计遵循以下约定：
 | Web 框架 | FastAPI |
 | 默认监听地址 | `127.0.0.1` |
 | 默认端口 | `8000` |
-| 启动方式 | `python dashboard.py`（从 `config.json` 读取 host/port 后调用 `uvicorn.run`，默认 `127.0.0.1:8000`） |
+| 启动方式 | `python dashboard.py`（从 `data/config.json` 读取 host/port 后调用 `uvicorn.run`，默认 `127.0.0.1:8000`） |
 | 接口文档 | 启动后访问 `http://127.0.0.1:8000/docs`（FastAPI 自动生成 Swagger UI） |
 
 ## 端点一览
@@ -295,7 +295,7 @@ def api_health():
 | `POST /api/keys/deactivate` | `deactivate_key(masked, reason)` |
 | `POST /api/keys/activate` | `activate_key(masked)` |
 | `POST /api/health` | `check_health_all()` |
-| `GET/POST /api/settings` | `settings` 模块读写 config.json |
+| `GET/POST /api/settings` | `settings` 模块读写 data/config.json |
 
 ```mermaid
 sequenceDiagram
@@ -321,7 +321,7 @@ sequenceDiagram
 由于端点直接在处理函数中调用 `KeyPool` 方法，未做显式的异常捕获，需要注意以下行为：
 
 - **缺少必填字段**：`remove`、`deactivate`、`activate` 端点直接访问 `payload["masked"]`，若请求体缺少该字段会抛出 `KeyError`，FastAPI 返回 `500 Internal Server Error`。建议调用方始终携带完整字段。
-> 访问鉴权：设置了 `auth_token` 后，所有 `/api/*` 请求都需要携带 `X-Auth-Token` 请求头（或 `?token=` 查询参数）且值匹配，否则返回 `401`。部署设置通过 `GET/POST /api/settings` 读写，持久化于项目根目录 `config.json`（字段：mode/domain/host/port/auth_token）。
+> 访问鉴权：设置了 `auth_token` 后，所有 `/api/*` 请求都需要携带 `X-Auth-Token` 请求头（或 `?token=` 查询参数）且值匹配，否则返回 `401`。部署设置通过 `GET/POST /api/settings` 读写，持久化于 `data/config.json`（字段：mode/domain/host/port/auth_token）。
 
 - **请求体格式错误**：`add` 端点要求请求体为 JSON 对象，否则 FastAPI 返回 `422 Unprocessable Entity`。
 - **无效掩码**：若 `masked` 对应的 Key 不存在，行为取决于 `KeyPool` 对应方法的实现（可能静默忽略或抛异常）。

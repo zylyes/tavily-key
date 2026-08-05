@@ -3,21 +3,13 @@
 
 windowed 打包（Tavily.exe --noconsole）下 stdout/stderr 可能为 None，
 print 会静默丢失，因此关键模块统一走本模块的 logger 并写文件
-（开发时项目根目录 *.log，打包后 exe 同目录 *.log）。
+（日志统一写入 data/ 目录，见 paths.runtime_dir）。
 """
 from __future__ import annotations
 
 import logging
-import sys
-from pathlib import Path
 
-
-def _app_dir() -> Path:
-    """日志文件目录：打包后为 exe 所在目录，开发时为项目根目录（app 的上级）。"""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
-
+from paths import runtime_dir
 
 _root: logging.Logger | None = None
 
@@ -39,7 +31,7 @@ def setup(
 
     # 文件输出（windowed exe 下 print 不可靠，日志以文件为准）
     try:
-        path = _app_dir() / filename
+        path = runtime_dir() / filename
         path.parent.mkdir(parents=True, exist_ok=True)
         fh = logging.FileHandler(path, encoding="utf-8")
         fh.setFormatter(fmt)

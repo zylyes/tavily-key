@@ -14,19 +14,13 @@ from __future__ import annotations
 import base64
 import ctypes
 import os
-import sys
 import threading
 from pathlib import Path
 
+from paths import runtime_dir
+
 PREFIX_DPAPI = "d1:"
 PREFIX_FERNET = "f1:"
-
-
-def _app_dir() -> Path:
-    """数据文件目录：打包后为 exe 所在目录，开发时为项目根目录（app 的上级）。"""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return Path(__file__).resolve().parent.parent
 
 
 class _DPAPI:
@@ -98,7 +92,7 @@ class _FernetCipher:
         self._fernet = Fernet(self._load_or_create_key())
 
     def _key_path(self) -> Path:
-        return _app_dir() / ".tavily-secret.key"
+        return runtime_dir() / ".tavily-secret.key"
 
     def _load_or_create_key(self) -> bytes:
         p = self._key_path()

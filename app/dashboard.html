@@ -30,24 +30,29 @@
   --shadow:0 8px 30px rgba(2,6,20,.4);
 }
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{height:100%;overflow:hidden}
+html{height:100%;overflow:hidden}
 body{font:13px/1.55 var(--font);background:
   radial-gradient(1100px 480px at 12% -8%, rgba(109,124,255,.14), transparent 60%),
   radial-gradient(900px 420px at 108% -6%, rgba(59,130,246,.12), transparent 55%),
-  var(--bg);color:var(--text);display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  var(--bg);color:var(--text);display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;height:100%;overflow-y:auto}
 
 /* 顶部栏 */
-.header{display:flex;justify-content:space-between;align-items:center;padding:12px 22px;background:rgba(20,29,54,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);flex-shrink:0;user-select:none}
-.brand{display:flex;align-items:center;gap:13px}
-.logo{width:44px;height:44px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.header{display:flex;justify-content:space-between;align-items:center;padding:3px 22px;background:rgba(20,29,54,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);flex-shrink:0;user-select:none}
+.brand{display:flex;align-items:center;gap:9px}
+.logo{width:26px;height:26px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
 .logo img{width:100%;height:100%;display:block;filter:drop-shadow(0 4px 10px rgba(99,102,241,.4))}
-.brand h1{font-size:15px;font-weight:700;letter-spacing:.2px;line-height:1.2}
-.brand .subtitle{font-size:11px;color:var(--text-3);margin-top:2px}
+.brand-text{display:flex;align-items:baseline;gap:8px;min-width:0}
+.brand-text h1{font-size:12px;font-weight:700;letter-spacing:.2px;line-height:1.2;white-space:nowrap}
+.brand-text .subtitle{font-size:9.5px;color:var(--text-3);white-space:nowrap}
 .header-right{display:flex;align-items:center;gap:16px}
-.stats-bar{display:flex;gap:10px;align-items:center}
-.stat-card{display:flex;flex-direction:column;align-items:center;min-width:64px;padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:11px}
-.stat-card .stat-label{font-size:10px;color:var(--text-3);margin-bottom:2px;font-weight:500}
-.stat-card .stat-value{font-size:16px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;line-height:1.2}
+
+/* 单行信息栏：聚合池状态 + 套餐/额度，独立于头部 */
+.info-bar{display:flex;align-items:center;gap:20px;padding:9px 22px;background:rgba(27,38,66,.72);border-bottom:1px solid var(--border);flex-shrink:0;font-size:12.5px;white-space:nowrap;overflow-x:auto;scrollbar-width:none;user-select:none}
+.info-bar::-webkit-scrollbar{display:none}
+.ib-item{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+.ib-label{color:var(--text-3);font-size:11px}
+.ib-value{color:var(--text-2);font-weight:700;font-variant-numeric:tabular-nums}
+.ib-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .refresh{font-size:10px;color:var(--text-3);white-space:nowrap}
 .refresh strong{color:var(--text-2);font-weight:600}
 
@@ -82,7 +87,7 @@ body.webview .resize-handle{display:block}
 .tab svg{width:15px;height:15px;flex-shrink:0}
 .tab-panel{display:none;flex:1;flex-direction:column;min-width:0;min-height:0;margin-top:14px}
 .tab-panel.active{display:flex}
-.column{flex:1;display:flex;flex-direction:column;min-width:0}
+.column{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
 .column-body{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow-y:auto;overflow-x:auto;min-height:0;box-shadow:var(--shadow)}
 
 /* 表格 */
@@ -101,6 +106,8 @@ tbody tr:last-child td{border-bottom:none}
 .badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
 .badge-active,.badge-success{background:rgba(52,211,153,.13);color:var(--green)}
 .badge-inactive,.badge-fail{background:rgba(248,113,113,.13);color:var(--red)}
+.badge-exhausted{background:rgba(249,115,22,.15);color:#fb923c}
+.badge-warn{background:rgba(251,191,36,.15);color:#fbbf24}
 
 /* 按钮 */
 .btn{padding:6px 14px;border-radius:var(--radius-sm);border:none;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;justify-content:center;transition:filter .15s,background .15s,transform .05s;font-family:inherit}
@@ -117,7 +124,7 @@ tbody tr:last-child td{border-bottom:none}
 
 /* 进度条 */
 .progress-bar{height:6px;border-radius:4px;background:var(--border);overflow:hidden;width:80px;display:inline-block;vertical-align:middle}
-.progress-fill{height:100%;border-radius:4px;transition:width .4s ease}
+.progress-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#6366f1,#4f7df9);transition:width .4s ease}
 
 .actions{display:flex;gap:6px}
 .status{font-size:11px;color:var(--text-2);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -163,7 +170,7 @@ tr td:first-child,tr th:first-child{padding-left:16px}
 /* 确认弹层 */
 .modal-mask{position:fixed;inset:0;background:rgba(4,8,20,.7);backdrop-filter:blur(5px);display:none;align-items:center;justify-content:center;z-index:98}
 .modal-mask.show{display:flex}
-.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:26px 28px;width:400px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:26px 28px;width:400px;box-shadow:0 24px 70px rgba(0,0,0,.55);max-height:calc(100vh - 48px);overflow-y:auto}
 .modal-box h3{font-size:14px;margin-bottom:10px;display:flex;align-items:center;gap:9px}
 .modal-box p{font-size:12px;color:var(--text-2);line-height:1.8;margin-bottom:22px;word-break:break-all}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px}
@@ -240,7 +247,26 @@ tr td:first-child,tr th:first-child{padding-left:16px}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
         开始检查
       </button>
-      <button class="btn btn-ghost" onclick="closeHealthModal()">关闭</button>
+      <button class="btn btn-ghost" id="healthCloseBtn" onclick="closeHealthModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 更新用量弹窗 -->
+<div class="modal-mask" id="usageMask">
+  <div class="modal-box" style="width:500px">
+    <h3><span class="toast-ic" style="background:rgba(96,165,250,.16);color:#60a5fa">⟳</span>更新用量</h3>
+    <p id="usageSummary">点击「开始更新」从官方同步各 Key 的 billing cycle 真实用量。</p>
+    <div style="margin:14px 0">
+      <div class="progress-bar" style="width:100%;height:8px"><div class="progress-fill" id="usageBar" style="width:0%"></div></div>
+    </div>
+    <div id="usageList" style="max-height:280px;overflow-y:auto;margin-bottom:16px;display:flex;flex-direction:column;gap:6px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="usageStartBtn" onclick="runUsageNow()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        开始更新
+      </button>
+      <button class="btn btn-ghost" id="usageCloseBtn" onclick="closeUsageModal()">关闭</button>
     </div>
   </div>
 </div>
@@ -248,25 +274,32 @@ tr td:first-child,tr th:first-child{padding-left:16px}
 <div class="header">
   <div class="brand">
     <div class="logo"><img src="/logo.png" alt="Tavily" draggable="false"></div>
-    <div>
+    <div class="brand-text">
       <h1>Tavily Key Pool</h1>
       <div class="subtitle">API Key 池 · 用量追踪 · MCP 服务控制台</div>
     </div>
   </div>
   <div class="header-right">
-    <div class="stats-bar">
-      <div class="stat-card"><span class="stat-label">Key 总数</span><span class="stat-value" id="totalKeys">-</span></div>
-      <div class="stat-card"><span class="stat-label">活跃</span><span class="stat-value" id="activeKeys" style="color:var(--green)">-</span></div>
-      <div class="stat-card"><span class="stat-label">请求数</span><span class="stat-value" id="totalReqs">-</span></div>
-      <div class="stat-card"><span class="stat-label">积分消耗</span><span class="stat-value" id="totalCredits">-</span></div>
-      <div class="refresh" id="refreshTime"></div>
-    </div>
     <div class="win-controls">
       <button class="win-btn" title="最小化" onclick="winMin()">─</button>
       <button class="win-btn" title="最大化 / 还原" onclick="winMax()">▢</button>
       <button class="win-btn win-close" title="关闭" onclick="winClose()">✕</button>
     </div>
   </div>
+</div>
+
+<!-- 单行信息栏：聚合池状态 + 套餐 / 单Key额度（原头部状态卡与表格内 "X / 1000 Researcher" 的信息独立于此） -->
+<div class="info-bar" id="infoBar">
+  <span class="ib-item"><span class="ib-dot" style="background:var(--accent)"></span><span class="ib-label">Key 总数</span><span class="ib-value" id="totalKeys">-</span></span>
+  <span class="ib-item"><span class="ib-label">活跃</span><span class="ib-value" id="activeKeys">-</span></span>
+  <span class="ib-item"><span class="ib-label">请求数</span><span class="ib-value" id="totalReqs">-</span></span>
+  <span class="ib-item"><span class="ib-label">积分消耗</span><span class="ib-value" id="totalCredits">-</span></span>
+  <span class="ib-item"><span class="ib-label">剩余积分</span><span class="ib-value" id="remainingCredits">-</span></span>
+  <span class="ib-item"><span class="ib-label">池用量</span><span class="ib-value" id="ibPct">-</span></span>
+  <span class="ib-item"><span class="ib-label">套餐</span><span class="ib-value" id="ibPlan">-</span></span>
+  <span class="ib-item"><span class="ib-label">单Key额度</span><span class="ib-value" id="ibLimit">-</span></span>
+  <span style="flex:1"></span>
+  <span class="refresh" id="refreshTime"></span>
 </div>
 
 <main class="content">
@@ -296,17 +329,15 @@ tr td:first-child,tr th:first-child{padding-left:16px}
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
         健康检查
       </button>
+      <button class="btn btn-sm btn-ghost" onclick="openUsageModal()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+        更新用量
+      </button>
     </span>
   </div>
 
   <div class="tab-panel active" id="panel-keys">
     <div class="column">
-      <div style="display:flex;justify-content:flex-end;gap:8px;padding-bottom:10px">
-        <button class="btn btn-sm btn-ghost" onclick="syncUsage()">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-          同步官方用量
-        </button>
-      </div>
       <div class="column-body">
         <table>
           <thead>
@@ -323,7 +354,7 @@ tr td:first-child,tr th:first-child{padding-left:16px}
       <div class="column-body">
         <table>
           <thead>
-            <tr><th>时间</th><th>Key</th><th>接口</th><th>状态</th><th>积分</th><th>延迟</th><th>错误</th></tr>
+            <tr><th>时间</th><th>Key</th><th>接口</th><th>状态</th><th>积分</th><th>延迟</th><th>请求ID</th><th>错误</th></tr>
           </thead>
           <tbody id="logTableBody"></tbody>
         </table>
@@ -592,26 +623,54 @@ async function load() {
     document.getElementById('activeKeys').textContent = d.active_keys;
     document.getElementById('totalReqs').textContent = d.total_requests;
     document.getElementById('totalCredits').textContent = d.total_credits;
+    const agg = d.aggregate || {};
+    document.getElementById('remainingCredits').textContent = (agg.remaining ?? '-') + (agg.exhausted_count ? ` (${agg.exhausted_count} 耗尽)` : '');
+    document.getElementById('ibPct').textContent = agg.total_limit > 0 ? ((agg.usage_pct ?? 0).toFixed(1) + '%') : '未同步';
+    // 套餐 / 单Key额度：从各 Key 官方同步的 plan 与额度汇总（池内同套餐时显示该套餐）
+    const planCounts = {};
+    let perKeyLimit = 0;
+    for (const k of d.keys||[]) {
+      if (k.plan) planCounts[k.plan] = (planCounts[k.plan]||0) + 1;
+      if (k.credits_limit > 0) perKeyLimit = k.credits_limit;
+      else if (k.plan_limit > 0 && perKeyLimit === 0) perKeyLimit = k.plan_limit;
+    }
+    const plan = Object.keys(planCounts).sort((a,b) => planCounts[b]-planCounts[a])[0] || '';
+    document.getElementById('ibPlan').textContent = plan || '未知';
+    document.getElementById('ibLimit').textContent = perKeyLimit > 0 ? perKeyLimit : (agg.total_limit > 0 && agg.total_keys > 0 ? Math.round(agg.total_limit/agg.total_keys) : '-');
     document.getElementById('refreshTime').innerHTML = '刷新于 <strong>' + new Date().toLocaleTimeString('zh-CN') + '</strong>';
 
     const keyTbody = document.getElementById('keyTableBody');
     keyTbody.innerHTML = '';
+    const anomalyMap = {};
+    for (const a of (d.anomalies||[])) anomalyMap[a.masked] = a.flags;
+    const anomalyBadges = (masked) => (anomalyMap[masked]||[]).map(f => {
+      const label = {exhausted:'耗尽', near_exhausted:'近耗尽', suspected_leak:'疑似泄露', high_error_rate:'高错误率', stale:'静默', slow:'慢'};
+      return `<span class="badge badge-exhausted" style="margin-left:4px" title="${escapeHtml((anomalyMap[masked]||[]).join(','))}">${label[f]||f}</span>`;
+    }).join('');
     if (!d.keys || d.keys.length === 0) {
       keyTbody.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无 API Key — 点击菜单栏「添加 API Key」开始使用</td></tr>';
     }
     for (const k of d.keys||[]) {
       const pct = k.usage_pct || 0;
+      const hasLimit = (k.credits_limit > 0 || k.plan_limit > 0);
+      const effLimit = k.credits_limit > 0 ? k.credits_limit : (k.plan_limit || 0);
       const c = pct > 80 ? '#f87171' : pct > 50 ? '#fbbf24' : '#34d399';
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td class="mono" style="font-size:11px">${escapeHtml(k.masked)}</td>
-        <td><span class="badge ${k.is_active?'badge-active':'badge-inactive'}">${k.is_active?'活跃':'停用'}</span></td>
+        <td>
+          <span class="badge ${k.is_active?'badge-active':'badge-inactive'}">${k.is_active?'活跃':'停用'}</span>
+          ${k.is_exhausted?'<span class="badge badge-exhausted" style="margin-left:4px" title="官方额度已耗尽，月度重置后自动恢复">耗尽</span>':''}
+          ${anomalyBadges(k.masked)}
+        </td>
         <td>${k.request_count}</td>
         <td>${k.error_count}</td>
         <td>${k.credits_used}</td>
         <td>
+          ${hasLimit?`
           <div class="progress-bar"><div class="progress-fill" style="width:${Math.min(pct,100)}%;background:${c}"></div></div>
-          <span style="font-size:10px;color:var(--text-2)">${pct.toFixed(1)}%</span>
+          <span style="font-size:10px;color:var(--text-2)">${pct.toFixed(1)}%</span>`:`
+          <span style="font-size:10px;color:#fbbf24" title="点击右上角「更新用量」从官方同步额度后显示百分比">未同步</span>`}
         </td>
         <td style="font-size:10px;color:var(--text-3)">${fmtTs(k.last_used_at)}</td>
         <td>
@@ -626,7 +685,7 @@ async function load() {
     const logTbody = document.getElementById('logTableBody');
     logTbody.innerHTML = '';
     if (!d.logs || d.logs.length === 0) {
-      logTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">暂无请求日志</td></tr>';
+      logTbody.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无请求日志</td></tr>';
     }
     for (const l of d.logs||[]) {
       const tr = document.createElement('tr');
@@ -637,6 +696,7 @@ async function load() {
         <td><span class="badge ${l.success?'badge-success':'badge-fail'}">${l.success?'成功':'失败'}</span></td>
         <td>${l.credits_consumed}</td>
         <td>${fmtLat(l.latency_ms)}</td>
+        <td class="mono" style="font-size:10px;color:var(--text-3)">${escapeHtml(l.request_id||'')}</td>
         <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
       logTbody.appendChild(tr);
     }
@@ -731,23 +791,62 @@ document.addEventListener('keydown', e => {
     if (document.getElementById('confirmMask').classList.contains('show')) confirmResolve(false);
     else if (document.getElementById('addKeyMask').classList.contains('show')) closeAddModal();
     else if (document.getElementById('healthMask').classList.contains('show')) closeHealthModal();
+    else if (document.getElementById('usageMask').classList.contains('show')) closeUsageModal();
   }
 });
 
-// ── 健康检查弹窗（逐个 Key 显示进度） ────────────────────────
+// ── 并行执行器：以固定并发数处理任务列表（避免逐个串行过慢） ──
+async function runParallel(items, worker, concurrency = 5) {
+  const total = items.length;
+  if (total === 0) return;
+  const n = Math.max(1, Math.min(concurrency, total));
+  let idx = 0;
+  let done = 0;
+  let finish = null;
+  const allDone = new Promise(res => { finish = res; });
+  async function runner() {
+    while (true) {
+      const i = idx++;
+      if (i >= total) break;
+      try { await worker(items[i], i); }
+      catch(e) { console.error(e); }
+      done++;
+      if (done >= total) finish();
+    }
+  }
+  for (let i = 0; i < n; i++) runner();
+  return allDone;
+}
+
+// ── 健康检查弹窗（并行检测，显示进度） ────────────────────────
 let healthRunning = false;
 let healthRows = [];
 function openHealthModal() {
   document.getElementById('healthMask').classList.add('show');
-  document.getElementById('healthSummary').textContent = '点击「开始检查」逐个检测各 Key 的可用性（自动停用失效 Key）。';
+  document.getElementById('healthSummary').textContent = '点击「开始检查」并行检测各 Key 的可用性（自动停用失效 Key）。';
   document.getElementById('healthBar').style.width = '0%';
   document.getElementById('healthList').innerHTML = '';
   const btn = document.getElementById('healthStartBtn');
   btn.disabled = false;
   btn.textContent = '开始检查';
+  btn.setAttribute('onclick', 'runHealthNow()');
+  document.getElementById('healthCloseBtn').style.display = '';
 }
 function closeHealthModal() {
   document.getElementById('healthMask').classList.remove('show');
+}
+// 检查结束：无错误 → 只显示「确定」点击关闭；有错误 → 保留「重新检查」+「关闭」
+function setHealthDoneBtn(fail) {
+  const btn = document.getElementById('healthStartBtn');
+  btn.disabled = false;
+  document.getElementById('healthCloseBtn').style.display = fail > 0 ? '' : 'none';
+  if (fail > 0) {
+    btn.textContent = '重新检查';
+    btn.setAttribute('onclick', 'runHealthNow()');
+  } else {
+    btn.textContent = '确定';
+    btn.setAttribute('onclick', 'closeHealthModal()');
+  }
 }
 function renderHealthList() {
   const list = document.getElementById('healthList');
@@ -785,24 +884,23 @@ async function runHealthNow() {
   } catch(e) {}
   if (keys.length === 0) {
     summary.textContent = '暂无 Key 可检查';
-    btn.disabled = false;
-    btn.textContent = '重新检查';
+    setHealthDoneBtn(0);
     healthRunning = false;
     return;
   }
   healthRows = keys.map(k => ({masked: k.masked, status: 'wait', detail: ''}));
   renderHealthList();
-  let ok = 0, fail = 0, skip = 0;
-  for (let i = 0; i < keys.length; i++) {
+  let ok = 0, fail = 0, skip = 0, done = 0;
+  await runParallel(keys, async (k, i) => {
     healthRows[i].status = 'checking';
     healthRows[i].detail = '';
     renderHealthList();
     let res = null;
     try {
-      const r = await api('/api/health/one', {method:'POST', body: JSON.stringify({masked: keys[i].masked})});
+      const r = await api('/api/health/one', {method:'POST', body: JSON.stringify({masked: k.masked})});
       res = r.result;
     } catch(e) {
-      res = {masked: keys[i].masked, alive: false, error: '请求失败'};
+      res = {masked: k.masked, alive: false, error: '请求失败'};
     }
     if (res.skipped || res.alive === undefined) {
       healthRows[i].status = 'skip';
@@ -817,12 +915,12 @@ async function runHealthNow() {
       healthRows[i].detail = res.error || '检测失败';
       fail++;
     }
+    done++;
     renderHealthList();
-    bar.style.width = Math.round(((i+1)/keys.length)*100) + '%';
-  }
+    bar.style.width = Math.round((done/keys.length)*100) + '%';
+  }, 5);
   summary.textContent = `检查完成：正常 ${ok} · 失效 ${fail} · 跳过 ${skip}`;
-  btn.disabled = false;
-  btn.textContent = '重新检查';
+  setHealthDoneBtn(fail);
   healthRunning = false;
   load();
 }
@@ -1057,22 +1155,112 @@ async function saveMcpSettings() {
   }
 }
 
-// 同步官方用量：从 Tavily /usage 拉取 billing cycle 真实用量并更新本地统计
-async function syncUsage() {
-  const btn = document.querySelector('button[onclick="syncUsage()"]');
-  if (btn) { btn.disabled = true; }
-  try {
-    const d = await api('/api/keys/usage-sync', {method:'POST'});
-    if (d.ok) {
-      toast(`官方用量同步完成：成功 ${d.synced} 个，失败 ${d.failed} 个`, d.failed ? 'warn' : 'success');
-      load();
-    } else {
-      toast(d.error || '用量同步失败', 'error');
-    }
-  } catch(e) {
-    toast('用量同步失败：' + (e.message || e), 'error');
+// ── 更新用量弹窗（并行更新，显示进度） ───────────────────────
+// 从 Tavily /usage 拉取 billing cycle 真实用量并更新本地统计
+let usageRunning = false;
+let usageRows = [];
+function openUsageModal() {
+  document.getElementById('usageMask').classList.add('show');
+  document.getElementById('usageSummary').textContent = '点击「开始更新」从官方同步各 Key 的 billing cycle 真实用量。';
+  document.getElementById('usageBar').style.width = '0%';
+  document.getElementById('usageList').innerHTML = '';
+  const btn = document.getElementById('usageStartBtn');
+  btn.disabled = false;
+  btn.textContent = '开始更新';
+  btn.setAttribute('onclick', 'runUsageNow()');
+  document.getElementById('usageCloseBtn').style.display = '';
+}
+function closeUsageModal() {
+  document.getElementById('usageMask').classList.remove('show');
+}
+// 更新结束：无错误 → 只显示「确定」点击关闭；有错误 → 保留「重新更新」+「关闭」
+function setUsageDoneBtn(fail) {
+  const btn = document.getElementById('usageStartBtn');
+  btn.disabled = false;
+  document.getElementById('usageCloseBtn').style.display = fail > 0 ? '' : 'none';
+  if (fail > 0) {
+    btn.textContent = '重新更新';
+    btn.setAttribute('onclick', 'runUsageNow()');
+  } else {
+    btn.textContent = '确定';
+    btn.setAttribute('onclick', 'closeUsageModal()');
   }
-  if (btn) { btn.disabled = false; }
+}
+function renderUsageList() {
+  const list = document.getElementById('usageList');
+  list.innerHTML = usageRows.map(r => {
+    const [ic, color, badge] = r.status === 'ok'
+      ? ['✓', 'var(--green)', '<span class="badge badge-success">已更新</span>']
+      : r.status === 'fail'
+      ? ['✕', 'var(--red)', '<span class="badge badge-fail">失败</span>']
+      : r.status === 'checking'
+      ? ['⟳', 'var(--accent-2)', '<span class="badge" style="background:rgba(139,152,255,.14);color:var(--accent-2)">更新中</span>']
+      : r.status === 'skip'
+      ? ['–', 'var(--text-3)', '<span class="badge" style="background:var(--surface-3);color:var(--text-2)">跳过</span>']
+      : ['–', 'var(--text-3)', '<span class="badge" style="background:var(--surface-3);color:var(--text-2)">等待</span>'];
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 11px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+        <span style="color:${color};font-size:13px;font-weight:700;width:16px;text-align:center;flex-shrink:0">${ic}</span>
+        <span class="mono" style="font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis">${escapeHtml(r.masked)}</span>
+        ${badge}
+        <span style="font-size:10px;color:var(--text-2);max-width:190px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(r.detail||'')}</span>
+      </div>`;
+  }).join('');
+}
+async function runUsageNow() {
+  if (usageRunning) return;
+  usageRunning = true;
+  const btn = document.getElementById('usageStartBtn');
+  btn.disabled = true;
+  btn.textContent = '更新中…';
+  const bar = document.getElementById('usageBar');
+  const summary = document.getElementById('usageSummary');
+  let keys = [];
+  try {
+    const st = await api('/api/stats');
+    keys = st.keys || [];
+  } catch(e) {}
+  if (keys.length === 0) {
+    summary.textContent = '暂无 Key 可更新';
+    setUsageDoneBtn(0);
+    usageRunning = false;
+    return;
+  }
+  usageRows = keys.map(k => ({masked: k.masked, status: 'wait', detail: ''}));
+  renderUsageList();
+  let ok = 0, fail = 0, skip = 0, done = 0;
+  await runParallel(keys, async (k, i) => {
+    usageRows[i].status = 'checking';
+    usageRows[i].detail = '';
+    renderUsageList();
+    let res = null;
+    try {
+      const r = await api('/api/keys/usage-sync/one', {method:'POST', body: JSON.stringify({masked: k.masked})});
+      res = r.result;
+    } catch(e) {
+      res = {masked: k.masked, ok: false, error: '请求失败'};
+    }
+    if (res.skipped || res.ok === undefined) {
+      usageRows[i].status = 'skip';
+      usageRows[i].detail = res.error || '已停用，跳过';
+      skip++;
+    } else if (res.ok) {
+      usageRows[i].status = 'ok';
+      usageRows[i].detail = (res.usage != null ? '用量 ' + res.usage : '') + (res.limit != null ? ' / ' + res.limit : '');
+      ok++;
+    } else {
+      usageRows[i].status = 'fail';
+      usageRows[i].detail = res.error || '更新失败';
+      fail++;
+    }
+    done++;
+    renderUsageList();
+    bar.style.width = Math.round((done/keys.length)*100) + '%';
+  }, 5);
+  summary.textContent = `更新完成：成功 ${ok} · 失败 ${fail} · 跳过 ${skip}`;
+  setUsageDoneBtn(fail);
+  usageRunning = false;
+  load();
 }
 
 // 页面加载后：若 MCP 服务已在运行（如随软件自启），自动复制地址到剪贴板

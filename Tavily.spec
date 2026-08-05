@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app\\dashboard.html', '.'), ('assets\\tavily.ico', '.')]
+datas = [('app\\dashboard.html', '.'), ('assets\\tavily.ico', 'assets')]
 binaries = []
 hiddenimports = ['mcp_server', 'uvicorn.loops.auto', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
 hiddenimports += collect_submodules('mcp.server')
@@ -33,9 +33,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='Tavily',
     debug=False,
     bootloader_ignore_signals=False,
@@ -50,4 +49,14 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['assets\\tavily.ico'],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name='Tavily',
 )

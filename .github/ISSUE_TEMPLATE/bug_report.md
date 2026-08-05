@@ -30,7 +30,7 @@ assignees: ''
 - 操作系统：Windows / Linux / macOS（请注明版本）
 - Python 版本（源码运行时）：如 3.12
 - 部署形态：源码运行 / Linux Server（systemd + Nginx）/ Windows Local（Tavily.exe）
-- 项目版本：如 v0.1.0（可通过 `git describe` 或发布版本号确认）
+- 项目版本：如 v0.3.0（可通过 `git describe` 或发布版本号确认）
 - 浏览器（如与 Web 控制台相关）：如 Chrome 126
 
 **日志与配置（注意脱敏）**

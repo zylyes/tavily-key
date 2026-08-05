@@ -4,17 +4,19 @@ __pycache__/
 .venv/
 .pytest_cache/
 
-# ---- 构建产物（PyInstaller / build_win.bat 自动生成）----
-build/
-dist/
+# ---- 构建产物（PyInstaller / build_win.bat 自动生成，统一在 out/ 下）----
+out/
 *.spec
 # Tavily.spec 是 Windows 构建所需，随仓库发布，需取消忽略
 !Tavily.spec
 
-# ---- 运行数据 / 敏感文件 ----
+# ---- 运行数据（v0.3.0 起统一集中在 data/）----
+data/
+# 保留旧位置忽略规则，防止历史遗留文件被误提交
 config.json
 keys.txt
 tavily_keys.db
+tavily_keys.db-*
 .tavily-secret.key
 .env*
 *.pem

@@ -102,6 +102,55 @@ def cmd_health(args):
     print(f"Result: {alive} alive, {dead} dead")
 
 
+def cmd_usage(args):
+    """从 Tavily 官方 /usage 同步并展示每个 key 的 billing cycle 用量。"""
+    import json as _json
+
+    if args.sync:
+        print("Syncing official usage from Tavily...")
+        results = pool.sync_usage()
+        ok = sum(1 for r in results if r.get("ok"))
+        print(f"Synced {ok}/{len(results)} key(s).")
+        if args.json:
+            print(_json.dumps(results, ensure_ascii=False, indent=2))
+        for r in results:
+            if r.get("ok"):
+                plan = r.get("plan") or ""
+                print(f"  {r['masked']}: {r['usage']}/{r['limit']} credits"
+                      f" (search={r.get('search_usage',0)} extract={r.get('extract_usage',0)}"
+                      f" crawl={r.get('crawl_usage',0)} map={r.get('map_usage',0)}"
+                      f" research={r.get('research_usage',0)}) plan={plan}"
+                      + (" [recovered]" if r.get("recovered") else ""))
+            else:
+                print(f"  {r['masked']}: FAILED - {r.get('error', '')}")
+        return
+    # 只展示本地已同步数据
+    agg = pool.get_aggregate()
+    print(f"Aggregate: {agg['active_keys']} active / {agg['total_keys']} total,"
+          f" used {agg['total_used']} / {agg['total_limit']} credits, remaining {agg['remaining']}")
+    for k in pool.list_keys():
+        if k.credits_limit > 0:
+            print(f"  {k.masked}: {k.credits_used}/{k.credits_limit}"
+                  f" ({k.usage_pct:.1f}%) plan={k.plan or '-'}"
+                  + (" [exhausted]" if k.is_exhausted else ""))
+        else:
+            print(f"  {k.masked}: no official data (run with --sync)")
+
+
+def cmd_audit(args):
+    """列出结合本地记录与官方用量的异常 key。"""
+    anomalies = pool.detect_anomalies()
+    if not anomalies:
+        print("No anomalies detected. All keys look healthy.")
+        return
+    print(f"Found {len(anomalies)} anomalous key(s):")
+    for a in anomalies:
+        flags = ",".join(a["flags"])
+        print(f"  {a['masked']} [{flags}]")
+        for reason in a["reasons"]:
+            print(f"      - {reason}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="tavily-pool", description="Tavily API Key Pool Manager")
     sub = parser.add_subparsers(dest="cmd")
@@ -130,6 +179,12 @@ def main():
 
     sub.add_parser("health", help="Probe all active keys, auto-deactivate dead ones")
 
+    p_usage = sub.add_parser("usage", help="Show/sync official Tavily usage")
+    p_usage.add_argument("--sync", action="store_true", help="Sync from official /usage endpoint")
+    p_usage.add_argument("--json", action="store_true", help="Print raw JSON results")
+
+    sub.add_parser("audit", help="List anomalous keys (local records + official usage)")
+
     args = parser.parse_args()
     if args.cmd is None:
         parser.print_help()
@@ -144,6 +199,8 @@ def main():
         "stats": cmd_stats,
         "recent": cmd_recent,
         "health": cmd_health,
+        "usage": cmd_usage,
+        "audit": cmd_audit,
     }
     cmds[args.cmd](args)
 
