@@ -16,6 +16,7 @@
   - [检查流程](#检查流程)
   - [自动停用与恢复](#自动停用与恢复)
 - [请求记录与失败处理](#请求记录与失败处理)
+- [异常识别与本地-官方对账](#异常识别与本地-官方对账)
 - [Key 生命周期状态图](#key-生命周期状态图)
 - [完整调用示例](#完整调用示例)
 - [相关命令入口](#相关命令入口)
@@ -34,6 +35,7 @@
 | 健康探测与自动停用 | `check_health` / `check_health_all` |
 | 手动恢复 | `activate_key` |
 | 统计与日志 | `get_stats` / `get_recent_logs` |
+| 官方用量同步与对账 | `sync_usage` / `detect_anomalies` / `get_aggregate` |
 
 ## 核心数据结构
 
@@ -69,21 +71,27 @@ class ApiKey:
 
 `KeyPool` 使用 SQLite 存储，默认数据库文件为 `data/` 目录下的 `tavily_keys.db`（路径由 `app/paths.py` 的 `runtime_dir()` 统一管理），并开启 WAL 模式以提升并发读写性能。两张核心表：
 
-- `api_keys`：Key 主表，`key` 为唯一主键，`is_active` 以 0/1 表示停用/启用。
-- `request_log`：请求日志表，记录每次请求的端点、成功与否、延迟与消耗额度，供统计与审计使用。
+- `api_keys`：Key 主表，`key` 为唯一主键（存密文），`is_active` 以 0/1 表示停用/启用，`is_exhausted` 标记额度耗尽（移出轮询但保留，月度重置后自动恢复），并保存账户套餐（`plan` 系列）与官方用量同步信息（`research_usage` / `usage_synced_at`）。
+- `request_log`：请求日志表，记录每次请求的端点、成功与否、延迟、消耗额度、`request_id` 与积分来源 `usage_source`，供统计与审计使用。
 
 ```sql
 CREATE TABLE IF NOT EXISTS api_keys (
     key TEXT PRIMARY KEY,
     masked TEXT NOT NULL,
     is_active INTEGER DEFAULT 1,
+    is_exhausted INTEGER DEFAULT 0,
     request_count INTEGER DEFAULT 0,
     error_count INTEGER DEFAULT 0,
     credits_used INTEGER DEFAULT 0,
     credits_limit INTEGER DEFAULT 0,
     last_used_at REAL DEFAULT 0,
     added_at REAL NOT NULL,
-    last_error TEXT DEFAULT ''
+    last_error TEXT DEFAULT '',
+    plan TEXT DEFAULT '',
+    plan_usage INTEGER DEFAULT 0,
+    plan_limit INTEGER DEFAULT 0,
+    research_usage INTEGER DEFAULT 0,
+    usage_synced_at REAL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS request_log (
@@ -94,13 +102,17 @@ CREATE TABLE IF NOT EXISTS request_log (
     success INTEGER DEFAULT 1,
     error_msg TEXT DEFAULT '',
     latency_ms REAL DEFAULT 0,
+    request_id TEXT DEFAULT '',
+    usage_source TEXT DEFAULT '',
     created_at REAL NOT NULL
 );
 ```
 
+`CREATE TABLE IF NOT EXISTS` 只能保证**新库**拿到完整结构；旧库（如 0.1.0 版）缺少新增列时，`_init_db()` 会调用 `_ensure_columns()` 用 `ALTER TABLE ADD COLUMN` 自动补齐缺失列（幂等、容忍失败），无需手工迁移或重建表。完整的建表与自动迁移说明见 [数据模型](file://docs/wiki/架构设计/数据模型.md)。
+
 ## 轮询算法
 
-`KeyPool` 提供两种 Key 选择策略。两者都只查询 `is_active=1` 的 Key，保证已停用的 Key 永远不会被选中；当没有活跃 Key 时均返回 `None`，调用方需要自行处理该分支（例如抛出明确的业务异常或进入重试等待）。
+`KeyPool` 提供两种 Key 选择策略。两者都只查询活跃 Key（`is_active=1` 且未耗尽 `is_exhausted=0`），保证已停用或额度耗尽的 Key 永远不会被选中；当没有活跃 Key 时均返回 `None`，调用方需要自行处理该分支（例如抛出明确的业务异常或进入重试等待）。
 
 ### 最近未用优先的轮询调度
 
@@ -111,7 +123,7 @@ def next_key(self) -> tuple[str, str] | None:
     """Return (raw_key, masked) of next key via round-robin among active keys."""
     conn = self._get_conn()
     rows = conn.execute(
-        "SELECT key, masked FROM api_keys WHERE is_active=1 ORDER BY last_used_at ASC"
+        "SELECT key, masked FROM api_keys WHERE is_active=1 AND is_exhausted=0 ORDER BY last_used_at ASC"
     ).fetchall()
     if not rows:
         return None
@@ -141,7 +153,7 @@ def next_key_least_used(self) -> tuple[str, str] | None:
     """Return key with fewest requests today."""
     conn = self._get_conn()
     rows = conn.execute(
-        "SELECT key, masked FROM api_keys WHERE is_active=1 ORDER BY request_count ASC, last_used_at ASC"
+        "SELECT key, masked FROM api_keys WHERE is_active=1 AND is_exhausted=0 ORDER BY request_count ASC, last_used_at ASC"
     ).fetchall()
     if not rows:
         return None
@@ -300,6 +312,48 @@ flowchart TD
 
 需要特别说明：`record_request` 本身**不会**自动停用 Key，它只负责累计错误与记录日志；真正的自动停用逻辑发生在 `check_health` 中。如果希望实现"连续 N 次失败即自动禁用"，可以在业务层基于 `get_key().error_count` 判断后主动调用 `deactivate_key`。
 
+## 异常识别与本地-官方对账
+
+`KeyPool` 结合本地 `request_log` 调用记录与 Tavily 官方 `/usage` 用量（由 `sync_usage()` 定期同步并落库），通过 `detect_anomalies()` 识别以下 6 类异常。阈值由 `config.json` 的 `anomaly_thresholds` 配置（`error_rate` / `leak_diff_credits` / `stale_days` / `slow_ratio`）：
+
+| 异常类别 | 识别条件 | 说明 |
+| --- | --- | --- |
+| `exhausted`（额度耗尽） | `is_exhausted`（官方 usage ≥ limit，已触发 432） | 已移出轮询；新计费周期 usage 归零后由 `sync_usage()` 自动恢复 |
+| `near_exhausted`（近耗尽） | 官方 `usage_pct` ≥ 90% | 提示补充额度或更换 Key |
+| `suspected_leak`（疑似泄露） | 官方用量明显大于本地可对账积分（差值 ≥ `leak_diff_credits`，默认 50） | 见下方对账公式 |
+| `high_error_rate`（高错误率） | 近 24h 错误率 > `error_rate`（默认 0.3） | 附带最主要错误类别（quota/auth/rate/other） |
+| `stale`（静默失效） | active 但近 `stale_days`（默认 7）天无本地调用 | 疑似被外部使用或已无人使用 |
+| `slow`（延迟异常） | 近 24h 平均延迟 > 池内均值 × `slow_ratio`（默认 2.0）且 > 100ms | 疑似网络路径异常 |
+
+**suspected_leak 对账公式**：
+
+```
+官方总用量 − 官方 research_usage − 本地可对账积分 ≥ leak_diff_credits → 疑似泄露
+```
+
+- 官方总用量：`api_keys.credits_used`（来自 `/usage` 同步的 `key.usage`）；
+- 官方 `research_usage`：Research 消耗只存在于官方 `/usage`（一次 4~250 积分），本地响应永远记 0，必须先扣除，否则正常使用 research 也会被误报为泄露；
+- 本地可对账积分：`_local_credits()` 统计 `request_log` 中 `success=1` 且 `usage_source != 'unknown'` 的 `credits_consumed` 之和——排除 Research（`unknown`）记录，避免本地累计系统性偏低。
+
+```python
+# key_pool.py — 本地可对账积分：仅统计接口明确返回 usage 的成功请求
+def _local_credits(self, masked: str) -> float:
+    """Research API 响应不含 usage，本地永远记 0，若计入会让本地累计
+    系统性偏低、误报 suspected_leak，因此排除 usage_source='unknown'。"""
+    row = conn.execute(
+        "SELECT COALESCE(SUM(credits_consumed),0) AS c FROM request_log "
+        "WHERE key_masked=? AND success=1 AND usage_source != 'unknown'",
+        (masked,),
+    ).fetchone()
+    return float(row["c"] or 0)
+```
+
+**落地形态**：
+
+- **Web Dashboard**：异常 Key 以标记形式展示，并可按异常类别筛选（`/api/keys/anomalies`）；
+- **MCP 工具**：`tavily_pool_status` 返回的 `anomalies` 字段携带异常摘要；
+- **CLI**：`python app/cli.py audit` 列出当前全部异常 Key。
+
 ## Key 生命周期状态图
 
 ```mermaid
@@ -329,7 +383,7 @@ pool.add_keys_batch([
 ])
 
 # 2. 每次请求：取 Key、执行搜索、回写结果
-selected = pool.next_key()
+selected = pool.next_available_key()   # 按 config key_strategy 选取：未耗尽、未超限流
 if selected is None:
     raise RuntimeError("没有可用的活跃 Key")
 raw_key, masked = selected
@@ -337,11 +391,11 @@ print(f"本次使用 Key: {masked}")
 
 try:
     resp = tavily_client.search("量子计算", max_results=5)
-    pool.record_request(masked, "/search", latency_ms=320.5,
-                        success=True, credits=1)
+    pool.record_request(masked, "search", latency_ms=320.5,
+                        success=True, credits=1, usage_source="response")
 except Exception as e:
-    pool.record_request(masked, "/search", latency_ms=0,
-                        success=False, error_msg=str(e))
+    pool.record_request(masked, "search", latency_ms=0,
+                        success=False, error_msg=str(e), usage_source="none")
 
 # 3. 定时任务：健康检查并自动停用失效 Key
 health_results = pool.check_health_all()
@@ -363,6 +417,6 @@ print(f"最近 24h 请求分布: {stats['recent_24h']}")
 
 - **CLI 命令**：Key 管理命令（添加、删除、激活、停用）与统计健康命令（健康检查、统计概览）直接封装了 `KeyPool` 的上述方法；
 - **Web Dashboard**：界面与 API 层通过 `get_stats()` / `check_health()` 展示 Key 状态与健康结果；
-- **MCP 工具集**：工具调用层使用 `next_key()` 完成请求分发，并用 `record_request()` 回写每次调用的成败与耗时。
+- **MCP 工具集**：工具调用层使用 `next_available_key()`（按 `key_strategy` 策略选取并做令牌桶限流）完成请求分发，并用 `record_request()` 回写每次调用的成败、耗时与 `usage_source`。
 
 > <cite>更多实现细节请直接阅读源码：[`key_pool.py`](file://app/key_pool.py)</cite>

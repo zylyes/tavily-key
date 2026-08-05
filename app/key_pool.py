@@ -84,6 +84,7 @@ class ApiKey:
     plan: str = ""
     plan_usage: int = 0
     plan_limit: int = 0
+    research_usage: int = 0
     usage_synced_at: float = 0.0
 
     @property
@@ -154,6 +155,7 @@ class KeyPool:
                 plan TEXT DEFAULT '',
                 plan_usage INTEGER DEFAULT 0,
                 plan_limit INTEGER DEFAULT 0,
+                research_usage INTEGER DEFAULT 0,
                 usage_synced_at REAL DEFAULT 0
             )
             """
@@ -169,6 +171,7 @@ class KeyPool:
                 error_msg TEXT DEFAULT '',
                 latency_ms REAL DEFAULT 0,
                 request_id TEXT DEFAULT '',
+                usage_source TEXT DEFAULT '',
                 created_at REAL NOT NULL
             )
             """
@@ -179,10 +182,14 @@ class KeyPool:
             "plan": "TEXT DEFAULT ''",
             "plan_usage": "INTEGER DEFAULT 0",
             "plan_limit": "INTEGER DEFAULT 0",
+            "research_usage": "INTEGER DEFAULT 0",
             "usage_synced_at": "REAL DEFAULT 0",
         })
         _ensure_columns(conn, "request_log", {
             "request_id": "TEXT DEFAULT ''",
+            # 积分来源标记：response（接口响应含 usage）/ unknown（接口不返回
+            # usage，如 Research，官方 API 无此字段）/ none（失败请求）
+            "usage_source": "TEXT DEFAULT ''",
         })
         # masked 唯一索引：加密后 key 主键不可靠，作为重复检测的兜底约束。
         # 历史数据若存在重复 masked（理论不会），容忍创建失败。
@@ -314,6 +321,7 @@ class KeyPool:
             plan=row["plan"] or "",
             plan_usage=row["plan_usage"] or 0,
             plan_limit=row["plan_limit"] or 0,
+            research_usage=row["research_usage"] or 0,
             usage_synced_at=row["usage_synced_at"] or 0.0,
         )
 
@@ -431,7 +439,9 @@ class KeyPool:
 
     # ── Usage recording ────────────────────────────────────────
     def record_request(self, masked: str, endpoint: str, latency_ms: float, success: bool,
-                       credits: int = 0, error_msg: str = "", request_id: str = ""):
+                       credits: int = 0, error_msg: str = "", request_id: str = "",
+                       usage_source: str = ""):
+        """记录一次请求。usage_source：response/unknown/none（见 request_log 表注释）。"""
         now = time.time()
         conn = self._get_conn()
         conn.execute(
@@ -457,8 +467,8 @@ class KeyPool:
                     "UPDATE api_keys SET is_active=0 WHERE masked=?", (masked,)
                 )
         conn.execute(
-            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], now),
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], now),
         )
         conn.commit()
 
@@ -577,10 +587,11 @@ class KeyPool:
                 # 单个 key 无限额（/usage 返回 limit=null）时，回退账户套餐额度作为上限，
                 # 保证「用量 % / 剩余积分」有可计算的分母（如免费套餐每月 1000）。
                 limit = int(limit_raw) if limit_raw is not None else (plan_limit if plan_limit > 0 else 0)
+                research_usage = int(key_usage.get("research_usage") or 0)
                 conn = self._get_conn()
                 conn.execute(
-                    "UPDATE api_keys SET credits_used=?, credits_limit=?, plan=?, plan_usage=?, plan_limit=?, usage_synced_at=? WHERE masked=?",
-                    (usage, limit, plan, plan_usage, plan_limit, now, k.masked),
+                    "UPDATE api_keys SET credits_used=?, credits_limit=?, plan=?, plan_usage=?, plan_limit=?, research_usage=?, usage_synced_at=? WHERE masked=?",
+                    (usage, limit, plan, plan_usage, plan_limit, research_usage, now, k.masked),
                 )
                 conn.commit()
                 # 月度重置检测：exhausted key 的 usage 归零/低于 limit → 自动恢复
@@ -639,9 +650,15 @@ class KeyPool:
         }
 
     def _local_credits(self, masked: str) -> float:
+        """本地可对账积分：仅统计接口明确返回 usage 的成功请求。
+
+        Research API 响应不包含 usage（官方文档），本地永远记 0，若计入会
+        让本地累计系统性偏低、误报 suspected_leak，因此排除 usage_source='unknown'。
+        """
         conn = self._get_conn()
         row = conn.execute(
-            "SELECT COALESCE(SUM(credits_consumed),0) AS c FROM request_log WHERE key_masked=? AND success=1",
+            "SELECT COALESCE(SUM(credits_consumed),0) AS c FROM request_log "
+            "WHERE key_masked=? AND success=1 AND usage_source != 'unknown'",
             (masked,),
         ).fetchone()
         return float(row["c"] or 0)
@@ -713,9 +730,14 @@ class KeyPool:
             elif k.credits_limit > 0 and k.usage_pct >= 90:
                 flags.append("near_exhausted")
                 reasons.append(f"官方额度剩余 <10%（已用 {k.usage_pct:.1f}%）")
-            if k.credits_limit > 0 and (k.credits_used - self._local_credits(k.masked)) >= leak_diff:
+            # suspected_leak：官方总用量扣除 research（其消耗只存在于官方 /usage，
+            # 本地 response 日志永远记 0）后再与本地可对账积分比较，否则正常使用
+            # research 也会被误判为泄露。
+            if k.credits_limit > 0 and (k.credits_used - k.research_usage - self._local_credits(k.masked)) >= leak_diff:
                 flags.append("suspected_leak")
-                reasons.append(f"官方用量比本地记录多 ≥{leak_diff:.0f} 积分，疑似被外部使用")
+                reasons.append(
+                    f"官方用量比本地记录多 ≥{leak_diff:.0f} 积分（已扣除官方 research {k.research_usage}），疑似被外部使用"
+                )
             rate, err_types = self._recent_error_rate(k.masked)
             if rate > error_rate_th:
                 flags.append("high_error_rate")
@@ -825,5 +847,6 @@ def _apikey_to_dict(k: ApiKey) -> dict:
         "plan": k.plan,
         "plan_usage": k.plan_usage,
         "plan_limit": k.plan_limit,
+        "research_usage": k.research_usage,
         "usage_synced_at": k.usage_synced_at,
     }

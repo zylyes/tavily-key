@@ -101,19 +101,25 @@ def _get_client() -> tuple[TavilyClient, str]:
 
 
 def _record(masked: str, endpoint: str, start: float, success: bool,
-            credits: int = 0, error_msg: str = "", request_id: str = ""):
+            credits: int = 0, error_msg: str = "", request_id: str = "",
+            usage_source: str = ""):
     latency = (time.time() - start) * 1000
-    pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id)
+    pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id, usage_source)
 
 
-def _usage_credits(resp: Any) -> int:
-    """从响应中提取消耗积分。"""
+def _usage_credits(resp: Any) -> tuple[int, bool]:
+    """从响应中提取消耗积分，返回 (credits, has_usage)。
+
+    has_usage=False 表示响应不含 usage 字段——如 Research API（POST /research 与
+    GET /research/{id} 官方响应均无 usage），这类消耗只能以官方 /usage 的
+    research_usage 为准，本地不能当作「消耗 0」。
+    """
     if isinstance(resp, dict) and isinstance(resp.get("usage"), dict):
         try:
-            return int(resp["usage"].get("credits") or 0)
+            return int(resp["usage"].get("credits") or 0), True
         except (TypeError, ValueError):
-            return 0
-    return 0
+            return 0, True
+    return 0, False
 
 
 def _usage_request_id(resp: Any) -> str:
@@ -146,22 +152,125 @@ def _norm_flag(v: Any) -> Any:
 
 _COUNTRY_RE = re.compile(r"^[A-Za-z]{2}$")
 
+# Tavily 官方 /search 的 country 枚举为「完整国家名」（小写，如 'united states'）。
+# 客户端可能传两位 ISO 3166-1 alpha-2 代码（如 'us'），这里维护 代码→完整名
+# 映射（覆盖官方全部枚举），统一归一化并支持「完整名 ↔ 代码」自动切换——
+# 池内不同 Key 对 country 格式要求不一致（部分要求两位 ISO 码、部分要求完整
+# 国家名），单一格式无法通吃。
+_COUNTRY_ISO2_TO_NAME: dict[str, str] = {
+    "af": "afghanistan", "al": "albania", "dz": "algeria", "ad": "andorra",
+    "ao": "angola", "ar": "argentina", "am": "armenia", "au": "australia",
+    "at": "austria", "az": "azerbaijan", "bs": "bahamas", "bh": "bahrain",
+    "bd": "bangladesh", "bb": "barbados", "by": "belarus", "be": "belgium",
+    "bz": "belize", "bj": "benin", "bt": "bhutan", "bo": "bolivia",
+    "ba": "bosnia and herzegovina", "bw": "botswana", "br": "brazil",
+    "bn": "brunei", "bg": "bulgaria", "bf": "burkina faso", "bi": "burundi",
+    "kh": "cambodia", "cm": "cameroon", "ca": "canada", "cv": "cape verde",
+    "cf": "central african republic", "td": "chad", "cl": "chile",
+    "cn": "china", "co": "colombia", "km": "comoros", "cg": "congo",
+    "cr": "costa rica", "hr": "croatia", "cu": "cuba", "cy": "cyprus",
+    "cz": "czech republic", "dk": "denmark", "dj": "djibouti",
+    "do": "dominican republic", "ec": "ecuador", "eg": "egypt",
+    "sv": "el salvador", "gq": "equatorial guinea", "er": "eritrea",
+    "ee": "estonia", "et": "ethiopia", "fj": "fiji", "fi": "finland",
+    "fr": "france", "ga": "gabon", "gm": "gambia", "ge": "georgia",
+    "de": "germany", "gh": "ghana", "gr": "greece", "gt": "guatemala",
+    "gn": "guinea", "ht": "haiti", "hn": "honduras", "hu": "hungary",
+    "is": "iceland", "in": "india", "id": "indonesia", "ir": "iran",
+    "iq": "iraq", "ie": "ireland", "il": "israel", "it": "italy",
+    "jm": "jamaica", "jp": "japan", "jo": "jordan", "kz": "kazakhstan",
+    "ke": "kenya", "kw": "kuwait", "kg": "kyrgyzstan", "lv": "latvia",
+    "lb": "lebanon", "ls": "lesotho", "lr": "liberia", "ly": "libya",
+    "li": "liechtenstein", "lt": "lithuania", "lu": "luxembourg",
+    "mg": "madagascar", "mw": "malawi", "my": "malaysia", "mv": "maldives",
+    "ml": "mali", "mt": "malta", "mr": "mauritania", "mu": "mauritius",
+    "mx": "mexico", "md": "moldova", "mc": "monaco", "mn": "mongolia",
+    "me": "montenegro", "ma": "morocco", "mz": "mozambique", "mm": "myanmar",
+    "na": "namibia", "np": "nepal", "nl": "netherlands", "nz": "new zealand",
+    "ni": "nicaragua", "ne": "niger", "ng": "nigeria", "kp": "north korea",
+    "mk": "north macedonia", "no": "norway", "om": "oman", "pk": "pakistan",
+    "pa": "panama", "pg": "papua new guinea", "py": "paraguay", "pe": "peru",
+    "ph": "philippines", "pl": "poland", "pt": "portugal", "qa": "qatar",
+    "ro": "romania", "ru": "russia", "rw": "rwanda", "sa": "saudi arabia",
+    "sn": "senegal", "rs": "serbia", "sg": "singapore", "sk": "slovakia",
+    "si": "slovenia", "so": "somalia", "za": "south africa",
+    "kr": "south korea", "ss": "south sudan", "es": "spain",
+    "lk": "sri lanka", "sd": "sudan", "se": "sweden", "ch": "switzerland",
+    "sy": "syria", "tw": "taiwan", "tj": "tajikistan", "tz": "tanzania",
+    "th": "thailand", "tg": "togo", "tt": "trinidad and tobago",
+    "tn": "tunisia", "tr": "turkey", "tm": "turkmenistan", "ug": "uganda",
+    "ua": "ukraine", "ae": "united arab emirates", "gb": "united kingdom",
+    "us": "united states", "uy": "uruguay", "uz": "uzbekistan",
+    "ve": "venezuela", "vn": "vietnam", "ye": "yemen", "zm": "zambia",
+    "zw": "zimbabwe",
+}
+# 常见非 ISO 别名（仅输入归一化用，不参与反向切换）
+_COUNTRY_ALIAS_TO_NAME: dict[str, str] = {
+    "usa": "united states", "uk": "united kingdom", "uae": "united arab emirates",
+}
+# 反向映射：完整国家名 → 两位 ISO 代码（Invalid country 自动切换用）
+_COUNTRY_NAME_TO_ISO2: dict[str, str] = {
+    name: iso for iso, name in _COUNTRY_ISO2_TO_NAME.items()
+}
+
 
 def _norm_country(country: str) -> str:
-    """校验 country 参数：必须是两位 ISO 3166-1 alpha-2 国家代码。
+    """把 country 参数归一化为官方 API 接受的格式：完整国家名（小写）。
 
-    返回规范化后的小写代码；非法值抛 ValueError 带友好中文提示，避免把
-    模糊的 API 400 错误抛给客户端。
+    接受两种输入并自动转换：
+    - 两位 ISO 3166-1 alpha-2 代码（如 'us'/'cn'/'jp'）→ 完整国家名
+      （'united states'/'china'/'japan'）
+    - 完整国家名（如 'United States'/'united states'）→ 校验并小写化
+
+    注：官方 /search 的 country 枚举为完整国家名，但池内部分 Key 走旧版
+    接口只认两位 ISO 代码——若目标 Key 拒绝本函数输出格式，由
+    _run_with_retry 捕获 Invalid country 错误自动切换另一种格式重试。
     """
     c = (country or "").strip()
     if not c:
         return ""
-    if not _COUNTRY_RE.match(c):
-        raise ValueError(
-            f"country 参数无效: '{country}'。需为两位 ISO 3166-1 国家代码"
-            "（如 'us'/'cn'/'jp'），且仅 topic=general 时有效。"
-        )
-    return c.lower()
+    c_lower = c.lower()
+    if _COUNTRY_RE.match(c_lower):
+        name = _COUNTRY_ISO2_TO_NAME.get(c_lower)
+        if name:
+            return name
+    if c_lower in _COUNTRY_ALIAS_TO_NAME:
+        return _COUNTRY_ALIAS_TO_NAME[c_lower]
+    if c_lower in _COUNTRY_NAME_TO_ISO2:
+        return c_lower
+    raise ValueError(
+        f"country 参数无效: '{country}'。需为两位 ISO 3166-1 国家代码"
+        "（如 'us'/'cn'/'jp'）或完整国家名（如 'united states'），"
+        "且仅 topic=general 时有效。"
+    )
+
+
+def _is_country_error(err: str) -> bool:
+    """判断错误是否为 country 参数格式不兼容（Invalid country ...）。"""
+    e = (err or "").lower()
+    return "invalid country" in e or ("country" in e and "must be a valid" in e)
+
+
+def _switch_country_format(kwargs: dict) -> bool:
+    """把 kwargs['country'] 在「两位 ISO 码 ↔ 完整国家名」间切换。
+
+    返回 True 表示已切换（存在另一种合法格式）；无 country 或无法切换返回
+    False。调用方应仅在 _is_country_error 判定后触发。
+    """
+    c = (kwargs.get("country") or "").strip().lower()
+    if not c:
+        return False
+    if _COUNTRY_RE.match(c):
+        name = _COUNTRY_ISO2_TO_NAME.get(c)
+        if not name:
+            return False
+        kwargs["country"] = name
+        return True
+    iso = _COUNTRY_NAME_TO_ISO2.get(c)
+    if not iso:
+        return False
+    kwargs["country"] = iso
+    return True
 
 
 def _tool_kwargs(func, kwargs: dict) -> dict:
@@ -181,13 +290,17 @@ def _tool_kwargs(func, kwargs: dict) -> dict:
     return out
 
 
-def _run_with_retry(endpoint: str, fn) -> str:
+def _run_with_retry(endpoint: str, fn, kwargs: dict | None = None) -> str:
     """执行工具调用并序列化返回。
 
     - 记录成功/失败（含 request_id）。
     - quota(额度耗尽)/auth(认证失效) 类错误自动切换其他 key 重试（最多 2 次）。
+    - country 参数格式不兼容（Invalid country）时，自动在「完整国家名 ↔
+      两位 ISO 码」间切换后换 key 重试——池内不同 Key 对 country 格式要求
+      不一致，单一格式无法通吃（kwargs 传入含 country 的工具参数 dict）。
     """
     last_err = ""
+    country_switched = False
     for attempt in range(3):
         try:
             client, masked = _get_client()
@@ -196,15 +309,28 @@ def _run_with_retry(endpoint: str, fn) -> str:
         t0 = time.time()
         try:
             resp = fn(client)
-            _record(masked, endpoint, t0, True, _usage_credits(resp),
-                    request_id=_usage_request_id(resp))
+            credits, has_usage = _usage_credits(resp)
+            _record(masked, endpoint, t0, True, credits,
+                    request_id=_usage_request_id(resp),
+                    usage_source="response" if has_usage else "unknown")
             return json.dumps(resp, ensure_ascii=False, indent=2)
         except Exception as e:  # noqa: BLE001
             err = str(e)
             _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
-            _record(masked, endpoint, t0, False, 0, err)
+            _record(masked, endpoint, t0, False, 0, err, usage_source="none")
             cat = _classify_error(err)
             last_err = err
+            # country 格式不兼容：切换格式（完整名 ↔ 两位码）后换 key 重试
+            if (
+                kwargs is not None
+                and not country_switched
+                and _is_country_error(err)
+                and _switch_country_format(kwargs)
+            ):
+                country_switched = True
+                _log.info("%s country 格式不兼容，切换为 '%s' 重试",
+                          endpoint, kwargs.get("country"))
+                continue
             if cat in ("quota", "auth") and attempt < 2:
                 continue  # 换 key 重试
             return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
@@ -255,6 +381,7 @@ async def tavily_search(
         include_domains: List of domains to restrict search to (max 300).
         exclude_domains: List of domains to exclude (max 150).
         country: Prioritize results from this country (only with topic=general).
+            Accepts two-letter ISO codes (`us`) or full names (`united states`).
         exact_match: Only return results with exact quoted phrases.
         include_favicon: Include favicon URLs.
         auto_parameters: Let Tavily auto-tune parameters based on query intent.
@@ -305,7 +432,8 @@ async def tavily_search(
 
     # 同步工具在 MCP 事件循环内执行会阻塞整个服务器：async 工具 + to_thread
     # 让耗时调用（Tavily API、重试）在线程池中运行，避免阻塞其他请求。
-    return await anyio.to_thread.run_sync(_run_with_retry, "search", _do)
+    # kwargs 传入供 _run_with_retry 在 Invalid country 时切换 country 格式重试。
+    return await anyio.to_thread.run_sync(_run_with_retry, "search", _do, kwargs)
 
 
 @mcp.tool()
@@ -517,7 +645,7 @@ def _research_impl(input: str, model: str, citation_format: str,
     if wait:
         try:
             last = _research_stream(client, input, model, citation_format, timeout, kwargs)
-            _record(masked, "research", t0, True, _usage_credits(last))
+            _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
             return json.dumps(last, ensure_ascii=False, indent=2)
         except Exception as e:  # noqa: BLE001
             _log.info("research 原生流式失败，回退提交+轮询 masked=%s: %s", masked, str(e)[:200])
@@ -553,21 +681,21 @@ def _research_impl(input: str, model: str, citation_format: str,
                 _log.info("research 要求流式，自动回退 stream=true: %s", err[:200])
                 try:
                     last = _research_stream(client, input, model, citation_format, timeout, kwargs)
-                    _record(masked, "research", t0, True, _usage_credits(last))
+                    _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
                     return json.dumps(last, ensure_ascii=False, indent=2)
                 except Exception as e2:  # noqa: BLE001
                     _log.warning("research 流式回退失败 masked=%s: %s", masked, str(e2)[:300])
-                    _record(masked, "research", t0, False, 0, str(e2))
+                    _record(masked, "research", t0, False, 0, str(e2), usage_source="none")
                     return json.dumps({"error": str(e2), "key_used": masked}, ensure_ascii=False)
             _log.warning("research 提交失败 masked=%s: %s", masked, err[:300])
-            _record(masked, "research", t0, False, 0, err)
+            _record(masked, "research", t0, False, 0, err, usage_source="none")
             return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
     if request_id is None:
         return json.dumps({"error": last_err, "key_used": masked}, ensure_ascii=False)
 
     # ── wait=False：提交即返回，供客户端用 tavily_research_status 轮询 ──
     if not wait:
-        _record(masked, "research", t0, True, 0, request_id=request_id)
+        _record(masked, "research", t0, True, 0, request_id=request_id, usage_source="unknown")
         return json.dumps({"request_id": request_id, "status": "submitted", "key_used": masked},
                           ensure_ascii=False)
 
@@ -581,11 +709,11 @@ def _research_impl(input: str, model: str, citation_format: str,
             status = last.get("status", "") if isinstance(last, dict) else ""
             if status in ("completed", "failed", "error", "cancelled"):
                 break
-        _record(masked, "research", t0, True, _usage_credits(last), request_id=request_id)
+        _record(masked, "research", t0, True, _usage_credits(last)[0], request_id=request_id, usage_source="unknown")
         return json.dumps(last, ensure_ascii=False, indent=2)
     except Exception as e:  # noqa: BLE001
         _log.warning("research 轮询失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "research", t0, False, 0, str(e), request_id=request_id)
+        _record(masked, "research", t0, False, 0, str(e), request_id=request_id, usage_source="none")
         return json.dumps({"error": str(e), "request_id": request_id, "key_used": masked},
                           ensure_ascii=False)
 
@@ -647,11 +775,12 @@ async def tavily_research_status(request_id: str) -> str:
             if client is None:
                 client, masked = _get_client()
             resp = client.get_research(request_id)
-            _record(masked, "research-status", t0, True, _usage_credits(resp), request_id=request_id)
+            _record(masked, "research-status", t0, True, _usage_credits(resp)[0],
+                    request_id=request_id, usage_source="unknown")
             return json.dumps(resp, ensure_ascii=False, indent=2)
         except Exception as e:  # noqa: BLE001
             _log.warning("research-status 失败 masked=%s: %s", masked, str(e)[:300])
-            _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id)
+            _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id, usage_source="none")
             return json.dumps({"error": str(e), "request_id": request_id}, ensure_ascii=False)
 
     return await anyio.to_thread.run_sync(_impl)
@@ -677,9 +806,6 @@ async def tavily_pool_status() -> str:
 # ═══════════════════════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════════════════════
-
-def _est_credits(depth: str) -> int:
-    return 2 if depth == "advanced" else 1
 
 
 def _research_stream(client: TavilyClient, input: str, model: str, citation_format: str,

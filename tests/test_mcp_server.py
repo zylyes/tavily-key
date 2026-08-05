@@ -282,23 +282,27 @@ def test_apply_default_timeout_keeps_explicit_timeout():
 
 
 def test_norm_country_valid_cases():
-    """两位 ISO 代码应保留并转小写；空值原样返回。"""
+    """两位 ISO 代码/完整国家名/别名均应归一化为官方完整国家名；空值原样返回。"""
     assert mcp_server._norm_country("") == ""
-    assert mcp_server._norm_country("us") == "us"
-    assert mcp_server._norm_country("US") == "us"
-    assert mcp_server._norm_country("  CN  ") == "cn"
-    assert mcp_server._norm_country("jp") == "jp"
+    assert mcp_server._norm_country("us") == "united states"
+    assert mcp_server._norm_country("US") == "united states"
+    assert mcp_server._norm_country("  CN  ") == "china"
+    assert mcp_server._norm_country("jp") == "japan"
+    assert mcp_server._norm_country("United States") == "united states"
+    assert mcp_server._norm_country("china") == "china"
+    assert mcp_server._norm_country("usa") == "united states"  # 别名
+    assert mcp_server._norm_country("uk") == "united kingdom"
 
 
 def test_norm_country_invalid_raises():
-    """非两位字母代码（全名/中文/数字/三位）应抛 ValueError。"""
-    for bad in ("China", "中国", "USA", "u1", "usx", "u", "US-"):
+    """非合法国家（中文/数字/乱码/未知两位码/未知名称）应抛 ValueError。"""
+    for bad in ("中国", "u1", "usx", "u", "US-", "xx", "atlantis"):
         with pytest.raises(ValueError):
             mcp_server._norm_country(bad)
 
 
 def test_tavily_search_validates_country(monkeypatch):
-    """非法 country 直接返回友好错误、不触达 API；合法值转小写透传。"""
+    """非法 country 直接返回友好错误、不触达 API；合法值归一化为完整国家名透传。"""
     captured = {}
 
     class _C:
@@ -310,11 +314,62 @@ def test_tavily_search_validates_country(monkeypatch):
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
 
     # 非法 country：返回错误 JSON，且 client.search 不被调用
-    out = json.loads(asyncio.run(mcp_server.tavily_search("q", country="China")))
+    out = json.loads(asyncio.run(mcp_server.tavily_search("q", country="中国")))
     assert "error" in out
     assert "country" in out["error"].lower()
     assert captured == {}  # 未触达 client.search
 
-    # 合法 country：大写转小写后透传
+    # 合法 country（两位 ISO 码）：归一化为官方完整国家名后透传
     asyncio.run(mcp_server.tavily_search("q", country="US"))
-    assert captured.get("country") == "us"
+    assert captured.get("country") == "united states"
+
+    # 合法 country（完整国家名，大小写变体）：归一化后透传
+    captured.clear()
+    asyncio.run(mcp_server.tavily_search("q", country="China"))
+    assert captured.get("country") == "china"
+
+
+def test_run_with_retry_switches_country_format(monkeypatch):
+    """Invalid country 错误应自动切换格式（完整名 ↔ 两位码）后换 key 重试。"""
+    keys = []
+    kwargs = {"query": "q", "country": "united states"}
+
+    def fake_get_client():
+        keys.append(f"tvly-key{len(keys)}")
+        return (object(), keys[-1])
+
+    monkeypatch.setattr(mcp_server, "_get_client", fake_get_client)
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+
+    def flaky(client):
+        # 第一次（完整名）报 Invalid country；切换后（两位码）成功
+        if kwargs["country"] == "united states":
+            raise ValueError("Invalid country. Must be a valid country.")
+        return {"query": kwargs["country"], "results": []}
+
+    out = json.loads(mcp_server._run_with_retry("search", flaky, kwargs))
+    assert out["results"] == []
+    assert kwargs["country"] == "us"  # 已切换为两位 ISO 码
+    assert len(keys) == 2  # 换 key 重试了一次
+
+    # 反向：两位码报错 → 自动切换为完整名
+    kwargs = {"query": "q", "country": "us"}
+
+    def flaky2(client):
+        if kwargs["country"] == "us":
+            raise ValueError("Invalid country. Must be a valid country.")
+        return {"query": kwargs["country"], "results": []}
+
+    out2 = json.loads(mcp_server._run_with_retry("search", flaky2, kwargs))
+    assert out2["results"] == []
+    assert kwargs["country"] == "united states"
+
+    # 非 country 错误：不切换格式
+    kwargs = {"query": "q", "country": "us"}
+
+    def flaky3(client):
+        raise ValueError("Internal Server Error")
+
+    out3 = json.loads(mcp_server._run_with_retry("search", flaky3, kwargs))
+    assert "error" in out3
+    assert kwargs["country"] == "us"  # 未切换

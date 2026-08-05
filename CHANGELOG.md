@@ -5,6 +5,24 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-08-05
+
+### Fixed
+
+- **请求日志大量「零消耗」误导**：`request_log` 新增 `usage_source` 字段区分积分来源——
+  - `response`：接口响应含 `usage`（search/extract/crawl/map 正常记录实际积分）；
+  - `unknown`：接口响应**不含** `usage`（官方 Research API `POST /research` 与 `GET /research/{id}` 均无该字段），本地无法得知实际消耗，面板显示「—」并提示以官方用量为准，不再误导为「消耗 0」；
+  - `none`：失败请求（不消耗积分）。
+- **suspected_leak 误报**：`_local_credits()` 本地对账排除 `usage_source='unknown'` 的 research 记录，且官方 `/usage` 的 `research_usage` 落库（`api_keys.research_usage` 列，自动迁移）；对账公式为 `官方总用量 − 官方 research − 本地可对账积分`，research 消耗（一次 4~250 积分，官方只在 `/usage` 报告）不再导致误报「疑似泄露」，真实泄露仍可检出。
+- **extract/crawl/map 零消耗说明**：官方批量计费（extract 每 5 成功 URL、map 每 10 页、crawl 共享下限）在未达下限前 `usage.credits` 合法返回 0，属官方规则，按 `response`（真 0）显示。
+- **`country` 参数兼容池内多 Key 行为不一致**：官方 `/search` 的 `country` 枚举为**完整国家名**（如 `united states`），但池内部分 Key 走旧版接口只认**两位 ISO 代码**（如 `us`），单一格式无法通吃导致 `Invalid country. Must be a valid country ...` 失败。
+  - `country` 现在接受两种格式并自动归一化为官方完整国家名：两位 ISO 码（`us`/`cn`/`jp`）、完整国家名（`United States`/`china`），另支持常见别名（`usa`/`uk`/`uae`）；映射表覆盖官方全部枚举。
+  - 若目标 Key 拒绝当前格式（`Invalid country` 错误），自动在「完整名 ↔ 两位码」间切换并换 key 重试，客户端无需关心池内差异。
+
+### Changed
+
+- 面板请求日志「积分」列：失败显示 `-`；`unknown` 显示 `—`（悬停提示）；其余显示实际积分。
+
 ## [0.3.1] - 2026-08-05
 
 ### Fixed
@@ -66,6 +84,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.3.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.2
 [0.3.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.1
 [0.3.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.0
 [0.2.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.2.1

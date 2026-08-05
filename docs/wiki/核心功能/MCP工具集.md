@@ -11,13 +11,14 @@
 - [tavily_crawl（网站爬取）](#tavily_crawl网站爬取)
 - [tavily_map（站点地图）](#tavily_map站点地图)
 - [tavily_research（深度研究）](#tavily_research深度研究)
+- [tavily_research_status（任务状态查询）](#tavily_research_status任务状态查询)
 - [tavily_pool_status（密钥池状态）](#tavily_pool_status密钥池状态)
 - [MCP 协议调用方式](#mcp-协议调用方式)
 - [公共行为与错误处理](#公共行为与错误处理)
 
 ## 概述
 
-本服务是名为 **Tavily Web Search** 的 MCP Server，基于 `FastMCP` 框架构建，对外暴露 6 个工具，供 AI Agent 通过 MCP 协议发现和调用。所有工具均通过 Tavily Python SDK（`TavilyClient`）与 Tavily API 通信，API Key 由 KeyPool 统一托管，默认采用 round-robin 轮询策略选取。
+本服务是名为 **Tavily Web Search** 的 MCP Server，基于 `FastMCP` 框架构建，对外暴露 7 个工具，供 AI Agent 通过 MCP 协议发现和调用。所有工具均通过 Tavily Python SDK（`TavilyClient`）与 Tavily API 通信，API Key 由 KeyPool 统一托管，默认采用 round-robin 轮询策略选取。
 
 ```python
 mcp = FastMCP(
@@ -37,12 +38,14 @@ graph LR
     Server --> C[tavily_crawl]
     Server --> M[tavily_map]
     Server --> R[tavily_research]
+    Server --> RS[tavily_research_status]
     Server --> P[tavily_pool_status]
     S --> Pool[KeyPool<br/>round-robin 取 Key]
     E --> Pool
     C --> Pool
     M --> Pool
     R --> Pool
+    RS --> Pool
     Pool --> TC[TavilyClient]
     TC --> API[Tavily API]
 ```
@@ -56,6 +59,7 @@ graph LR
 | `tavily_crawl` | 从起始 URL 爬取多页面内容 | `client.crawl()` | 数十秒 |
 | `tavily_map` | 快速发现站点 URL 结构，比爬取更快 | `client.map()` | 秒级 |
 | `tavily_research` | AI 深度研究，生成带引用的综合报告 | `client.research()` | 30–120 秒 |
+| `tavily_research_status` | 查询异步研究任务的状态与结果 | `client.get_research()` | 秒级 |
 | `tavily_pool_status` | 查询 API Key 池状态与用量统计 | 无（直接读取 KeyPool） | 毫秒级 |
 
 ## tavily_search（网络搜索）
@@ -67,7 +71,7 @@ graph LR
 | 参数 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `query` | str | 必填 | 搜索查询语句 |
-| `search_depth` | str | `"basic"` | `basic`（1 积分）或 `advanced`（2 积分），advanced 返回更相关的来源 |
+| `search_depth` | str | `"basic"` | `basic`（1 积分）、`advanced`（2 积分）或低延迟档 `fast`/`ultra-fast`；advanced 返回更相关的来源 |
 | `topic` | str | `"general"` | `general`、`news` 或 `finance` |
 | `time_range` | str | `""` | `day`/`week`/`month`/`year` 或简写 `d`/`w`/`m`/`y` |
 | `start_date` | str | `""` | `YYYY-MM-DD` 格式，返回该日期之后的结果 |
@@ -76,26 +80,24 @@ graph LR
 | `chunks_per_source` | int | `3` | 每个来源的最大内容块数（1–3），仅 `advanced` 深度生效 |
 | `include_images` | bool | `False` | 结果中包含图片 |
 | `include_image_descriptions` | bool | `False` | 附带图片描述 |
-| `include_answer` | bool | `False` | 生成 LLM 综合回答（basic/advanced 均可） |
-| `include_raw_content` | bool | `False` | 返回清洗后的 HTML/Markdown 原文 |
+| `include_answer` | bool \| str | `False` | 生成 LLM 综合回答：`true`/`basic` 快速、`advanced` 更详细；字符串布尔（true/false/1/0/yes/no/on/off，任意大小写）自动归一化 |
+| `include_raw_content` | bool \| str | `False` | 返回清洗后的 HTML/Markdown 原文：`true`/`markdown` 输出 Markdown、`text` 输出纯文本；字符串布尔自动归一化 |
 | `include_domains` | list[str] | `None` | 限定搜索的域名列表（最多 300 个） |
 | `exclude_domains` | list[str] | `None` | 排除的域名列表（最多 150 个） |
-| `country` | str | `""` | 优先返回该国家的结果（仅 `topic=general` 时生效） |
+| `country` | str | `""` | 优先返回该国家的结果（仅 `topic=general` 时生效）。支持两位 ISO 码（`us`）或完整国家名（`united states`），自动归一化为官方完整国家名；池内 Key 格式要求不一致时自动切换格式并换 key 重试（客户端无需关心） |
 | `exact_match` | bool | `False` | 仅返回包含精确短语的结果 |
 | `include_favicon` | bool | `False` | 返回站点 favicon URL |
+| `auto_parameters` | bool | `False` | 由 Tavily 根据查询意图自动调优参数 |
 | `include_usage` | bool | `True` | 响应中包含积分用量（默认开启，便于追踪） |
 
 ### 底层实现
 
-调用 `TavilyClient.search(**kwargs)`，并按需附加 `time_range`、`start_date`、`end_date`、`include_domains`、`exclude_domains`、`country` 等可选参数。响应若包含 `usage` 字段则读取实际消耗积分，缺失或为 0 时按 `_est_credits(search_depth)` 估算（advanced=2，basic=1）：
+调用 `TavilyClient.search(**kwargs)`，并按需附加 `time_range`、`start_date`、`end_date`、`include_domains`、`exclude_domains`、`country` 等可选参数。积分直接取响应中的 `usage.credits`（`include_usage=True` 时返回，basic 1 / advanced 2），**不做估算**——响应缺失 usage 时标记 `usage_source='unknown'`（如 Research 系列），面板显示「—」而非「0」：
 
 ```python
 resp = client.search(**kwargs)
-credits = 0
-if isinstance(resp, dict) and "usage" in resp:
-    usage = resp["usage"]
-    if isinstance(usage, dict):
-        credits = usage.get("credits", 0) or _est_credits(search_depth)
+credits, has_usage = _usage_credits(resp)   # (积分, 响应是否含 usage)
+source = "response" if has_usage else "unknown"
 ```
 
 ### 返回示例
@@ -321,17 +323,22 @@ AI 驱动的深度研究工具：自动收集来源、交叉分析，并生成�
 
 ### 底层实现
 
-先调用 `TavilyClient.research(input=..., ...)` 提交任务拿到 `request_id`，再循环 `get_research(request_id)` 轮询直到 `status` 为 `completed`（或失败/超时）：
+`wait=true`（默认）时以 SDK 原生流式（`stream=True`，官方 API 已强制流式）为主路径：直接消费 SSE 流按块组装报告，减少一次无效请求；流式失败时才回退「提交任务 + 轮询」（`research()` 提交拿到 `request_id`，再循环 `get_research()` 直到 `status` 为 `completed`，或失败/超时）。`wait=false` 时提交后立即返回 `request_id`：
 
 ```python
-resp = client.research(
+# wait=true 主路径（0.3.1+）：原生流式，逐块组装报告
+gen = client.research(
     input="2025 年 AI Agent 发展趋势",
     model="pro",
     citation_format="numbered",
     include_domains=["arxiv.org", "openai.com"],
+    stream=True,
 )
+# 服务端内部：解析 SSE data: 块，拼接 choices[0].delta.content
+
+# 流式失败的回退路径：提交任务 → 轮询直到 status == "completed"
+resp = client.research(input=..., model=..., citation_format=...)
 request_id = resp["request_id"]
-# 服务端内部：轮询直到 status == "completed"
 result = client.get_research(request_id)
 ```
 
@@ -359,19 +366,42 @@ result = client.get_research(request_id)
 
 > 注意：该工具耗时较长（30–120 秒），Agent 调用时应设置足够的超时，避免中断。
 
+## tavily_research_status（任务状态查询）
+
+查询之前 `tavily_research(wait=false)` 提交的研究任务状态与结果，入参为必填的 `request_id`，配合实现「提交 → 查询」两步式深度研究。
+
+### 参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `request_id` | str | 必填 | `tavily_research`（`wait=false`）返回的任务 ID |
+
+### 底层实现
+
+调用 `TavilyClient.get_research(request_id)`。Tavily 任务按 key 隔离，查询优先使用提交任务时的同一 Key，该 Key 失效/耗尽时才回退轮询取 Key（详见 [tavily_research](#tavily_research深度研究) 的任务状态说明）。返回响应含 `status`（`completed`/`failed`/`error`/`cancelled`）与任务结果。
+
 ## tavily_pool_status（密钥池状态）
 
 无参数工具，直接读取 KeyPool 统计信息，返回活跃 Key 数量、各 Key 的用量、延迟与近期活动。适用于运维排查与健康检查。
 
 ```python
 @mcp.tool()
-def tavily_pool_status() -> str:
-    """Get API key pool status — active keys, usage stats, recent activity."""
-    stats = pool.get_stats()
-    return json.dumps(stats, ensure_ascii=False, indent=2)
+async def tavily_pool_status() -> str:
+    """Get API key pool status — active keys, usage stats, anomalies, aggregate capacity."""
+
+    def _impl() -> str:
+        stats = pool.get_stats()
+        stats["aggregate"] = pool.get_aggregate()
+        stats["anomalies"] = pool.detect_anomalies()
+        return json.dumps(stats, ensure_ascii=False, indent=2)
+
+    return await anyio.to_thread.run_sync(_impl)
 ```
 
-返回内容由 `KeyPool.get_stats()` 提供，包括但不限于：Key 掩码、请求计数、成功率、累计积分、平均延迟等。
+返回内容由 `KeyPool.get_stats()` 提供，包括但不限于：Key 掩码、请求计数、成功率、累计积分、平均延迟等；并附加两项：
+
+- `aggregate`（`get_aggregate()`）：全池聚合容量——总/活跃/耗尽 Key 数、总积分上限、已用总积分、剩余积分与用量占比；
+- `anomalies`（`detect_anomalies()`）：异常 Key 摘要——额度耗尽/近耗尽、疑似泄露、高错误率、静默失效、延迟异常。
 
 ## MCP 协议调用方式
 
@@ -450,7 +480,7 @@ sequenceDiagram
     participant Client as TavilyClient
 
     Agent->>Server: tools/call → tavily_search(query=...)
-    Server->>Pool: next_key()（round-robin）
+    Server->>Pool: next_available_key()（key_strategy + 令牌桶限流）
     Pool-->>Server: (raw_key, masked_key)
     Server->>Client: search(**kwargs)
     Client-->>Server: JSON 响应（含 usage.credits）
@@ -464,24 +494,24 @@ sequenceDiagram
 
 ### Key 获取
 
-每个工具调用开始时通过 `_get_client()` 从 KeyPool 取 Key，策略由模块级常量 `KEY_STRATEGY` 控制：
+每个工具调用开始时通过 `_get_client()` 从 KeyPool 取 Key，策略由 `config.json` 的 `key_strategy` 配置控制（`round-robin` 轮询 / `least-used` 最少使用，非法值回退默认轮询）：
 
 ```python
-KEY_STRATEGY = "round-robin"  # or "least-used"
-
 def _get_client() -> tuple[TavilyClient, str]:
-    if KEY_STRATEGY == "least-used":
-        result = pool.next_key_least_used()
-    else:
-        result = pool.next_key()
+    """取一个可用 key（未耗尽、未超限流）；全部受限时内部短暂等待。"""
+    result = pool.next_available_key()
     if result is None:
         raise RuntimeError("No active API keys in pool. Add keys via CLI or dashboard.")
     raw, masked = result
-    return TavilyClient(raw), masked
+    client = TavilyClient(raw)
+    _apply_default_timeout(client)   # 注入默认 60s 超时，防止无限挂起
+    return client, masked
 ```
 
-- `round-robin`：轮询选取下一个未被限流的 Key
-- `least-used`：选取累计使用次数最少的 Key
+- `round-robin`（默认）：`next_key()` 按 `last_used_at` 排序后轮询，仅取未停用、未耗尽且令牌充足的 Key
+- `least-used`：`next_key_least_used()` 选取累计请求次数最少的 Key
+- **令牌桶限流**：每个 Key 按 `rate_limit_rpm`（默认 90，官方 dev 100 RPM 留 10% 余量）限速，受限自动切换其他 Key；全部受限时等待最早可用时机（上限 `rate_limit_max_wait` 秒）
+- **自动重试**：工具调用统一经 `_run_with_retry` 执行——`quota`（额度耗尽）/`auth`（认证失效）类错误自动换 Key 重试（最多 2 次）；`country` 参数格式不兼容（`Invalid country`）时自动在「完整国家名 ↔ 两位 ISO 码」间切换并换 Key 重试，客户端无需关心池内差异
 - KeyPool 中没有任何可用 Key 时抛出 `RuntimeError`，该异常发生在工具内部的 `try/except` 之外，会直接冒泡到 MCP 调用层
 
 ### 用量记录
@@ -492,7 +522,7 @@ def _get_client() -> tuple[TavilyClient, str]:
 pool.record_request(masked, endpoint, latency, success, credits, error_msg)
 ```
 
-记录的端点名分别为 `search`、`extract`、`crawl`、`map`、`research`；延迟以毫秒计。积分优先取响应中的 `usage.credits`，搜索工具在缺失时按 `_est_credits(search_depth)` 估算。
+记录的端点名分别为 `search`、`extract`、`crawl`、`map`、`research`；延迟以毫秒计。积分取响应中的 `usage.credits`（search/extract/crawl/map），Research 系列官方响应不含 usage，记为 `usage_source='unknown'`、积分 0，实际消耗以官方 `/usage` 对账。
 
 ### 错误返回格式
 

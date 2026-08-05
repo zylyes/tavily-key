@@ -338,6 +338,41 @@ def test_record_request_id_logged(pool):
     assert logs[0]["request_id"] == "req-123"
 
 
+# ── 积分来源标记（usage_source）──────────────────────────────
+def test_record_usage_source_logged(pool):
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, True, 1, usage_source="response")
+    pool.record_request(MASK1, "research", 20, True, 0, request_id="r-1", usage_source="unknown")
+    pool.record_request(MASK1, "search", 30, False, 0, "boom", usage_source="none")
+    logs = pool.get_recent_logs(10)
+    by_ep = {l["endpoint"]: l for l in logs}
+    assert by_ep["search"]["usage_source"] == "response"
+    assert by_ep["research"]["usage_source"] == "unknown"
+    assert by_ep["search"]["success"] == 1
+    assert any(l["usage_source"] == "none" for l in logs)
+
+
+def test_local_credits_excludes_unknown(pool):
+    """Research（unknown）不参与本地对账：避免官方 usage 与本地差值误报 suspected_leak。"""
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, True, 1, usage_source="response")
+    pool.record_request(MASK1, "extract", 10, True, 0, usage_source="response")  # 官方批量未达下限=真0
+    pool.record_request(MASK1, "research", 10, True, 0, usage_source="unknown")
+    assert pool._local_credits(MASK1) == 1.0  # 只统计 response 的成功积分
+
+
+def test_usage_source_migration_adds_column(pool):
+    """旧库迁移：缺少 usage_source 列时自动补充，历史记录 usage_source 为空。"""
+    conn = pool._get_conn()
+    conn.execute("ALTER TABLE request_log DROP COLUMN usage_source")
+    conn.commit()
+    pool._init_db()  # 幂等重建：触发 _ensure_columns 补列
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, True, 1)
+    logs = pool.get_recent_logs(5)
+    assert logs[0]["usage_source"] == ""
+
+
 # ── 令牌桶限流 ───────────────────────────────────────────────
 def test_token_bucket_limits_rate():
     from key_pool import _TokenBucket
@@ -389,6 +424,69 @@ def test_sync_usage_recovers_exhausted(monkeypatch, pool):
     results = pool.sync_usage()
     assert results[0]["recovered"] is True
     assert not pool.get_key(MASK1).is_exhausted
+
+
+def test_sync_usage_persists_research_usage(monkeypatch, pool):
+    """官方 /usage 的 research_usage 落库，供 suspected_leak 对账时扣除。"""
+    pool.add_key(KEY1)
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "key": {"usage": 120, "limit": 1000, "research_usage": 100,
+                        "search_usage": 15, "extract_usage": 2, "crawl_usage": 1, "map_usage": 2},
+                "account": {"current_plan": "Researcher", "plan_limit": 1000},
+            }
+
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _Resp())
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"usage_cache_ttl": 60})
+    pool.sync_usage()
+    k = pool.get_key(MASK1)
+    assert k.credits_used == 120
+    assert k.research_usage == 100  # 官方 research 单独落库
+
+
+def test_suspected_leak_excludes_research(monkeypatch, pool):
+    """官方 research 消耗（仅存在于 /usage，本地无对应日志积分）不应误报 suspected_leak。"""
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, True, 1, usage_source="response")
+    pool.record_request(MASK1, "research", 10, True, 0, usage_source="unknown")
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "key": {"usage": 120, "limit": 1000, "research_usage": 100},
+                "account": {"current_plan": "Researcher", "plan_limit": 1000},
+            }
+
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _Resp())
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {
+        "usage_cache_ttl": 60,
+        "anomaly_thresholds": {"leak_diff_credits": 50},
+    })
+    pool.sync_usage()
+    # diff = 120 - 100(research) - 1(local) = 19 < 50 → 不误报
+    assert not any("suspected_leak" in a["flags"] for a in pool.detect_anomalies())
+    # 反向验证：真实泄露（官方用量远超 research+本地）仍能检出
+    pool._usage_cache.clear()
+
+    class _Resp2:
+        status_code = 200
+
+        def json(self):
+            return {
+                "key": {"usage": 300, "limit": 1000, "research_usage": 100},
+                "account": {"current_plan": "Researcher", "plan_limit": 1000},
+            }
+
+    monkeypatch.setattr("httpx.get", lambda url, headers=None, timeout=None: _Resp2())
+    pool.sync_usage()
+    # diff = 300 - 100 - 1 = 199 >= 50 → 检出
+    assert any("suspected_leak" in a["flags"] for a in pool.detect_anomalies())
 
 
 def test_get_aggregate(pool):

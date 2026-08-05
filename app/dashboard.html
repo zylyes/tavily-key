@@ -605,6 +605,15 @@ function fmtLat(x) {
   if (x<1000) return x.toFixed(0)+'ms';
   return (x/1000).toFixed(1)+'s';
 }
+// 日志「积分」列：失败不消耗显示 -；接口响应不含 usage（如 Research）显示 —
+// （实际消耗以官方用量为准），避免把「未知」误显示为「消耗 0」。
+function fmtCredits(l) {
+  if (!l.success) return '<span style="color:var(--text-3)">-</span>';
+  if (l.usage_source === 'unknown') {
+    return '<span style="color:var(--text-3);cursor:help" title="该接口响应不含积分信息，实际消耗以官方用量为准">—</span>';
+  }
+  return l.credits_consumed;
+}
 
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
@@ -694,7 +703,7 @@ async function load() {
         <td class="mono" style="font-size:11px">${escapeHtml(l.key_masked)}</td>
         <td>${escapeHtml(l.endpoint)}</td>
         <td><span class="badge ${l.success?'badge-success':'badge-fail'}">${l.success?'成功':'失败'}</span></td>
-        <td>${l.credits_consumed}</td>
+        <td>${fmtCredits(l)}</td>
         <td>${fmtLat(l.latency_ms)}</td>
         <td class="mono" style="font-size:10px;color:var(--text-3)">${escapeHtml(l.request_id||'')}</td>
         <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
