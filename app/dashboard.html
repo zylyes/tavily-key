@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tavily Key Pool 控制台</title>
+<link rel="icon" href="/favicon.ico">
+<style>
+:root{
+  --bg:#0a0f1e;
+  --bg-2:#0f172a;
+  --surface:#141d36;
+  --surface-2:#1b2742;
+  --surface-3:#243354;
+  --border:#2a3752;
+  --border-2:#36455f;
+  --text:#e6edf7;
+  --text-2:#93a3bd;
+  --text-3:#5f6f8c;
+  --accent:#6d7cff;
+  --accent-2:#8b98ff;
+  --accent-soft:rgba(109,124,255,.16);
+  --green:#34d399;
+  --amber:#fbbf24;
+  --red:#f87171;
+  --radius:14px;
+  --radius-sm:9px;
+  --font:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+  --shadow:0 8px 30px rgba(2,6,20,.4);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{font:13px/1.55 var(--font);background:
+  radial-gradient(1100px 480px at 12% -8%, rgba(109,124,255,.14), transparent 60%),
+  radial-gradient(900px 420px at 108% -6%, rgba(59,130,246,.12), transparent 55%),
+  var(--bg);color:var(--text);display:flex;flex-direction:column;-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+
+/* 顶部栏 */
+.header{display:flex;justify-content:space-between;align-items:center;padding:12px 22px;background:rgba(20,29,54,.82);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);flex-shrink:0;user-select:none}
+.brand{display:flex;align-items:center;gap:13px}
+.logo{width:44px;height:44px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.logo img{width:100%;height:100%;display:block;filter:drop-shadow(0 4px 10px rgba(99,102,241,.4))}
+.brand h1{font-size:15px;font-weight:700;letter-spacing:.2px;line-height:1.2}
+.brand .subtitle{font-size:11px;color:var(--text-3);margin-top:2px}
+.header-right{display:flex;align-items:center;gap:16px}
+.stats-bar{display:flex;gap:10px;align-items:center}
+.stat-card{display:flex;flex-direction:column;align-items:center;min-width:64px;padding:6px 14px;background:var(--surface);border:1px solid var(--border);border-radius:11px}
+.stat-card .stat-label{font-size:10px;color:var(--text-3);margin-bottom:2px;font-weight:500}
+.stat-card .stat-value{font-size:16px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;line-height:1.2}
+.refresh{font-size:10px;color:var(--text-3);white-space:nowrap}
+.refresh strong{color:var(--text-2);font-weight:600}
+
+/* 无边框窗口：自定义窗口控制按钮（浏览器模式下点击会提示使用桌面版） */
+.win-controls{display:flex;gap:4px;margin-left:6px}
+.win-btn{width:36px;height:28px;border:none;background:transparent;color:var(--text-2);font-size:12px;line-height:1;cursor:pointer;border-radius:7px;font-family:inherit;transition:background .15s,color .15s}
+.win-btn:hover{background:var(--surface-3);color:var(--text)}
+.win-btn.win-close:hover{background:var(--red);color:#fff}
+
+/* 无边框窗口：边缘/角落缩放热区（仅网页套壳模式显示） */
+.resize-handle{position:fixed;z-index:9999;display:none}
+body.webview .resize-handle{display:block}
+.r-n{top:0;left:12px;right:12px;height:6px;cursor:n-resize}
+.r-s{bottom:0;left:12px;right:12px;height:6px;cursor:s-resize}
+.r-e{right:0;top:12px;bottom:12px;width:6px;cursor:e-resize}
+.r-w{left:0;top:12px;bottom:12px;width:6px;cursor:w-resize}
+.r-nw{top:0;left:0;width:14px;height:14px;cursor:nw-resize}
+.r-ne{top:0;right:0;width:14px;height:14px;cursor:ne-resize}
+.r-sw{bottom:0;left:0;width:14px;height:14px;cursor:sw-resize}
+.r-se{bottom:0;right:0;width:14px;height:14px;cursor:se-resize}
+
+/* 添加 Key 栏 */
+/* 菜单栏右侧操作按钮 */
+.tabs-actions{margin-left:auto;display:flex;gap:8px;align-items:center;padding-bottom:8px}
+
+/* 主体 */
+.content{flex:1;display:flex;flex-direction:column;min-height:0;padding:16px 22px 22px}
+.tabs{display:flex;gap:4px;padding:0 8px;flex-shrink:0;position:relative;z-index:2;border-bottom:1px solid var(--border)}
+.tab{background:transparent;color:var(--text-3);border:none;border-bottom:2px solid transparent;margin-bottom:-1px;padding:10px 16px;cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;display:flex;align-items:center;gap:7px;transition:color .15s,border-color .15s}
+.tab:hover{color:var(--text-2)}
+.tab.active{color:var(--accent-2);border-bottom-color:var(--accent)}
+.tab svg{width:15px;height:15px;flex-shrink:0}
+.tab-panel{display:none;flex:1;flex-direction:column;min-width:0;min-height:0;margin-top:14px}
+.tab-panel.active{display:flex}
+.column{flex:1;display:flex;flex-direction:column;min-width:0}
+.column-body{flex:1;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);overflow-y:auto;overflow-x:auto;min-height:0;box-shadow:var(--shadow)}
+
+/* 表格 */
+table{width:100%;border-collapse:collapse}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:12px;white-space:nowrap}
+th{color:var(--text-2);font-weight:600;position:sticky;top:0;background:var(--surface-2);z-index:1;font-size:11px;letter-spacing:.4px}
+th::after{content:'';position:absolute;left:0;bottom:-1px;width:100%;border-bottom:1px solid var(--border-2)}
+tbody tr{transition:background .12s}
+tbody tr:hover{background:var(--surface-3)}
+tbody tr:last-child td{border-bottom:none}
+.empty-cell{text-align:center;color:var(--text-3);padding:44px 0;font-size:12px}
+.mono{font-family:var(--mono)}
+
+/* 徽章 */
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:10px;padding:3px 9px;border-radius:999px;font-weight:600;letter-spacing:.2px;white-space:nowrap}
+.badge::before{content:'';width:6px;height:6px;border-radius:50%;background:currentColor}
+.badge-active,.badge-success{background:rgba(52,211,153,.13);color:var(--green)}
+.badge-inactive,.badge-fail{background:rgba(248,113,113,.13);color:var(--red)}
+
+/* 按钮 */
+.btn{padding:6px 14px;border-radius:var(--radius-sm);border:none;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;justify-content:center;transition:filter .15s,background .15s,transform .05s;font-family:inherit}
+.btn:active{transform:translateY(1px)}
+.btn:disabled{opacity:.5;cursor:not-allowed;transform:none}
+.btn-primary{background:linear-gradient(135deg,#6366f1,#4f7df9);color:#fff;box-shadow:0 3px 10px rgba(99,102,241,.3)}
+.btn-primary:hover{filter:brightness(1.1)}
+.btn-danger{background:#dc2626;color:#fff}
+.btn-danger:hover{background:#b91c1c}
+.btn-ghost{background:var(--surface-3);color:var(--text-2)}
+.btn-ghost:hover{background:var(--border-2);color:var(--text)}
+.btn-sm{padding:4px 11px;font-size:10px}
+.btn svg{width:13px;height:13px}
+
+/* 进度条 */
+.progress-bar{height:6px;border-radius:4px;background:var(--border);overflow:hidden;width:80px;display:inline-block;vertical-align:middle}
+.progress-fill{height:100%;border-radius:4px;transition:width .4s ease}
+
+.actions{display:flex;gap:6px}
+.status{font-size:11px;color:var(--text-2);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.column-body::-webkit-scrollbar{width:8px;height:8px}
+.column-body::-webkit-scrollbar-track{background:transparent}
+.column-body::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:4px}
+.column-body::-webkit-scrollbar-thumb:hover{background:var(--text-3)}
+
+tr td:last-child,tr th:last-child{padding-right:16px}
+tr td:first-child,tr th:first-child{padding-left:16px}
+
+/* 设置页 */
+.settings-body{padding:22px;overflow-y:auto}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 24px;margin-bottom:16px;box-shadow:var(--shadow)}
+.card h3{font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px;display:flex;align-items:center;gap:8px}
+.card h3 svg{width:16px;height:16px;color:var(--accent-2)}
+.card .card-desc{font-size:11px;color:var(--text-3);margin-bottom:20px}
+.setting-row{margin-bottom:18px;max-width:560px}
+.setting-row label{font-size:11px;color:var(--text-2);display:block;margin-bottom:6px;font-weight:500}
+.setting-row input,.setting-row select{background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--font);width:100%;transition:border-color .15s,box-shadow .15s}
+.setting-row input:focus,.setting-row select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.setting-row select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2393a3bd' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:34px;cursor:pointer}
+.setting-actions{display:flex;gap:12px;align-items:center;margin-bottom:12px}
+.setting-hint{margin-top:2px;font-size:12px;color:var(--green);line-height:1.8}
+.deploy-guide{margin-top:4px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;font-size:12px;line-height:2;color:var(--text-2);max-width:660px}
+.deploy-guide h4{color:var(--text);font-size:12px;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.deploy-guide code{background:var(--surface-2);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font-size:11px;color:#a5b4fc;font-family:var(--mono)}
+.deploy-guide pre{background:#0a1122;border:1px solid var(--border);border-radius:8px;padding:12px 14px;overflow-x:auto;margin-top:8px;color:#8b9cf9;font-family:var(--mono);font-size:11px;line-height:1.8}
+
+/* 登录弹层 */
+.login-mask{position:fixed;inset:0;background:rgba(4,8,20,.82);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center;z-index:99}
+.login-mask.show{display:flex}
+.login-box{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:32px 34px;width:372px;text-align:center;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.login-logo{width:54px;height:54px;display:flex;align-items:center;justify-content:center;margin:0 auto 16px}
+.login-logo img{width:100%;height:100%;display:block;filter:drop-shadow(0 8px 20px rgba(99,102,241,.4))}
+.login-box h3{font-size:16px;margin-bottom:6px}
+.login-box p{font-size:11px;color:var(--text-2);margin-bottom:20px}
+.login-box input{background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:10px 14px;border-radius:var(--radius-sm);font-size:13px;width:100%;margin-bottom:12px;transition:border-color .15s,box-shadow .15s}
+.login-box input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.login-box .err{color:#fca5a5;font-size:11px;min-height:16px;margin-bottom:8px}
+
+/* 确认弹层 */
+.modal-mask{position:fixed;inset:0;background:rgba(4,8,20,.7);backdrop-filter:blur(5px);display:none;align-items:center;justify-content:center;z-index:98}
+.modal-mask.show{display:flex}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:26px 28px;width:400px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.modal-box h3{font-size:14px;margin-bottom:10px;display:flex;align-items:center;gap:9px}
+.modal-box p{font-size:12px;color:var(--text-2);line-height:1.8;margin-bottom:22px;word-break:break-all}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px}
+
+/* 轻提示 Toast */
+.toast-wrap{position:fixed;top:16px;right:18px;display:flex;flex-direction:column;gap:10px;z-index:100;pointer-events:none}
+.toast{display:flex;align-items:center;gap:10px;background:var(--surface-2);border:1px solid var(--border-2);border-radius:12px;padding:12px 16px;font-size:12px;color:var(--text);box-shadow:0 10px 32px rgba(0,0,0,.5);min-width:220px;max-width:380px;transform:translateX(30px);opacity:0;transition:transform .25s ease,opacity .25s ease;pointer-events:auto}
+.toast.show{transform:translateX(0);opacity:1}
+.toast-ic{width:22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0;font-weight:700}
+.toast.success .toast-ic{background:rgba(52,211,153,.16);color:var(--green)}
+.toast.error .toast-ic{background:rgba(248,113,113,.16);color:var(--red)}
+.toast.info .toast-ic{background:rgba(96,165,250,.16);color:#60a5fa}
+.toast.warn .toast-ic{background:rgba(251,191,36,.16);color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="login-mask" id="loginMask">
+  <div class="login-box">
+    <div class="login-logo"><img src="/logo.png" alt="Tavily" draggable="false"></div>
+    <h3>需要访问令牌</h3>
+    <p>此服务已开启访问鉴权，请输入访问令牌后继续。</p>
+    <input id="loginToken" type="password" placeholder="访问令牌" onkeydown="if(event.key==='Enter')submitLogin()">
+    <div class="err" id="loginErr"></div>
+    <button class="btn btn-primary" style="width:100%;padding:11px" onclick="submitLogin()">进入控制台</button>
+  </div>
+</div>
+
+<div class="modal-mask" id="confirmMask">
+  <div class="modal-box">
+    <h3><span class="toast-ic" style="background:rgba(248,113,113,.16);color:var(--red)">!</span><span id="confirmTitle">确认操作</span></h3>
+    <p id="confirmMsg"></p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="confirmResolve(false)">取消</button>
+      <button class="btn btn-danger" onclick="confirmResolve(true)">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加 API Key 弹窗 -->
+<div class="modal-mask" id="addKeyMask">
+  <div class="modal-box" style="width:470px">
+    <h3><span class="toast-ic" style="background:rgba(96,165,250,.16);color:#60a5fa">+</span>添加 API Key</h3>
+    <p>粘贴 Key（每行一个），或从 .txt 文本文件批量导入。</p>
+    <textarea id="addKeyInput" rows="7" placeholder="tvly-xxxxxxxxxxxxxxxx&#10;tvly-xxxxxxxxxxxxxxxx" style="background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:10px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);width:100%;min-height:130px;resize:vertical;margin-bottom:12px;transition:border-color .15s,box-shadow .15s"></textarea>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px">
+      <button class="btn btn-ghost btn-sm" onclick="importKeyFile()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>
+        导入 .txt 文件
+      </button>
+      <span class="status" id="addKeyFileInfo"></span>
+      <input type="file" id="addKeyFile" accept=".txt,text/plain" style="display:none" onchange="handleKeyFile(event)">
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeAddModal()">取消</button>
+      <button class="btn btn-primary" onclick="addKeys()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        添加
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- 健康检查弹窗 -->
+<div class="modal-mask" id="healthMask">
+  <div class="modal-box" style="width:500px">
+    <h3><span class="toast-ic" style="background:rgba(52,211,153,.16);color:var(--green)">✓</span>健康检查</h3>
+    <p id="healthSummary">点击「开始检查」逐个检测各 Key 的可用性（自动停用失效 Key）。</p>
+    <div style="margin:14px 0">
+      <div class="progress-bar" style="width:100%;height:8px"><div class="progress-fill" id="healthBar" style="width:0%"></div></div>
+    </div>
+    <div id="healthList" style="max-height:280px;overflow-y:auto;margin-bottom:16px;display:flex;flex-direction:column;gap:6px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" id="healthStartBtn" onclick="runHealthNow()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
+        开始检查
+      </button>
+      <button class="btn btn-ghost" onclick="closeHealthModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="header">
+  <div class="brand">
+    <div class="logo"><img src="/logo.png" alt="Tavily" draggable="false"></div>
+    <div>
+      <h1>Tavily Key Pool</h1>
+      <div class="subtitle">API Key 池 · 用量追踪 · MCP 服务控制台</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="stats-bar">
+      <div class="stat-card"><span class="stat-label">Key 总数</span><span class="stat-value" id="totalKeys">-</span></div>
+      <div class="stat-card"><span class="stat-label">活跃</span><span class="stat-value" id="activeKeys" style="color:var(--green)">-</span></div>
+      <div class="stat-card"><span class="stat-label">请求数</span><span class="stat-value" id="totalReqs">-</span></div>
+      <div class="stat-card"><span class="stat-label">积分消耗</span><span class="stat-value" id="totalCredits">-</span></div>
+      <div class="refresh" id="refreshTime"></div>
+    </div>
+    <div class="win-controls">
+      <button class="win-btn" title="最小化" onclick="winMin()">─</button>
+      <button class="win-btn" title="最大化 / 还原" onclick="winMax()">▢</button>
+      <button class="win-btn win-close" title="关闭" onclick="winClose()">✕</button>
+    </div>
+  </div>
+</div>
+
+<main class="content">
+  <div class="tabs">
+    <button class="tab active" data-tab="keys" onclick="switchTab('keys')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="M16 7l3 3"/><path d="M12 11l2 2"/></svg>
+      API Key 列表
+    </button>
+    <button class="tab" data-tab="logs" onclick="switchTab('logs')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+      请求日志
+    </button>
+    <button class="tab" data-tab="mcp" onclick="switchTab('mcp')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M12 14v3"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
+      MCP 服务
+    </button>
+    <button class="tab" data-tab="settings" onclick="switchTab('settings')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      设置
+    </button>
+    <span class="tabs-actions">
+      <button class="btn btn-sm btn-primary" onclick="openAddModal()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        添加 API Key
+      </button>
+      <button class="btn btn-sm btn-ghost" onclick="openHealthModal()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-9-9"/><path d="M21 3v6h-6"/></svg>
+        健康检查
+      </button>
+    </span>
+  </div>
+
+  <div class="tab-panel active" id="panel-keys">
+    <div class="column">
+      <div style="display:flex;justify-content:flex-end;gap:8px;padding-bottom:10px">
+        <button class="btn btn-sm btn-ghost" onclick="syncUsage()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+          同步官方用量
+        </button>
+      </div>
+      <div class="column-body">
+        <table>
+          <thead>
+            <tr><th>Key</th><th>状态</th><th>请求数</th><th>错误</th><th>积分</th><th>用量 %</th><th>最后使用</th><th>操作</th></tr>
+          </thead>
+          <tbody id="keyTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-logs">
+    <div class="column">
+      <div class="column-body">
+        <table>
+          <thead>
+            <tr><th>时间</th><th>Key</th><th>接口</th><th>状态</th><th>积分</th><th>延迟</th><th>错误</th></tr>
+          </thead>
+          <tbody id="logTableBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-mcp">
+    <div class="column">
+      <div class="column-body settings-body">
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            MCP 服务状态
+          </h3>
+          <div class="card-desc">将 MCP 服务接入 AI 客户端，供本机或局域网设备使用</div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-2)">状态:</span>
+            <span id="mcpStatusBadge" class="badge badge-inactive">未知</span>
+            <span id="mcpPid" style="font-size:11px;color:var(--text-3)"></span>
+            <span style="flex:1"></span>
+            <button class="btn btn-primary" id="mcpToggleBtn" onclick="toggleMcp()">启动服务</button>
+          </div>
+          <div id="mcpUrlRow" style="margin-top:16px;display:none">
+            <label style="font-size:11px;color:var(--text-2);display:block;margin-bottom:6px">服务地址（供 AI 客户端 / 局域网设备连接）</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="mcpUrl" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+              <button class="btn btn-sm btn-primary" onclick="copyMcpUrl()">复制地址</button>
+            </div>
+          </div>
+          <div id="mcpHint" style="margin-top:10px;font-size:11px;color:var(--text-2);line-height:1.7"></div>
+        </div>
+
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            MCP 设置
+          </h3>
+          <div class="card-desc">配置 MCP 服务的启动方式与网络参数</div>
+          <div class="setting-row">
+            <label>随软件启动 MCP 服务</label>
+            <select id="setMcpAutoStart">
+              <option value="true">是（软件启动后自动启动 MCP 服务）</option>
+              <option value="false">否（仅手动启动）</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>传输方式</label>
+            <select id="setMcpTransport">
+              <option value="sse">SSE（默认 · 局域网内可用 · 可由面板启停）</option>
+              <option value="streamable-http">Streamable HTTP（局域网内可用 · 可由面板启停）</option>
+              <option value="stdio">stdio（AI 客户端本机直连 · 无法由面板管理）</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>监听地址</label>
+            <input id="setMcpHost" type="text" placeholder="0.0.0.0（局域网）/ 127.0.0.1（仅本机）">
+          </div>
+          <div class="setting-row">
+            <label>端口</label>
+            <input id="setMcpPort" type="number" placeholder="8001">
+          </div>
+          <div class="setting-row">
+            <label>访问令牌（留空则不鉴权）</label>
+            <input id="setMcpToken" type="password" placeholder="非空时客户端需带 Authorization: Bearer <token> 请求头">
+          </div>
+          <div class="setting-actions">
+            <button class="btn btn-primary" onclick="saveMcpSettings()">保存设置</button>
+            <span class="status" id="mcpSettingsStatus"></span>
+          </div>
+          <div class="setting-hint" id="mcpHint2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-settings">
+    <div class="column">
+      <div class="column-body settings-body">
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="m9 11 2 2 4-4"/></svg>
+            通用设置
+          </h3>
+          <div class="card-desc">开机自启与窗口行为（关闭 / 最小化到系统托盘）</div>
+          <div class="setting-row">
+            <label>开机自启</label>
+            <select id="setAutostart">
+              <option value="true">是（登录 Windows 后自动启动）</option>
+              <option value="false">否</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>启动程序时</label>
+            <select id="setStartToTray">
+              <option value="true">直接最小化到系统托盘（适合开机自启）</option>
+              <option value="false">显示主窗口</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>点击关闭按钮时</label>
+            <select id="setCloseToTray">
+              <option value="true">最小化到系统托盘（后台继续运行）</option>
+              <option value="false">退出程序</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>点击最小化按钮时</label>
+            <select id="setMinimizeToTray">
+              <option value="true">隐藏到系统托盘</option>
+              <option value="false">最小化到任务栏</option>
+            </select>
+          </div>
+          <div class="setting-actions">
+            <button class="btn btn-primary" onclick="saveGeneralSettings()">保存通用设置</button>
+            <span class="status" id="generalStatus"></span>
+          </div>
+        </div>
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            部署设置
+          </h3>
+          <div class="card-desc">配置服务的部署模式、监听地址与访问鉴权</div>
+          <div class="setting-row">
+            <label>部署模式</label>
+            <select id="setMode">
+              <option value="server">Server（Linux 服务器 · 通过域名对外提供服务）</option>
+              <option value="local">Local（Windows 本地 · 本机提供服务）</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>绑定域名</label>
+            <input id="setDomain" type="text" placeholder="例如 api.example.com（仅界面展示用途）">
+          </div>
+          <div class="setting-row">
+            <label>监听地址 Host</label>
+            <input id="setHost" type="text" placeholder="127.0.0.1（仅本机）/ 0.0.0.0（所有网卡）">
+          </div>
+          <div class="setting-row">
+            <label>端口</label>
+            <input id="setPort" type="number" placeholder="8000">
+          </div>
+          <div class="setting-row">
+            <label>访问令牌（留空则不鉴权）</label>
+            <input id="setToken" type="password" placeholder="设置后所有 /api/* 请求需携带令牌">
+          </div>
+          <div class="setting-actions">
+            <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+            <span class="status" id="settingsStatus"></span>
+          </div>
+          <div class="setting-hint" id="publicUrlHint"></div>
+        </div>
+        <div class="deploy-guide" id="deployGuide"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- 轻提示 Toast 容器 -->
+<div class="toast-wrap" id="toastWrap"></div>
+
+<!-- 无边框窗口：边缘/角落缩放手柄 -->
+<div class="resize-handle r-n"  data-dir="top"         onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-s"  data-dir="bottom"      onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-e"  data-dir="right"       onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-w"  data-dir="left"        onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-nw" data-dir="top-left"    onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-ne" data-dir="top-right"   onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-sw" data-dir="bottom-left" onmousedown="resizeStart(event)"></div>
+<div class="resize-handle r-se" data-dir="bottom-right" onmousedown="resizeStart(event)"></div>
+
+<script>
+// ── 无边框窗口控制（仅网页套壳模式，浏览器打开时自动隐藏）────────
+function inWebview() { return !!(window.pywebview && window.pywebview.api); }
+function needWebview() {
+  if (window.pywebview) return false;
+  toast('窗口控制（最小化/最大化/关闭/缩放）仅在桌面版可用。\n请运行 Tavily.exe 打开桌面窗口。', 'info');
+  return true;
+}
+function winMin() { if (needWebview()) return; window.pywebview.api.minimize(); }
+function winMax() { if (needWebview()) return; window.pywebview.api.toggle_maximize(); }
+function winClose() { if (needWebview()) return; window.pywebview.api.close(); }
+function resizeStart(e) {
+  if (needWebview()) return;
+  e.preventDefault();
+  window.pywebview.api.resize(e.currentTarget.dataset.dir);
+}
+// ⚠️ pywebview 的桥接脚本在页面脚本执行【之后】才注入（派发 pywebviewready 事件），
+// 因此窗口控制接线必须延迟到 pywebviewready 之后再执行；否则页面加载时 inWebview()
+// 恒为 false，导致：拖动手势监听不挂载、body.webview 类不加（缩放热区保持隐藏）。
+function setupWebview() {
+  if (!inWebview()) return;
+  document.body.classList.add('webview');   // 显示边缘/角落缩放热区
+  const header = document.querySelector('.header');
+  if (!header) return;
+  let lastDown = 0;
+  header.addEventListener('mousedown', function(e) {
+    if (e.target.closest('button,input,textarea,select,a')) return;
+    const now = Date.now();
+    if (now - lastDown < 350) return; // 双击，跳过拖动
+    lastDown = now;
+    window.pywebview.api.start_drag();
+  });
+  header.addEventListener('dblclick', function(e) {
+    if (e.target.closest('button,input,textarea,select,a')) return;
+    window.pywebview.api.toggle_maximize();
+  });
+}
+if (inWebview()) {
+  setupWebview();
+} else {
+  window.addEventListener('pywebviewready', setupWebview);
+}
+
+const BASE = '';
+let authToken = localStorage.getItem('tavilyAuthToken') || '';
+
+function api(path, options={}) {
+  options.headers = Object.assign({'Content-Type':'application/json'}, options.headers||{});
+  if (authToken) options.headers['X-Auth-Token'] = authToken;
+  return fetch(BASE+path, options).then(async r => {
+    if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    return r.json();
+  });
+}
+function showLogin() {
+  document.getElementById('loginMask').classList.add('show');
+  document.getElementById('loginErr').textContent = '';
+  document.getElementById('loginToken').focus();
+}
+function submitLogin() {
+  const t = document.getElementById('loginToken').value.trim();
+  if (!t) return;
+  authToken = t;
+  localStorage.setItem('tavilyAuthToken', t);
+  document.getElementById('loginMask').classList.remove('show');
+  document.getElementById('loginToken').value = '';
+  load();
+}
+function fmtTs(ts) {
+  if (!ts || ts===0) return '-';
+  const d = new Date(ts*1000);
+  return d.toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+function fmtLat(x) {
+  if (x===0) return '0ms';
+  if (x<1000) return x.toFixed(0)+'ms';
+  return (x/1000).toFixed(1)+'s';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  document.getElementById('panel-keys').classList.toggle('active', name === 'keys');
+  document.getElementById('panel-logs').classList.toggle('active', name === 'logs');
+  document.getElementById('panel-mcp').classList.toggle('active', name === 'mcp');
+  document.getElementById('panel-settings').classList.toggle('active', name === 'settings');
+  if (name === 'settings') loadSettings();
+  if (name === 'mcp') { loadMcp(); loadMcpSettings(); }
+}
+
+async function load() {
+  try {
+    const d = await api('/api/stats');
+    document.getElementById('totalKeys').textContent = d.total_keys;
+    document.getElementById('activeKeys').textContent = d.active_keys;
+    document.getElementById('totalReqs').textContent = d.total_requests;
+    document.getElementById('totalCredits').textContent = d.total_credits;
+    document.getElementById('refreshTime').innerHTML = '刷新于 <strong>' + new Date().toLocaleTimeString('zh-CN') + '</strong>';
+
+    const keyTbody = document.getElementById('keyTableBody');
+    keyTbody.innerHTML = '';
+    if (!d.keys || d.keys.length === 0) {
+      keyTbody.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无 API Key — 点击菜单栏「添加 API Key」开始使用</td></tr>';
+    }
+    for (const k of d.keys||[]) {
+      const pct = k.usage_pct || 0;
+      const c = pct > 80 ? '#f87171' : pct > 50 ? '#fbbf24' : '#34d399';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mono" style="font-size:11px">${escapeHtml(k.masked)}</td>
+        <td><span class="badge ${k.is_active?'badge-active':'badge-inactive'}">${k.is_active?'活跃':'停用'}</span></td>
+        <td>${k.request_count}</td>
+        <td>${k.error_count}</td>
+        <td>${k.credits_used}</td>
+        <td>
+          <div class="progress-bar"><div class="progress-fill" style="width:${Math.min(pct,100)}%;background:${c}"></div></div>
+          <span style="font-size:10px;color:var(--text-2)">${pct.toFixed(1)}%</span>
+        </td>
+        <td style="font-size:10px;color:var(--text-3)">${fmtTs(k.last_used_at)}</td>
+        <td>
+          <div class="actions">
+            <button class="btn btn-sm ${k.is_active?'btn-danger':'btn-primary'}" onclick="toggleKey('${escapeHtml(k.masked)}',${k.is_active})">${k.is_active?'停用':'启用'}</button>
+            <button class="btn btn-sm btn-danger" onclick="removeKey('${escapeHtml(k.masked)}')">删除</button>
+          </div>
+        </td>`;
+      keyTbody.appendChild(tr);
+    }
+
+    const logTbody = document.getElementById('logTableBody');
+    logTbody.innerHTML = '';
+    if (!d.logs || d.logs.length === 0) {
+      logTbody.innerHTML = '<tr><td colspan="7" class="empty-cell">暂无请求日志</td></tr>';
+    }
+    for (const l of d.logs||[]) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td style="font-size:10px;color:var(--text-3)">${fmtTs(l.created_at)}</td>
+        <td class="mono" style="font-size:11px">${escapeHtml(l.key_masked)}</td>
+        <td>${escapeHtml(l.endpoint)}</td>
+        <td><span class="badge ${l.success?'badge-success':'badge-fail'}">${l.success?'成功':'失败'}</span></td>
+        <td>${l.credits_consumed}</td>
+        <td>${fmtLat(l.latency_ms)}</td>
+        <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
+      logTbody.appendChild(tr);
+    }
+  } catch(e) { console.error(e); }
+}
+
+// ── 添加 API Key 弹窗（粘贴 / .txt 文件导入） ─────────────────
+function openAddModal() {
+  document.getElementById('addKeyMask').classList.add('show');
+  document.getElementById('addKeyFileInfo').textContent = '';
+  setTimeout(() => document.getElementById('addKeyInput').focus(), 60);
+}
+function closeAddModal() {
+  document.getElementById('addKeyMask').classList.remove('show');
+}
+function importKeyFile() {
+  document.getElementById('addKeyFile').click();
+}
+function handleKeyFile(e) {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';  // 允许重复选择同一文件
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const ta = document.getElementById('addKeyInput');
+    const prev = ta.value.trim();
+    ta.value = (prev ? prev + '\n' : '') + String(reader.result || '');
+    document.getElementById('addKeyFileInfo').textContent = '已导入: ' + file.name;
+  };
+  reader.readAsText(file);
+}
+async function addKeys() {
+  const raw = document.getElementById('addKeyInput').value.trim();
+  if (!raw) return toast('请输入 API Key 或导入文件', 'error');
+  const keys = raw.split('\n').map(s=>s.trim()).filter(Boolean);
+  const d = await api('/api/keys/add', {
+    method:'POST',
+    body: JSON.stringify({keys})
+  });
+  toast(`已添加 ${d.added} 个 Key`, 'success');
+  document.getElementById('addKeyInput').value = '';
+  closeAddModal();
+  load();
+}
+async function removeKey(masked) {
+  const ok = await confirmDialog(`确定删除 ${masked} 吗？该操作不可撤销。`, '删除 API Key');
+  if (!ok) return;
+  await api('/api/keys/remove', {
+    method:'POST',
+    body: JSON.stringify({masked})
+  });
+  toast('Key 已删除', 'success');
+  load();
+}
+async function toggleKey(masked, isActive) {
+  const ep = isActive ? '/api/keys/deactivate' : '/api/keys/activate';
+  await api(BASE+ep, {
+    method:'POST',
+    body: JSON.stringify({masked})
+  });
+  load();
+}
+function escapeHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+// ── 轻提示 Toast / 确认弹层 ───────────────────────────────────
+function toast(msg, type='info', duration=2600) {
+  const wrap = document.getElementById('toastWrap');
+  if (!wrap) return;
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type||'info');
+  const icons = {success:'✓', error:'✕', info:'ℹ', warn:'!'};
+  el.innerHTML = '<span class="toast-ic">' + (icons[type]||'ℹ') + '</span><span>' + escapeHtml(msg) + '</span>';
+  wrap.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 260); }, duration);
+}
+let confirmCb = null;
+function confirmDialog(msg, title='确认操作') {
+  return new Promise(res => {
+    confirmCb = res;
+    document.getElementById('confirmTitle').textContent = title;
+    document.getElementById('confirmMsg').textContent = msg;
+    document.getElementById('confirmMask').classList.add('show');
+  });
+}
+function confirmResolve(v) {
+  document.getElementById('confirmMask').classList.remove('show');
+  if (confirmCb) { confirmCb(v); confirmCb = null; }
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (document.getElementById('confirmMask').classList.contains('show')) confirmResolve(false);
+    else if (document.getElementById('addKeyMask').classList.contains('show')) closeAddModal();
+    else if (document.getElementById('healthMask').classList.contains('show')) closeHealthModal();
+  }
+});
+
+// ── 健康检查弹窗（逐个 Key 显示进度） ────────────────────────
+let healthRunning = false;
+let healthRows = [];
+function openHealthModal() {
+  document.getElementById('healthMask').classList.add('show');
+  document.getElementById('healthSummary').textContent = '点击「开始检查」逐个检测各 Key 的可用性（自动停用失效 Key）。';
+  document.getElementById('healthBar').style.width = '0%';
+  document.getElementById('healthList').innerHTML = '';
+  const btn = document.getElementById('healthStartBtn');
+  btn.disabled = false;
+  btn.textContent = '开始检查';
+}
+function closeHealthModal() {
+  document.getElementById('healthMask').classList.remove('show');
+}
+function renderHealthList() {
+  const list = document.getElementById('healthList');
+  list.innerHTML = healthRows.map(r => {
+    const [ic, color, badge] = r.status === 'ok'
+      ? ['✓', 'var(--green)', '<span class="badge badge-success">正常</span>']
+      : r.status === 'fail'
+      ? ['✕', 'var(--red)', '<span class="badge badge-fail">失效</span>']
+      : r.status === 'checking'
+      ? ['⟳', 'var(--accent-2)', '<span class="badge" style="background:rgba(139,152,255,.14);color:var(--accent-2)">检查中</span>']
+      : r.status === 'skip'
+      ? ['–', 'var(--text-3)', '<span class="badge" style="background:var(--surface-3);color:var(--text-2)">跳过</span>']
+      : ['–', 'var(--text-3)', '<span class="badge" style="background:var(--surface-3);color:var(--text-2)">等待</span>'];
+    return `
+      <div style="display:flex;align-items:center;gap:10px;padding:7px 11px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px">
+        <span style="color:${color};font-size:13px;font-weight:700;width:16px;text-align:center;flex-shrink:0">${ic}</span>
+        <span class="mono" style="font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis">${escapeHtml(r.masked)}</span>
+        ${badge}
+        <span style="font-size:10px;color:var(--text-2);max-width:190px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(r.detail||'')}</span>
+      </div>`;
+  }).join('');
+}
+async function runHealthNow() {
+  if (healthRunning) return;
+  healthRunning = true;
+  const btn = document.getElementById('healthStartBtn');
+  btn.disabled = true;
+  btn.textContent = '检查中…';
+  const bar = document.getElementById('healthBar');
+  const summary = document.getElementById('healthSummary');
+  let keys = [];
+  try {
+    const st = await api('/api/stats');
+    keys = st.keys || [];
+  } catch(e) {}
+  if (keys.length === 0) {
+    summary.textContent = '暂无 Key 可检查';
+    btn.disabled = false;
+    btn.textContent = '重新检查';
+    healthRunning = false;
+    return;
+  }
+  healthRows = keys.map(k => ({masked: k.masked, status: 'wait', detail: ''}));
+  renderHealthList();
+  let ok = 0, fail = 0, skip = 0;
+  for (let i = 0; i < keys.length; i++) {
+    healthRows[i].status = 'checking';
+    healthRows[i].detail = '';
+    renderHealthList();
+    let res = null;
+    try {
+      const r = await api('/api/health/one', {method:'POST', body: JSON.stringify({masked: keys[i].masked})});
+      res = r.result;
+    } catch(e) {
+      res = {masked: keys[i].masked, alive: false, error: '请求失败'};
+    }
+    if (res.skipped || res.alive === undefined) {
+      healthRows[i].status = 'skip';
+      healthRows[i].detail = res.error || '已停用，跳过';
+      skip++;
+    } else if (res.alive) {
+      healthRows[i].status = 'ok';
+      healthRows[i].detail = res.latency_ms ? res.latency_ms + 'ms' : '';
+      ok++;
+    } else {
+      healthRows[i].status = 'fail';
+      healthRows[i].detail = res.error || '检测失败';
+      fail++;
+    }
+    renderHealthList();
+    bar.style.width = Math.round(((i+1)/keys.length)*100) + '%';
+  }
+  summary.textContent = `检查完成：正常 ${ok} · 失效 ${fail} · 跳过 ${skip}`;
+  btn.disabled = false;
+  btn.textContent = '重新检查';
+  healthRunning = false;
+  load();
+}
+
+// ── 设置页 ────────────────────────────────────────────────────
+async function loadSettings() {
+  try {
+    const d = await api('/api/settings');
+    const s = d.settings;
+    document.getElementById('setMode').value = s.mode;
+    document.getElementById('setDomain').value = s.domain || '';
+    document.getElementById('setHost').value = s.host || '';
+    document.getElementById('setPort').value = s.port || 8000;
+    document.getElementById('setToken').value = s.auth_token || '';
+    document.getElementById('setAutostart').value = String(!!s.autostart);
+    document.getElementById('setStartToTray').value = String(!!s.start_to_tray);
+    document.getElementById('setCloseToTray').value = String(!!s.close_to_tray);
+    document.getElementById('setMinimizeToTray').value = String(!!s.minimize_to_tray);
+    renderDeployGuide(s, d.public_url);
+  } catch(e) {}
+}
+
+async function saveSettings() {
+  const payload = {
+    mode: document.getElementById('setMode').value,
+    domain: document.getElementById('setDomain').value.trim(),
+    host: document.getElementById('setHost').value.trim(),
+    port: parseInt(document.getElementById('setPort').value, 10) || 8000,
+    auth_token: document.getElementById('setToken').value.trim(),
+  };
+  const status = document.getElementById('settingsStatus');
+  status.textContent = '保存中...';
+  try {
+    const d = await api('/api/settings', {method:'POST', body: JSON.stringify(payload)});
+    status.textContent = '✓ 已保存';
+    toast('设置已保存', 'success');
+    renderDeployGuide(d.settings, d.public_url);
+  } catch(e) {
+    status.textContent = '保存失败';
+    toast('设置保存失败', 'error');
+  }
+}
+
+async function saveGeneralSettings() {
+  const payload = {
+    autostart: document.getElementById('setAutostart').value === 'true',
+    start_to_tray: document.getElementById('setStartToTray').value === 'true',
+    close_to_tray: document.getElementById('setCloseToTray').value === 'true',
+    minimize_to_tray: document.getElementById('setMinimizeToTray').value === 'true',
+  };
+  const status = document.getElementById('generalStatus');
+  status.textContent = '保存中...';
+  try {
+    const d = await api('/api/settings', {method:'POST', body: JSON.stringify(payload)});
+    status.textContent = '✓ 已保存';
+    toast('通用设置已保存，托盘图标常驻系统托盘', 'success');
+    // 刷新开机自启实际状态（注册表为准）
+    document.getElementById('setAutostart').value = String(!!d.settings.autostart);
+  } catch(e) {
+    status.textContent = '保存失败';
+    toast('通用设置保存失败', 'error');
+  }
+}
+
+function renderDeployGuide(s, url) {
+  document.getElementById('publicUrlHint').textContent = '对外访问地址: ' + (url||'-');
+  const g = document.getElementById('deployGuide');
+  if (s.mode === 'server') {
+    const cfg = ['tavily-dashboard.service','nginx.conf.example'].map(f=>f).join(' / ');
+    g.innerHTML = `
+      <h4>Server 模式部署指引（Linux · 域名对外服务）</h4>
+      1. 将域名 <code>${escapeHtml(s.domain||'<你的域名>')}</code> 的 A 记录解析到本机公网 IP。<br>
+      2. 修改 <code>deploy/linux-server/tavily-dashboard.service</code> 中的 WorkingDirectory 后安装：
+      <pre>sudo cp deploy/linux-server/tavily-dashboard.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now tavily-dashboard</pre>
+      3. 修改 <code>deploy/linux-server/nginx.conf.example</code> 中的域名与端口，复制到 Nginx 配置目录并 reload：
+      <pre>sudo cp deploy/linux-server/nginx.conf.example /etc/nginx/conf.d/tavily.conf
+sudo nginx -t && sudo systemctl reload nginx</pre>
+      4. 反向代理默认转发到 <code>${escapeHtml(s.host||'0.0.0.0')}:${s.port||8000}</code>，确保 Host 已设为 <code>0.0.0.0</code> 且防火墙放行 80/443。`;
+  } else {
+    g.innerHTML = `
+      <h4>Local 模式部署指引（Windows · 本机提供服务）</h4>
+      1. 双击运行 <code>deploy/windows-local/start_dashboard.bat</code>（或 <code>python dashboard.py</code>）。<br>
+      2. 浏览器访问 <code>${escapeHtml(url)}</code>（本机）。<br>
+      3. 若需局域网访问，将 Host 改为 <code>0.0.0.0</code> 并放行防火墙端口 <code>${s.port||8000}</code>。<br>
+      4. 如需开机自启，以管理员运行 <code>deploy/windows-local/install_service.ps1</code>。`;
+  }
+}
+
+// ── MCP 服务页 ────────────────────────────────────────────────
+let mcpRunning = false;
+
+function copyText(text) {
+  if (!text) return false;
+  const ok = () => { flashCopied(); return true; };
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(ok).catch(() => fallbackCopy(text));
+  }
+  return fallbackCopy(text);
+}
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.left = '-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch(e) {}
+  document.body.removeChild(ta);
+  if (ok) flashCopied();
+  return ok;
+}
+let copyTimer = null;
+let mcpTokenSet = false;  // MCP 服务是否配置了访问令牌
+
+function flashCopied() {
+  const el = document.getElementById('mcpHint2');
+  el.textContent = '✓ 已复制到剪贴板';
+  clearTimeout(copyTimer);
+  copyTimer = setTimeout(() => { el.textContent = ''; }, 2500);
+}
+
+async function loadMcp() {
+  try {
+    const d = await api('/api/mcp/status');
+    mcpRunning = d.running;
+    const badge = document.getElementById('mcpStatusBadge');
+    const btn = document.getElementById('mcpToggleBtn');
+    const urlRow = document.getElementById('mcpUrlRow');
+    const urlInput = document.getElementById('mcpUrl');
+    const pidEl = document.getElementById('mcpPid');
+    const hint = document.getElementById('mcpHint');
+
+    if (d.network) {
+      urlRow.style.display = d.running ? 'block' : 'none';
+      if (d.running) {
+        badge.textContent = '运行中';
+        badge.className = 'badge badge-active';
+        btn.textContent = '停止服务';
+        btn.className = 'btn btn-danger';
+        btn.disabled = false;
+        pidEl.textContent = 'PID: ' + (d.pid || '-');
+        urlInput.value = d.url || '';
+        const authNote = mcpTokenSet ? '（已启用访问令牌：客户端需携带 Authorization: Bearer <token> 请求头）' : '';
+        hint.textContent = '将上方地址填入 AI 客户端的 MCP 服务器配置即可（局域网内设备使用同一地址连接）。' + authNote;
+      } else {
+        badge.textContent = '已停止';
+        badge.className = 'badge badge-inactive';
+        btn.textContent = '启动服务';
+        btn.className = 'btn btn-primary';
+        btn.disabled = false;
+        pidEl.textContent = '';
+        hint.textContent = 'MCP 服务未运行。点击「启动服务」，或在 MCP 设置中开启「随软件启动」。';
+      }
+    } else {
+      urlRow.style.display = 'none';
+      badge.textContent = 'stdio 模式';
+      badge.className = 'badge badge-inactive';
+      btn.textContent = '不支持';
+      btn.disabled = true;
+      pidEl.textContent = '';
+      hint.textContent = '当前为 stdio 传输方式，由 AI 客户端直接拉起进程，无法由面板启停。可将传输方式改为 SSE 或 Streamable HTTP 后由面板管理并支持局域网访问。';
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function toggleMcp() {
+  const btn = document.getElementById('mcpToggleBtn');
+  btn.disabled = true;
+  const wasRunning = mcpRunning;
+  const hint = document.getElementById('mcpHint');
+  try {
+    const ep = wasRunning ? '/api/mcp/stop' : '/api/mcp/start';
+    const d = await api(ep, {method:'POST'});
+    if (!d.ok) {
+      hint.textContent = d.error || '操作失败';
+    } else if (wasRunning) {
+      hint.textContent = '已停止 MCP 服务。';
+    } else {
+      hint.textContent = 'MCP 服务已启动，地址已复制到剪贴板。';
+      if (d.status && d.status.url) copyText(d.status.url);
+    }
+  } catch(e) { console.error(e); }
+  loadMcp();
+}
+
+async function copyMcpUrl() {
+  copyText(document.getElementById('mcpUrl').value);
+  if (mcpTokenSet) toast('地址已复制（该服务启用了 Bearer 访问令牌）', 'info');
+}
+
+async function loadMcpSettings() {
+  try {
+    const d = await api('/api/settings');
+    const s = d.settings;
+    document.getElementById('setMcpAutoStart').value = String(!!s.mcp_auto_start);
+    document.getElementById('setMcpTransport').value = s.mcp_transport || 'sse';
+    document.getElementById('setMcpHost').value = s.mcp_host || '0.0.0.0';
+    document.getElementById('setMcpPort').value = s.mcp_port || 8001;
+    document.getElementById('setMcpToken').value = s.mcp_token || '';
+    mcpTokenSet = !!(s.mcp_token);
+  } catch(e) { console.error(e); }
+}
+
+async function saveMcpSettings() {
+  const payload = {
+    mcp_auto_start: document.getElementById('setMcpAutoStart').value === 'true',
+    mcp_transport: document.getElementById('setMcpTransport').value,
+    mcp_host: document.getElementById('setMcpHost').value.trim(),
+    mcp_port: parseInt(document.getElementById('setMcpPort').value, 10) || 8001,
+    mcp_token: document.getElementById('setMcpToken').value.trim(),
+  };
+  mcpTokenSet = !!payload.mcp_token;
+  const status = document.getElementById('mcpSettingsStatus');
+  status.textContent = '保存中...';
+  try {
+    const d = await api('/api/settings', {method:'POST', body: JSON.stringify(payload)});
+    status.textContent = '✓ 已保存';
+    toast('MCP 设置已保存', 'success');
+    const hint = document.getElementById('mcpHint');
+    if (d.mcp_url) {
+      hint.textContent = '设置已保存，当前 MCP 服务地址: ' + d.mcp_url;
+    } else {
+      hint.textContent = '设置已保存（stdio 模式无网络地址）。';
+    }
+    loadMcp();
+  } catch(e) {
+    status.textContent = '保存失败';
+    toast('MCP 设置保存失败', 'error');
+  }
+}
+
+// 同步官方用量：从 Tavily /usage 拉取 billing cycle 真实用量并更新本地统计
+async function syncUsage() {
+  const btn = document.querySelector('button[onclick="syncUsage()"]');
+  if (btn) { btn.disabled = true; }
+  try {
+    const d = await api('/api/keys/usage-sync', {method:'POST'});
+    if (d.ok) {
+      toast(`官方用量同步完成：成功 ${d.synced} 个，失败 ${d.failed} 个`, d.failed ? 'warn' : 'success');
+      load();
+    } else {
+      toast(d.error || '用量同步失败', 'error');
+    }
+  } catch(e) {
+    toast('用量同步失败：' + (e.message || e), 'error');
+  }
+  if (btn) { btn.disabled = false; }
+}
+
+// 页面加载后：若 MCP 服务已在运行（如随软件自启），自动复制地址到剪贴板
+async function autoCopyMcpUrl() {
+  try {
+    const d = await api('/api/mcp/status');
+    if (d.running && d.url) copyText(d.url);
+  } catch(e) { console.error(e); }
+}
+
+load();
+setInterval(load, 10000);
+loadMcp();
+loadMcpSettings();
+autoCopyMcpUrl();
+setInterval(loadMcp, 5000);
+</script>
+</body>
+</html>

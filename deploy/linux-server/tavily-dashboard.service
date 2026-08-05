@@ -1,0 +1,14 @@
+[Unit]
+Description=Tavily API Key Pool Dashboard (Server)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tavily
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 app/dashboard.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

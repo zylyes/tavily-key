@@ -1,0 +1,7 @@
+{
+  "mode": "server",
+  "domain": "your-domain.example.com",
+  "host": "0.0.0.0",
+  "port": 8000,
+  "auth_token": ""
+}

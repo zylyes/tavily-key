@@ -1,0 +1,200 @@
+"""
+App settings — config.json persistence.
+
+提供部署模式(server/local)、绑定域名、监听地址、端口与访问鉴权令牌的
+读取/保存能力。配置文件位于项目根目录 config.json，首次访问时自动生成。
+"""
+from __future__ import annotations
+
+import json
+import socket
+import sys
+import threading
+from pathlib import Path
+
+
+def _app_dir() -> Path:
+    """配置/数据文件的存放目录：打包后为 exe 所在目录，开发时为项目根目录（app 的上级）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+CONFIG_PATH = _app_dir() / "config.json"
+
+# mode: "server" = Linux 服务器通过域名对外提供服务
+#       "local"  = Windows 本地/局域网提供服务
+# host: 127.0.0.1 = 仅本机可访问；0.0.0.0 = 局域网内所有设备可访问
+DEFAULTS: dict = {
+    "mode": "local",          # 部署模式: server | local
+    "domain": "",             # 绑定域名（仅界面展示用途）
+    "host": "0.0.0.0",        # 监听地址: 127.0.0.1(仅本机) / 0.0.0.0(局域网)
+    "port": 8000,             # 监听端口
+    "auth_token": "",         # 访问鉴权令牌（留空则不鉴权）
+    # ── 通用（Windows 桌面应用）─────────────────────────────
+    "autostart": False,         # 开机自启（注册表 Run 键）
+    "start_to_tray": False,     # 启动后直接隐藏到系统托盘
+    "close_to_tray": False,     # 点击关闭时最小化到系统托盘（不退出）
+    "minimize_to_tray": False,  # 点击最小化时隐藏到系统托盘
+    # ── MCP 服务（供 AI Agent 调用）──────────────────────────
+    "mcp_auto_start": False,  # 软件启动时是否自动启动 MCP 服务
+    "mcp_transport": "sse",   # 传输方式: stdio | sse | streamable-http
+    "mcp_host": "0.0.0.0",    # MCP 监听地址（0.0.0.0 = 局域网可用）
+    "mcp_port": 8001,         # MCP 监听端口
+    "mcp_token": "",          # MCP 服务访问令牌（非空时要求 Authorization: Bearer <token>，留空不鉴权）
+    "key_strategy": "round-robin",  # Key 池负载均衡策略: round-robin | least-used
+}
+
+MODE_DEFAULTS: dict = {
+    "server": {"host": "0.0.0.0", "port": 8000},
+    "local": {"host": "0.0.0.0", "port": 8000},
+}
+
+_lock = threading.Lock()
+_cache: dict | None = None
+
+
+def load() -> dict:
+    """从 config.json 读取设置，缺失项使用默认值；首次运行自动生成默认配置。"""
+    cfg = dict(DEFAULTS)
+    if CONFIG_PATH.exists():
+        try:
+            # utf-8-sig：兼容带 BOM 的 UTF-8（某些编辑器/工具会写 BOM，
+            # 若按纯 utf-8 解析 json 会抛异常导致整份配置静默回退默认值）
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+            for k in DEFAULTS:
+                if k in data:
+                    cfg[k] = data[k]
+        except Exception:
+            pass
+    else:
+        # 首次运行：写入默认配置，便于用户直接查看/编辑
+        try:
+            CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG_PATH.write_text(
+                json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+    return cfg
+
+
+def get_settings() -> dict:
+    """返回缓存的设置（进程内）。"""
+    global _cache
+    if _cache is None:
+        _cache = load()
+    return dict(_cache)
+
+
+def reload() -> dict:
+    """重新从磁盘加载设置。"""
+    global _cache
+    _cache = load()
+    return dict(_cache)
+
+
+def save(patch: dict) -> dict:
+    """合并保存设置项，返回更新后的完整设置。"""
+    global _cache
+    with _lock:
+        cfg = load()
+        for k, v in patch.items():
+            if k in DEFAULTS:
+                cfg[k] = v
+        CONFIG_PATH.write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _cache = cfg
+    return dict(cfg)
+
+
+_INT_FIELDS = ("port", "mcp_port")
+_BOOL_FIELDS = (
+    "autostart", "start_to_tray", "close_to_tray", "minimize_to_tray",
+    "mcp_auto_start",
+)
+_STR_FIELDS = (
+    "mode", "domain", "host", "auth_token",
+    "mcp_transport", "mcp_host", "mcp_token",
+)
+
+
+def validate_patch(patch: dict) -> dict:
+    """规范化并校验设置补丁（白名单：只处理 DEFAULTS 中的字段）。
+
+    非法值抛 ValueError；返回规范化后的字段字典，供 save() 使用。
+    """
+    out: dict = {}
+    for k, v in patch.items():
+        if k not in DEFAULTS:
+            continue
+        if k in _INT_FIELDS:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{k} must be an integer")
+            if not (0 <= n <= 65535):
+                raise ValueError(f"{k} must be in range 0-65535")
+            out[k] = n
+        elif k in _BOOL_FIELDS:
+            out[k] = bool(v)
+        elif k in _STR_FIELDS:
+            out[k] = str(v or "").strip()
+        else:
+            out[k] = v
+    # 枚举/交叉校验
+    if "mode" in out and out["mode"] not in ("server", "local"):
+        raise ValueError("mode must be server or local")
+    if "mcp_transport" in out and out["mcp_transport"] not in ("stdio", "sse", "streamable-http"):
+        raise ValueError("mcp_transport must be stdio, sse or streamable-http")
+    return out
+
+
+def lan_ip() -> str:
+    """获取本机局域网 IP；失败时回退 127.0.0.1。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
+        # connect 不会实际发包，仅用于让系统选择路由出口
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _display_host(host: str) -> str:
+    """把 0.0.0.0 / :: 转换为可供他人访问的地址（域名优先交给调用方处理）。"""
+    if host in ("0.0.0.0", "::"):
+        return lan_ip()
+    return host or "127.0.0.1"
+
+
+def public_url(cfg: dict | None = None) -> str:
+    """根据配置推导对外访问地址（域名优先，否则显示局域网可访问地址）。"""
+    cfg = cfg or get_settings()
+    domain = (cfg.get("domain") or "").strip()
+    if domain:
+        return f"http://{domain}"
+    host = _display_host(cfg.get("host", "127.0.0.1"))
+    return f"http://{host}:{cfg.get('port', 8000)}"
+
+
+def mcp_url(cfg: dict | None = None) -> str:
+    """根据配置推导 MCP 服务对外地址（sse/streamable-http 网络模式下可用）。"""
+    cfg = cfg or get_settings()
+    transport = (cfg.get("mcp_transport") or "sse").strip().lower()
+    if transport == "stdio":
+        return ""
+    host = _display_host(cfg.get("mcp_host", "0.0.0.0"))
+    port = int(cfg.get("mcp_port", 8001))
+    path = "/mcp" if transport == "streamable-http" else "/sse"
+    return f"http://{host}:{port}{path}"
+
+
+def mcp_is_network(cfg: dict | None = None) -> bool:
+    """MCP 是否为网络服务（可被面板启停、局域网访问）；stdio 为客户端直连模式。"""
+    cfg = cfg or get_settings()
+    return (cfg.get("mcp_transport") or "sse").strip().lower() != "stdio"
