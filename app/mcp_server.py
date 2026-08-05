@@ -5,8 +5,11 @@ API keys managed by KeyPool with configurable load-balancing strategy.
 """
 from __future__ import annotations
 
+import anyio
 import inspect
 import json
+import re
+import threading
 import time
 from typing import Any
 
@@ -15,6 +18,7 @@ from tavily import TavilyClient
 
 from key_pool import KeyPool, _mask, _classify_error
 from logging_setup import get_logger
+from paths import runtime_dir
 from settings import get_settings
 
 _log = get_logger("mcp_server")
@@ -22,6 +26,44 @@ _log = get_logger("mcp_server")
 mcp = FastMCP("Tavily Web Search", instructions="Use this server to search the web, extract content from URLs, crawl websites, map site structures, and conduct AI-powered research.")
 
 pool = KeyPool()
+
+# request_id → 提交 research 时使用的 masked key。Tavily research 任务按 key
+# 隔离，tavily_research_status 若用轮询到的其他 key 查询会返回 404，因此
+# 记录映射，status 查询时优先使用同一 key。
+# 映射持久化到 data/research_keys.json：服务器重启后仍可查询未完成任务。
+_research_keys: dict[str, str] = {}
+_research_keys_lock = threading.Lock()
+_RESEARCH_KEYS_PATH = runtime_dir() / "research_keys.json"
+
+
+def _load_research_keys() -> None:
+    """从磁盘加载 request_id→masked 映射（服务器重启后异步任务仍可查询）。"""
+    global _research_keys
+    try:
+        if _RESEARCH_KEYS_PATH.exists():
+            data = json.loads(_RESEARCH_KEYS_PATH.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _research_keys = {str(k): str(v) for k, v in data.items()}
+    except Exception:  # noqa: BLE001
+        _research_keys = {}
+
+
+def _save_research_key(request_id: str, masked: str) -> None:
+    """持久化 request_id→masked 映射（上限 1000 条防无界增长）。"""
+    global _research_keys
+    with _research_keys_lock:
+        _research_keys[request_id] = masked
+        if len(_research_keys) > 1000:
+            _research_keys = dict(list(_research_keys.items())[-1000:])
+        try:
+            _RESEARCH_KEYS_PATH.write_text(
+                json.dumps(_research_keys, ensure_ascii=False), encoding="utf-8"
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_load_research_keys()
 
 
 def _key_strategy() -> str:
@@ -31,13 +73,31 @@ def _key_strategy() -> str:
     return s if s in ("round-robin", "least-used") else "round-robin"
 
 
+# tavily-python 的 get_research() 使用 requests.Session.get() 且未传 timeout，
+# requests 默认无限等待。若该请求挂起且在 MCP 事件循环内执行，会永久阻塞
+# 整个服务器（所有 MCP 调用 180s 超时）。给 session 注入默认超时兜底：显式
+# 传 timeout 的调用不受影响（显式参数优先于 partial 的默认值）。
+_REQUEST_TIMEOUT = 60.0
+
+
+def _apply_default_timeout(client: TavilyClient) -> None:
+    """给 TavilyClient 的 requests.Session 注入默认超时，防止请求无限挂起。"""
+    import functools
+
+    session = getattr(client, "session", None)
+    if session is not None and hasattr(session, "request"):
+        session.request = functools.partial(session.request, timeout=_REQUEST_TIMEOUT)
+
+
 def _get_client() -> tuple[TavilyClient, str]:
     """取一个可用 key（未耗尽、未超限流）；全部受限时内部短暂等待。"""
     result = pool.next_available_key()
     if result is None:
         raise RuntimeError("No active API keys in pool. Add keys via CLI or dashboard.")
     raw, masked = result
-    return TavilyClient(raw), masked
+    client = TavilyClient(raw)
+    _apply_default_timeout(client)
+    return client, masked
 
 
 def _record(masked: str, endpoint: str, start: float, success: bool,
@@ -62,6 +122,46 @@ def _usage_request_id(resp: Any) -> str:
         rid = resp.get("request_id") or ""
         return str(rid)
     return ""
+
+
+def _norm_flag(v: Any) -> Any:
+    """归一化 bool|str 参数：字符串 'true'/'false'（任意大小写）转为 bool。
+
+    Tavily API 对 include_answer 等参数严格校验（只接受 True/False/'basic'/
+    'advanced'），MCP 客户端常传字符串 'true'/'false' 导致 400；这里统一归一化。
+    'basic'/'advanced'/'markdown'/'text' 等字符串原样保留。
+    """
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in ("true", "1", "yes", "on"):
+            return True
+        if s in ("false", "0", "no", "off"):
+            return False
+        # 枚举字符串统一转小写：客户端可能传 'Basic'/'Advanced'/'Markdown'
+        # 等大小写变体，原样透传给 API 会触发 400 校验错误。
+        if s in ("basic", "advanced", "markdown", "text"):
+            return s
+    return v
+
+
+_COUNTRY_RE = re.compile(r"^[A-Za-z]{2}$")
+
+
+def _norm_country(country: str) -> str:
+    """校验 country 参数：必须是两位 ISO 3166-1 alpha-2 国家代码。
+
+    返回规范化后的小写代码；非法值抛 ValueError 带友好中文提示，避免把
+    模糊的 API 400 错误抛给客户端。
+    """
+    c = (country or "").strip()
+    if not c:
+        return ""
+    if not _COUNTRY_RE.match(c):
+        raise ValueError(
+            f"country 参数无效: '{country}'。需为两位 ISO 3166-1 国家代码"
+            "（如 'us'/'cn'/'jp'），且仅 topic=general 时有效。"
+        )
+    return c.lower()
 
 
 def _tool_kwargs(func, kwargs: dict) -> dict:
@@ -116,7 +216,7 @@ def _run_with_retry(endpoint: str, fn) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def tavily_search(
+async def tavily_search(
     query: str,
     search_depth: str = "basic",
     topic: str = "general",
@@ -168,8 +268,8 @@ def tavily_search(
         "chunks_per_source": chunks_per_source,
         "include_images": include_images,
         "include_image_descriptions": include_image_descriptions,
-        "include_answer": include_answer,
-        "include_raw_content": include_raw_content,
+        "include_answer": _norm_flag(include_answer),
+        "include_raw_content": _norm_flag(include_raw_content),
         "include_favicon": include_favicon,
         "exact_match": exact_match,
         "auto_parameters": auto_parameters,
@@ -192,15 +292,24 @@ def tavily_search(
     if country:
         kwargs["country"] = country
     kwargs = _tool_kwargs(tavily_search, kwargs)
+    # country 前置校验：非法值（非两位 ISO 代码）直接返回友好错误，避免每次
+    # 发请求到 API 才被 400 拒绝，也避免把模糊英文错误抛给客户端。
+    if kwargs.get("country"):
+        try:
+            kwargs["country"] = _norm_country(kwargs["country"])
+        except ValueError as e:
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
 
     def _do(client: TavilyClient):
         return client.search(**kwargs)
 
-    return _run_with_retry("search", _do)
+    # 同步工具在 MCP 事件循环内执行会阻塞整个服务器：async 工具 + to_thread
+    # 让耗时调用（Tavily API、重试）在线程池中运行，避免阻塞其他请求。
+    return await anyio.to_thread.run_sync(_run_with_retry, "search", _do)
 
 
 @mcp.tool()
-def tavily_extract(
+async def tavily_extract(
     urls: list[str],
     extract_depth: str = "basic",
     format: str = "markdown",
@@ -242,11 +351,11 @@ def tavily_extract(
     def _do(client: TavilyClient):
         return client.extract(**kwargs)
 
-    return _run_with_retry("extract", _do)
+    return await anyio.to_thread.run_sync(_run_with_retry, "extract", _do)
 
 
 @mcp.tool()
-def tavily_crawl(
+async def tavily_crawl(
     url: str,
     max_depth: int = 2,
     max_breadth: int = 20,
@@ -263,7 +372,7 @@ def tavily_crawl(
     allow_external: bool = True,
     extract_depth: str = "basic",
     format: str = "markdown",
-    timeout: float = 150.0,
+    timeout: float = 60.0,
 ) -> str:
     """Crawl a website and extract content from multiple pages.
 
@@ -287,7 +396,7 @@ def tavily_crawl(
         allow_external: Whether to include external links in the final response.
         extract_depth: `basic` or `advanced` (tables/embedded content, higher success).
         format: `markdown` or `text`.
-        timeout: Max seconds for the crawl, 10-150.
+        timeout: Max seconds for the crawl, 10-60 (keep under the MCP client's request timeout).
     """
     kwargs: dict[str, Any] = {
         "url": url,
@@ -320,11 +429,11 @@ def tavily_crawl(
     def _do(client: TavilyClient):
         return client.crawl(**kwargs)
 
-    return _run_with_retry("crawl", _do)
+    return await anyio.to_thread.run_sync(_run_with_retry, "crawl", _do)
 
 
 @mcp.tool()
-def tavily_map(
+async def tavily_map(
     url: str,
     max_depth: int = 2,
     max_breadth: int = 20,
@@ -336,7 +445,7 @@ def tavily_map(
     exclude_domains: list[str] | None = None,
     allow_external: bool = True,
     include_usage: bool = True,
-    timeout: float = 150.0,
+    timeout: float = 60.0,
 ) -> str:
     """Discover and list URLs on a website. Faster than crawling.
 
@@ -355,7 +464,7 @@ def tavily_map(
         exclude_domains: Regex patterns for domains to exclude.
         allow_external: Whether to include external links in the final response.
         include_usage: Include credit usage.
-        timeout: Max seconds, 10-150.
+        timeout: Max seconds, 10-60 (keep under the MCP client's request timeout).
     """
     kwargs: dict[str, Any] = {
         "url": url,
@@ -383,36 +492,13 @@ def tavily_map(
     def _do(client: TavilyClient):
         return client.map(**kwargs)
 
-    return _run_with_retry("map", _do)
+    return await anyio.to_thread.run_sync(_run_with_retry, "map", _do)
 
 
-@mcp.tool()
-def tavily_research(
-    input: str,
-    model: str = "auto",
-    citation_format: str = "numbered",
-    include_domains: list[str] | None = None,
-    exclude_domains: list[str] | None = None,
-    wait: bool = True,
-    timeout: float = 300.0,
-    poll_interval: float = 2.0,
-) -> str:
-    """AI-powered deep research producing a cited report. Takes 30-120 seconds.
-
-    wait=True（默认）: 提交任务并轮询直到完成，返回带引用的合成报告。
-    wait=False: 提交后立即返回 request_id，配合 tavily_research_status 轮询，
-        避免长时间阻塞当前调用。
-
-    Args:
-        input: Research question or topic.
-        model: `auto`, `mini`, or `pro` — `pro` for more comprehensive analysis.
-        citation_format: `numbered`, `mla`, `apa`, or `chicago`.
-        include_domains: Soft preference for source domains (max 20).
-        exclude_domains: Hard blocklist of domains to exclude (max 20).
-        wait: If True, poll until the task completes; if False, return request_id immediately.
-        timeout: Max seconds to wait for the report (default 300).
-        poll_interval: Seconds between status polls.
-    """
+def _research_impl(input: str, model: str, citation_format: str,
+                   include_domains: list[str] | None, exclude_domains: list[str] | None,
+                   wait: bool, timeout: float, poll_interval: float) -> str:
+    """tavily_research 的同步实现，在线程池中执行，避免阻塞 MCP 事件循环。"""
     t0 = time.time()
     kwargs: dict[str, Any] = {}
     if include_domains:
@@ -420,9 +506,24 @@ def tavily_research(
     if exclude_domains:
         kwargs["exclude_domains"] = exclude_domains
 
+    # 取可用 key（池空时返回友好错误，避免异常冒泡导致会话不稳定）
+    try:
+        client, masked = _get_client()
+    except RuntimeError as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    # ── wait=True：优先 SDK 原生 stream=True（官方 API 已强制流式）──
+    # 直接消费生成器组装报告，避免「先 400 research_stream_required 再回退」。
+    if wait:
+        try:
+            last = _research_stream(client, input, model, citation_format, timeout, kwargs)
+            _record(masked, "research", t0, True, _usage_credits(last))
+            return json.dumps(last, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            _log.info("research 原生流式失败，回退提交+轮询 masked=%s: %s", masked, str(e)[:200])
+
     # ── 提交任务（quota/auth 错误自动切换其他 key 重试）──────────
     request_id = None
-    client, masked = _get_client()
     last_err = ""
     for attempt in range(3):
         try:
@@ -434,6 +535,7 @@ def tavily_research(
             request_id = resp.get("request_id") if isinstance(resp, dict) else None
             if not request_id:
                 raise RuntimeError(f"Unexpected research response: {resp}")
+            _save_research_key(request_id, masked)
             break
         except Exception as e:  # noqa: BLE001
             err = str(e)
@@ -451,7 +553,7 @@ def tavily_research(
                 _log.info("research 要求流式，自动回退 stream=true: %s", err[:200])
                 try:
                     last = _research_stream(client, input, model, citation_format, timeout, kwargs)
-                    _record(masked, "research", t0, True, 0)
+                    _record(masked, "research", t0, True, _usage_credits(last))
                     return json.dumps(last, ensure_ascii=False, indent=2)
                 except Exception as e2:  # noqa: BLE001
                     _log.warning("research 流式回退失败 masked=%s: %s", masked, str(e2)[:300])
@@ -489,31 +591,87 @@ def tavily_research(
 
 
 @mcp.tool()
-def tavily_research_status(request_id: str) -> str:
+async def tavily_research(
+    input: str,
+    model: str = "auto",
+    citation_format: str = "numbered",
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
+    wait: bool = True,
+    timeout: float = 300.0,
+    poll_interval: float = 2.0,
+) -> str:
+    """AI-powered deep research producing a cited report. Takes 30-120 seconds.
+
+    wait=True（默认）: 提交任务并轮询直到完成，返回带引用的合成报告。
+    wait=False: 提交后立即返回 request_id，配合 tavily_research_status 轮询，
+        避免长时间阻塞当前调用。
+
+    Args:
+        input: Research question or topic.
+        model: `auto`, `mini`, or `pro` — `pro` for more comprehensive analysis.
+        citation_format: `numbered`, `mla`, `apa`, or `chicago`.
+        include_domains: Soft preference for source domains (max 20).
+        exclude_domains: Hard blocklist of domains to exclude (max 20).
+        wait: If True, poll until the task completes; if False, return request_id immediately.
+        timeout: Max seconds to wait for the report (default 300).
+        poll_interval: Seconds between status polls.
+    """
+    return await anyio.to_thread.run_sync(
+        _research_impl, input, model, citation_format,
+        include_domains, exclude_domains, wait, timeout, poll_interval,
+    )
+
+
+@mcp.tool()
+async def tavily_research_status(request_id: str) -> str:
     """Check the status/result of a previously submitted research task.
 
     Args:
         request_id: The request ID returned by tavily_research (wait=false).
     """
-    t0 = time.time()
-    try:
-        client, masked = _get_client()
-        resp = client.get_research(request_id)
-        _record(masked, "research-status", t0, True, _usage_credits(resp), request_id=request_id)
-        return json.dumps(resp, ensure_ascii=False, indent=2)
-    except Exception as e:  # noqa: BLE001
-        _log.warning("research-status 失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id)
-        return json.dumps({"error": str(e), "request_id": request_id}, ensure_ascii=False)
+
+    def _impl() -> str:
+        t0 = time.time()
+        try:
+            client = None
+            masked = ""
+            # research 任务按 key 隔离：优先用提交时的同一 key 查询，避免 404
+            pinned = _research_keys.get(request_id)
+            if pinned:
+                k = pool.get_key(pinned)
+                if k is not None and k.is_active and not k.is_exhausted:
+                    client = TavilyClient(k.key)
+                    _apply_default_timeout(client)
+                    masked = pinned
+            if client is None:
+                client, masked = _get_client()
+            resp = client.get_research(request_id)
+            _record(masked, "research-status", t0, True, _usage_credits(resp), request_id=request_id)
+            return json.dumps(resp, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("research-status 失败 masked=%s: %s", masked, str(e)[:300])
+            _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id)
+            return json.dumps({"error": str(e), "request_id": request_id}, ensure_ascii=False)
+
+    return await anyio.to_thread.run_sync(_impl)
 
 
 @mcp.tool()
-def tavily_pool_status() -> str:
+async def tavily_pool_status() -> str:
     """Get API key pool status — active keys, usage stats, anomalies, aggregate capacity."""
-    stats = pool.get_stats()
-    stats["aggregate"] = pool.get_aggregate()
-    stats["anomalies"] = pool.detect_anomalies()
-    return json.dumps(stats, ensure_ascii=False, indent=2)
+
+    def _impl() -> str:
+        try:
+            stats = pool.get_stats()
+            stats["aggregate"] = pool.get_aggregate()
+            stats["anomalies"] = pool.detect_anomalies()
+            return json.dumps(stats, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            _log.warning("pool_status 失败: %s", str(e)[:300])
+            return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+    return await anyio.to_thread.run_sync(_impl)
 
 
 # ═══════════════════════════════════════════════════════════════

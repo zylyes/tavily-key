@@ -207,7 +207,7 @@ if timeout:
 | `include_usage` | bool | `True` | 响应中包含积分用量 |
 | `select_paths` | list[str] | `None` | 正则表达式，仅爬取匹配的路径 |
 | `exclude_paths` | list[str] | `None` | 正则表达式，排除匹配的路径 |
-| `timeout` | float | `150.0` | 整个爬取过程的超时秒数（10–150） |
+| `timeout` | float | `60.0` | 整个爬取过程的超时秒数（10–60） |
 
 ### 底层实现
 
@@ -262,7 +262,7 @@ resp = client.crawl(
 | `select_paths` | list[str] | `None` | 正则表达式，包含匹配的路径 |
 | `exclude_paths` | list[str] | `None` | 正则表达式，排除匹配的路径 |
 | `include_usage` | bool | `True` | 响应中包含积分用量 |
-| `timeout` | float | `150.0` | 超时秒数（10–150） |
+| `timeout` | float | `60.0` | 超时秒数（10–60） |
 
 ### 底层实现
 
@@ -313,8 +313,11 @@ AI 驱动的深度研究工具：自动收集来源、交叉分析，并生成�
 | `citation_format` | str | `"numbered"` | 引用格式：`numbered`、`mla`、`apa` 或 `chicago` |
 | `include_domains` | list[str] | `None` | 来源域名的软性偏好（最多 20 个） |
 | `exclude_domains` | list[str] | `None` | 硬性屏蔽的域名（最多 20 个） |
+| `wait` | bool | `True` | `True`：等待报告完成并返回最终报告；`False`：提交后立即返回 `request_id`，配合 `tavily_research_status` 查询 |
 | `timeout` | float | `300.0` | 等待报告的最大秒数 |
 | `poll_interval` | float | `2.0` | 状态轮询间隔（秒） |
+
+> **任务状态查询**：`wait=false` 提交后可用 `tavily_research_status(request_id)` 查询任务状态与结果。任务与提交时的 key 绑定（Tavily 任务按 key 隔离），状态查询优先使用同一 key，该 key 失效/耗尽时才回退轮询；key 映射持久化于 `data/research_keys.json`，MCP 服务重启后仍可查询。
 
 ### 底层实现
 

@@ -5,6 +5,35 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-08-05
+
+### Fixed
+
+- **Research 任务状态查询 404**：Tavily 任务按 key 隔离，`tavily_research_status` 优先使用提交任务时的同一 key 查询（key 失效/耗尽才回退轮询）；key 映射持久化到 `data/research_keys.json`（上限 1000 条），重启 MCP 服务后仍可查询
+- **MCP 服务事件循环阻塞**：全部 MCP 工具改为异步执行（线程池），同步调用不再阻塞其他请求（此前可能触发 180s 超时）；`tavily_research` 同步逻辑提取为独立实现
+- **requests 无限等待挂起**：给 TavilyClient 会话注入默认 60s 超时（显式传参不受影响），修复 `get_research` 未设超时导致整个服务卡死
+- **research 流式路径积分漏记**：积分记录从固定 0 改为实际用量
+- **tavily_pool_status 异常中断**：异常时返回错误信息而非抛错中断会话
+- **参数触达 API 报 400**：`include_answer`/`include_raw_content` 支持字符串布尔（true/false/1/0/yes/no/on/off）；`search_depth` 枚举忽略大小写；`country` 校验两位 ISO 3166-1 alpha-2，非法值返回本地中文错误、不触达 API
+
+### Changed
+
+- `tavily_crawl` / `tavily_map` 的 `timeout` 默认值 150→60s（保持在 MCP 客户端请求超时之内，显式传参不受影响）
+- `tavily_research` 的 `wait=true` 主路径改为原生流式优先，失败才回退「提交 + 轮询」，减少一次无效请求
+
+## [0.3.0] - 2026-08-05
+
+### Added
+
+- **运行时数据统一目录 `data/`**：新增 `app/paths.py`，所有可写数据（`config.json`、`tavily_keys.db`、`*.log`、`.tavily-secret.key`）集中到 `data/`（打包版为 exe 同目录 `data\`，开发版为项目根 `data/`）；首次运行自动把旧位置文件迁移到 `data/`（config.json 键合并源优先、迁移失败保留双份不丢数据、幂等且线程安全）
+- **Research 流式回退**：`tavily_research` 提交遇到官方要求流式响应（`research_stream_required`）时自动以 `stream=True` 重跑并组装报告，兼容官方 SDK 新版行为
+- **MCP 子进程管理加固**：进程归属追踪（stop 只清理本程序拉起的子进程，不误杀第三方占用）、netstat PID 查询 TTL 缓存、启动后存活探测与日志尾部回读（面板不再误报「已启动」）
+
+### Changed
+
+- **DNS rebinding 防护**：MCP 网络模式显式关闭 DNS rebinding 保护（默认开启会让局域网 IP 访问 `/sse` 返回 421）；以局域网/内网可用性优先，公网部署请保持反向代理 + 访问令牌鉴权
+- **Linux 部署脚本与文档**：`install.sh` 及部署文档统一改为生成/读写 `data/config.json`
+
 ## [0.2.1] - 2026-08-05
 
 ### Fixed
@@ -37,19 +66,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
-## [0.3.0] - 2026-08-05
-
-### Added
-
-- **运行时数据统一目录 `data/`**：新增 `app/paths.py`，所有可写数据（`config.json`、`tavily_keys.db`、`*.log`、`.tavily-secret.key`）集中到 `data/`（打包版为 exe 同目录 `data\`，开发版为项目根 `data/`）；首次运行自动把旧位置文件迁移到 `data/`（config.json 键合并源优先、迁移失败保留双份不丢数据、幂等且线程安全）
-- **Research 流式回退**：`tavily_research` 提交遇到官方要求流式响应（`research_stream_required`）时自动以 `stream=True` 重跑并组装报告，兼容官方 SDK 新版行为
-- **MCP 子进程管理加固**：进程归属追踪（stop 只清理本程序拉起的子进程，不误杀第三方占用）、netstat PID 查询 TTL 缓存、启动后存活探测与日志尾部回读（面板不再误报「已启动」）
-
-### Changed
-
-- **DNS rebinding 防护**：MCP 网络模式显式关闭 DNS rebinding 保护（默认开启会让局域网 IP 访问 `/sse` 返回 421）；以局域网/内网可用性优先，公网部署请保持反向代理 + 访问令牌鉴权
-- **Linux 部署脚本与文档**：`install.sh` 及部署文档统一改为生成/读写 `data/config.json`
-
+[0.3.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.1
 [0.3.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.0
 [0.2.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.2.1
 [0.2.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.2.0
