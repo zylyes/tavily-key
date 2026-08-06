@@ -325,6 +325,8 @@ AI 驱动的深度研究工具：自动收集来源、交叉分析，并生成�
 
 > **会话 / 项目归属（v0.4.1）**：`config.json` 的 `mcp_human_id` / `mcp_project_id`（可选，面板「MCP 服务」设置页可配）经 SDK 原生参数转发 `X-Human-Id` / `X-Project-ID` 头，便于 Tavily 侧会话分析与按项目归类用量；留空则不发送。
 
+> **配置热刷新（v0.7.0）**：`mcp_token`（Bearer 鉴权）、`mcp_default_parameters`（默认参数，面板「MCP 服务」设置页可配，含「推荐预设」按钮一键填入官方建议值）、`mcp_human_id` / `mcp_project_id` 与 `endpoint_rpm` 限流参数均支持**热刷新**——面板修改后约 1 秒内生效，**无需重启 MCP 子进程**。仅 `mcp_transport` / `mcp_host` / `mcp_port` 变更需重启（无法热绑定端口）。
+
 > **流式超时（v0.4.0）**：`wait=true` 主路径走官方强制流式（`stream=true`）。三段式超时对齐官方 tavily-mcp——连接/头部 30s、单 chunk 读超时放宽到 300s（容忍报告生成阶段数分钟静默期）、整体 deadline 受 `timeout` 约束；流中途超时/读异常返回部分内容（`status=timeout/error`）并**不回退**重新提交（防重复任务双倍消耗），仅提交阶段失败才回退「提交 + 轮询」。
 
 > **任务状态查询**：`wait=false` 提交后可用 `tavily_research_status(request_id)` 查询任务状态与结果。任务与提交时的 key 绑定（Tavily 任务按 key 隔离），状态查询优先使用同一 key，该 key 失效/耗尽时才回退轮询；key 映射持久化于 `data/research_keys.json`，MCP 服务重启后仍可查询。

@@ -61,6 +61,63 @@ def test_bearer_auth_disabled_when_no_token():
     assert client.get("/").status_code == 200
 
 
+def test_bearer_auth_hot_reload_token(monkeypatch):
+    """token=None（main 调用方式）：中间件每次请求热读配置，改 token 无需重启。"""
+    app = mcp_server._wrap_bearer_auth(_inner_app())
+    client = TestClient(app)
+    # 初始未配置 token → 放行
+    monkeypatch.setattr(mcp_server, "get_settings_fresh", lambda: {"mcp_token": ""})
+    assert client.get("/").status_code == 200
+    # 面板设置 token → 立即生效（无需重启）
+    monkeypatch.setattr(mcp_server, "get_settings_fresh", lambda: {"mcp_token": "hot-token"})
+    assert client.get("/").status_code == 401
+    assert client.get("/", headers={"Authorization": "Bearer hot-token"}).status_code == 200
+    assert client.get("/", headers={"Authorization": "Bearer wrong"}).status_code == 401
+    # 清空 token → 恢复放行
+    monkeypatch.setattr(mcp_server, "get_settings_fresh", lambda: {"mcp_token": ""})
+    assert client.get("/").status_code == 200
+
+
+def test_bearer_auth_passes_through_lifespan(monkeypatch):
+    """纯 ASGI 包装透传 lifespan：内层 app 的 lifespan 正常触发。
+
+    streamable-http 模式依赖 Starlette lifespan 调用 session manager.run() 初始化
+    task_group；此前用外层 Starlette + Mount 包裹会阻断内层 lifespan，导致每个
+    POST /mcp 都 500 "Task group is not initialized"（回归测试）。
+    """
+    import contextlib
+
+    events = []
+
+    @contextlib.asynccontextmanager
+    async def _lifespan(app):
+        events.append("start")
+        yield
+        events.append("stop")
+
+    inner = Starlette(
+        routes=[Route("/", lambda r: JSONResponse({"ok": True}))],
+        lifespan=_lifespan,
+    )
+    app = mcp_server._wrap_bearer_auth(inner)
+    with TestClient(app) as client:
+        assert events == ["start"]       # 内层 lifespan 已触发
+        assert client.get("/").status_code == 200
+    assert events == ["start", "stop"]   # 关闭时正常退出 lifespan
+
+
+def test_save_research_key_trims_over_cap(tmp_path, monkeypatch):
+    """research_keys 映射超过 1000 条时裁剪最旧，保留最新（不静默无界增长）。"""
+    monkeypatch.setattr(mcp_server, "_RESEARCH_KEYS_PATH", tmp_path / "rk.json")
+    mcp_server._research_keys.clear()
+    for i in range(1005):
+        mcp_server._save_research_key(f"rid-{i}", f"tvly-***{i}")
+    assert len(mcp_server._research_keys) == 1000
+    assert "rid-0" not in mcp_server._research_keys     # 最旧被裁剪
+    assert "rid-1004" in mcp_server._research_keys      # 最新保留
+    mcp_server._research_keys.clear()
+
+
 def test_key_strategy_default_round_robin(monkeypatch):
     monkeypatch.setattr(mcp_server, "get_settings", lambda: {})
     assert mcp_server._key_strategy() == "round-robin"
@@ -530,7 +587,7 @@ def test_client_for_forwards_human_id(monkeypatch):
             captured["human_id"] = kwargs.get("human_id")
 
     monkeypatch.setattr(mcp_server, "TavilyClient", _C)
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: {"mcp_human_id": "human-123"})
+    monkeypatch.setattr(mcp_server, "get_settings_fresh", lambda: {"mcp_human_id": "human-123"})
     monkeypatch.setattr(mcp_server, "_apply_default_timeout", lambda c: None)
     monkeypatch.setattr(mcp_server, "_patch_error_headers", lambda c: None)
     mcp_server._client_for("tvly-raw")
@@ -547,7 +604,7 @@ def test_client_for_human_id_empty_passes_none(monkeypatch):
             captured["human_id"] = kwargs.get("human_id")
 
     monkeypatch.setattr(mcp_server, "TavilyClient", _C)
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: {"mcp_human_id": ""})
+    monkeypatch.setattr(mcp_server, "get_settings_fresh", lambda: {"mcp_human_id": ""})
     monkeypatch.setattr(mcp_server, "_apply_default_timeout", lambda c: None)
     monkeypatch.setattr(mcp_server, "_patch_error_headers", lambda c: None)
     mcp_server._client_for("tvly-raw")
@@ -662,7 +719,7 @@ def test_client_for_forwards_project_id(monkeypatch):
             captured["human_id"] = kwargs.get("human_id")
 
     monkeypatch.setattr(mcp_server, "TavilyClient", _C)
-    monkeypatch.setattr(mcp_server, "get_settings",
+    monkeypatch.setattr(mcp_server, "get_settings_fresh",
                         lambda: {"mcp_project_id": "proj-1", "mcp_human_id": "human-1"})
     monkeypatch.setattr(mcp_server, "_apply_default_timeout", lambda c: None)
     monkeypatch.setattr(mcp_server, "_patch_error_headers", lambda c: None)
@@ -681,7 +738,7 @@ def test_client_for_forwards_session_id(monkeypatch):
             captured["session_id"] = kwargs.get("session_id")
 
     monkeypatch.setattr(mcp_server, "TavilyClient", _C)
-    monkeypatch.setattr(mcp_server, "get_settings", lambda: {})
+    monkeypatch.setattr(mcp_server, "get_settings_fresh", lambda: {})
     monkeypatch.setattr(mcp_server, "_apply_default_timeout", lambda c: None)
     monkeypatch.setattr(mcp_server, "_patch_error_headers", lambda c: None)
     mcp_server._client_for("tvly-raw")

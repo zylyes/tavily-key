@@ -138,17 +138,45 @@ def cmd_usage(args):
 
 
 def cmd_audit(args):
-    """列出结合本地记录与官方用量的异常 key。"""
+    """列出结合本地记录与官方用量的异常 key，附请求来源与 Research 任务概览。"""
     anomalies = pool.detect_anomalies()
     if not anomalies:
         print("No anomalies detected. All keys look healthy.")
-        return
-    print(f"Found {len(anomalies)} anomalous key(s):")
-    for a in anomalies:
-        flags = ",".join(a["flags"])
-        print(f"  {a['masked']} [{flags}]")
-        for reason in a["reasons"]:
-            print(f"      - {reason}")
+    else:
+        print(f"Found {len(anomalies)} anomalous key(s):")
+        for a in anomalies:
+            flags = ",".join(a["flags"])
+            print(f"  {a['masked']} [{flags}]")
+            for reason in a["reasons"]:
+                print(f"      - {reason}")
+    # 近 24h 请求概览（按来源拆分）
+    try:
+        trend = pool.get_usage_trend(1)
+        points = trend.get("points") or []
+        day = points[-1] if points else {}
+        print(f"\n近24h请求: {day.get('requests', 0)}"
+              f"（{day.get('success', 0)} 成功 / {day.get('failed', 0)} 失败）")
+        endpoints = day.get("endpoints") or {}
+        if endpoints:
+            print("  按接口: " + ", ".join(f"{k}={v}" for k, v in sorted(endpoints.items())))
+        src = {}
+        for s in ("mcp", "proxy", "cli"):
+            t = pool.get_usage_trend(1, source=s)
+            p = (t.get("points") or [])
+            src[s] = (p[-1].get("requests", 0) if p else 0)
+        print("  按来源: " + ", ".join(f"{k}={v}" for k, v in src.items()))
+    except Exception:  # noqa: BLE001
+        pass
+    # Research 任务看板概览（仅统计，不逐个调官方接口）
+    try:
+        from mcp_server import list_research_tasks
+        tasks = list_research_tasks(limit=50)
+        running = sum(1 for t in tasks if (t.get("status") or "").lower() in ("pending", "processing", "running", "queued"))
+        done = sum(1 for t in tasks if (t.get("status") or "").lower() in ("completed",))
+        failed = sum(1 for t in tasks if (t.get("status") or "").lower() in ("failed", "error", "cancelled"))
+        print(f"Research 任务: 共 {len(tasks)}（进行中 {running} / 完成 {done} / 失败 {failed}）")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def cmd_proxy(args):

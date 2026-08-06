@@ -729,7 +729,7 @@ def test_get_usage_trend_ttl_cache(pool, monkeypatch):
     """用量趋势按天聚合缓存：按 days 分键，失效后重算。"""
     calls = {"n": 0}
 
-    def fake_impl(days):
+    def fake_impl(days, source=""):
         calls["n"] += 1
         return {"days": days, "points": []}
 
@@ -739,9 +739,45 @@ def test_get_usage_trend_ttl_cache(pool, monkeypatch):
     assert calls["n"] == 1              # 同 days 命中缓存
     pool.get_usage_trend(30)            # 不同 days → 不同缓存键
     assert calls["n"] == 2
+    pool.get_usage_trend(7, source="proxy")  # 不同 source → 不同缓存键
+    assert calls["n"] == 3
     pool._invalidate_caches()
     pool.get_usage_trend(7)
-    assert calls["n"] == 3
+    assert calls["n"] == 4
+
+
+def test_reset_runtime_state_clears_inmemory(pool, monkeypatch):
+    """备份恢复后：限流桶/用量缓存/重计算缓存清空并广播失效信号。"""
+    from cache import signal_mtime
+
+    pool.add_keys_batch([KEY1, KEY2])
+    pool.next_available_key("search")
+    assert pool._buckets
+    pool._usage_cache[MASK1] = (time.time(), {})
+    pool._anomalies_cache.set(("a",), {"x": 1}, 5.0)
+    pool._trend_cache.set(("t", 7, ""), {"points": []}, 30.0)
+    before = signal_mtime()
+    pool.reset_runtime_state()
+    assert not pool._buckets
+    assert not pool._usage_cache
+    assert not pool._anomalies_cache
+    assert not pool._trend_cache
+    assert signal_mtime() >= before
+
+
+def test_bucket_rebuilt_when_rpm_config_changes(pool, monkeypatch):
+    """endpoint_rpm 配置变化后令牌桶按新速率重建（热刷新生效）。"""
+    pool.add_key(KEY1)
+    monkeypatch.setattr(
+        key_pool, "get_settings_fresh",
+        lambda: {"endpoint_rpm": {"search": 90}, "rate_limit_rpm": 90},
+    )
+    assert pool._bucket(MASK1, "search").rate_per_min == 90
+    monkeypatch.setattr(
+        key_pool, "get_settings_fresh",
+        lambda: {"endpoint_rpm": {"search": 30}, "rate_limit_rpm": 90},
+    )
+    assert pool._bucket(MASK1, "search").rate_per_min == 30
 
 
 def test_write_ops_invalidate_anomalies_cache(pool, monkeypatch):

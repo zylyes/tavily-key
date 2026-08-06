@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 
 from paths import runtime_dir
 
@@ -116,6 +117,37 @@ def reload() -> dict:
     global _cache
     _cache = load()
     return dict(_cache)
+
+
+# 面向长驻子进程（MCP / 搜索代理）的热刷新状态：TTL 内 stat 一次 config.json，
+# 仅当文件 mtime/size 指纹变化时才 reload（避免每个请求都读盘）。
+_fresh_lock = threading.Lock()
+_fresh_ts = 0.0
+_fresh_fp: tuple | None = None
+
+
+def get_settings_fresh(ttl: float = 1.0) -> dict:
+    """返回较新的设置：TTL 内复用进程缓存；超时后 stat config.json，文件
+    变化才 reload（比无条件 reload 更省，适合每个请求调用的热刷新路径）。
+
+    settings.get_settings() 是进程内缓存，长驻子进程（MCP / 搜索代理）启动后
+    不会感知 config.json 的外部修改（如面板设置/生成密钥）。本函数用文件
+    mtime+size 作指纹，只有文件确实变化才重读磁盘，TTL 兜底避免频繁 stat。
+    """
+    global _fresh_ts, _fresh_fp
+    with _fresh_lock:
+        now = time.monotonic()
+        if now - _fresh_ts >= ttl:
+            _fresh_ts = now
+            try:
+                st = CONFIG_PATH.stat() if CONFIG_PATH.exists() else None
+                fp = (st.st_mtime, st.st_size) if st is not None else None
+            except OSError:
+                fp = None
+            if fp != _fresh_fp:
+                _fresh_fp = fp
+                reload()
+    return get_settings()
 
 
 def save(patch: dict) -> dict:

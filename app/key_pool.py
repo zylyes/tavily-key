@@ -13,7 +13,7 @@ from typing import Optional
 
 from security import encrypt_text, is_ciphertext, decrypt_text
 from logging_setup import get_logger
-from settings import get_settings, cache_ttls
+from settings import get_settings, cache_ttls, get_settings_fresh
 from cache import TTLCache, emit_invalidate, signal_mtime
 from paths import runtime_dir
 
@@ -32,11 +32,17 @@ class _TokenBucket:
     """按 key 的令牌桶：速率取自配置 rate_limit_rpm，threading 安全。"""
 
     def __init__(self, rate_per_min: int):
-        self._rate = max(1, int(rate_per_min)) / 60.0  # tokens/sec
-        self._capacity = max(1, int(rate_per_min))
+        self._rpm = max(1, int(rate_per_min))
+        self._rate = self._rpm / 60.0  # tokens/sec
+        self._capacity = self._rpm
         self._tokens = float(self._capacity)
         self._updated = time.time()
         self._lock = threading.Lock()
+
+    @property
+    def rate_per_min(self) -> int:
+        """本桶的 RPM 速率（配置变化时用于判断是否需要重建桶）。"""
+        return self._rpm
 
     def try_acquire(self, cost: int = 1) -> float:
         """尝试取 cost 个令牌；成功返回 0，否则返回需要等待的秒数。"""
@@ -148,8 +154,21 @@ class KeyPool:
 
     # ── DB helpers ──────────────────────────────────────────────
     def _get_conn(self) -> sqlite3.Connection:
-        if not hasattr(self._local, "conn") or self._local.conn is None:
-            conn = sqlite3.connect(self._db)
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            with self._conns_lock:
+                if conn not in self._conns:
+                    # 该连接已被 close_all_connections 关闭（可能发生在其他
+                    # 线程，如恢复备份的 API 工作线程）：丢弃旧引用重建。
+                    self._local.conn = None
+                    conn = None
+        if conn is None:
+            # check_same_thread=False：每线程仍各自持有连接（_local.conn 保证
+            # 线程内互不共享），但允许 close_all_connections 从其他线程（如
+            # 恢复备份的 API 工作线程）安全关闭——默认 check_same_thread=True
+            # 时跨线程 close() 抛 ProgrammingError 被吞，Windows 上文件句柄
+            # 不释放，恢复备份会报「文件被占用」失败。
+            conn = sqlite3.connect(self._db, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=3000")
@@ -157,6 +176,20 @@ class KeyPool:
                 self._conns.add(conn)
             self._local.conn = conn
         return self._local.conn
+
+    def reset_runtime_state(self) -> None:
+        """重置进程内运行时状态（备份恢复后调用）。
+
+        恢复的数据库可能换了 key 集合/用量，旧的限流桶、/usage 用量缓存与
+        重计算缓存不再适用；同时广播跨进程失效信号让 MCP/proxy 子进程同步清缓存。
+        """
+        with self._bucket_lock:
+            self._buckets.clear()
+        self._usage_cache.clear()
+        self._anomalies_cache.clear()
+        self._trend_cache.clear()
+        emit_invalidate()
+        self._sig_mtime = signal_mtime()
 
     def close_all_connections(self) -> None:
         """关闭所有 sqlite 连接并清空线程本地缓存（恢复 data/ 前调用释放文件句柄）。
@@ -434,23 +467,26 @@ class KeyPool:
         20 RPM、crawl 独立 100 RPM、默认 dev 100 RPM。默认 90/18 等按官方上限留
         10% 余量，避免贴近上限被 429。
         """
-        ep = get_settings().get("endpoint_rpm") or {}
+        # 用热刷新读配置：MCP/代理子进程能感知面板改动的限流参数
+        ep = get_settings_fresh().get("endpoint_rpm") or {}
         if isinstance(ep, dict) and endpoint in ep:
             try:
                 return int(ep[endpoint])
             except (TypeError, ValueError):
                 pass
-        return int(get_settings().get("rate_limit_rpm") or DEFAULT_RPM)
+        return int(get_settings_fresh().get("rate_limit_rpm") or DEFAULT_RPM)
 
     def _bucket(self, masked: str, endpoint: str) -> _TokenBucket:
+        rpm = self._endpoint_rpm(endpoint)
         with self._bucket_lock:
             by_endpoint = self._buckets.get(masked)
             if by_endpoint is None:
                 by_endpoint = {}
                 self._buckets[masked] = by_endpoint
             b = by_endpoint.get(endpoint)
-            if b is None:
-                b = _TokenBucket(self._endpoint_rpm(endpoint))
+            # 配置改动了该 endpoint 的限流 → 重建桶让新速率生效（热刷新）
+            if b is None or b.rate_per_min != rpm:
+                b = _TokenBucket(rpm)
                 by_endpoint[endpoint] = b
             return b
 
@@ -963,33 +999,34 @@ class KeyPool:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_usage_trend(self, days: int = 7) -> dict:
+    def get_usage_trend(self, days: int = 7, source: str = "") -> dict:
         """按天聚合 request_log 用量（结果短 TTL 缓存）。
 
-        每日请求数/成功/失败/积分/按 endpoint 拆分。日志是追加写、按天聚合
-        结果秒级变化无意义，TTL：settings.cache_ttls.trend（默认 30s，0=关闭），
-        传 skip_cache=True 可强制刷新。
+        每日请求数/成功/失败/积分/按 endpoint 拆分。source 非空时只统计该来源
+        （mcp/proxy/cli，来自 request_log.source）。日志是追加写、按天聚合
+        结果秒级变化无意义，TTL：settings.cache_ttls.trend（默认 30s，0=关闭）。
         """
         days = max(1, min(int(days), 90))
+        source = (source or "").strip()
         self._check_remote_invalidate()
         ttl = float(cache_ttls().get("trend", 30.0))
-        key = ("trend", days)
+        key = ("trend", days, source)
         if ttl > 0:
             hit = self._trend_cache.get(key)
             if hit is not None:
                 return hit
-        result = self._get_usage_trend_impl(days)
+        result = self._get_usage_trend_impl(days, source)
         if ttl > 0:
             self._trend_cache.set(key, result, ttl)
         return result
 
-    def _get_usage_trend_impl(self, days: int = 7) -> dict:
+    def _get_usage_trend_impl(self, days: int = 7, source: str = "") -> dict:
         """按天聚合实现（无缓存），见 get_usage_trend。"""
         days = max(1, min(int(days), 90))
+        source = (source or "").strip()
         since = time.time() - days * 86400
         conn = self._get_conn()
-        rows = conn.execute(
-            """
+        sql = """
             SELECT date(created_at, 'unixepoch', 'localtime') AS day,
                    endpoint,
                    COUNT(*) AS cnt,
@@ -997,11 +1034,13 @@ class KeyPool:
                    COALESCE(SUM(CASE WHEN success=1 THEN credits_consumed ELSE 0 END), 0) AS credits
             FROM request_log
             WHERE created_at >= ?
-            GROUP BY day, endpoint
-            ORDER BY day
-            """,
-            (since,),
-        ).fetchall()
+        """
+        params: list = [since]
+        if source:
+            sql += " AND source = ?"
+            params.append(source)
+        sql += " GROUP BY day, endpoint ORDER BY day"
+        rows = conn.execute(sql, params).fetchall()
         day_map: dict[str, dict] = {}
         for r in rows:
             d = day_map.setdefault(

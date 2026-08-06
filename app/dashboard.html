@@ -180,6 +180,14 @@ tr td:first-child,tr th:first-child{padding-left:16px}
 .modal-box h3{font-size:14px;margin-bottom:10px;display:flex;align-items:center;gap:9px}
 .modal-box p{font-size:12px;color:var(--text-2);line-height:1.8;margin-bottom:22px;word-break:break-all}
 .modal-actions{display:flex;justify-content:flex-end;gap:10px}
+.detail-grid{display:grid;grid-template-columns:92px 1fr;gap:6px 14px;margin-bottom:14px}
+.detail-grid .k{color:var(--text-3);font-size:11px;padding-top:2px;line-height:1.5}
+.detail-grid .v{color:var(--text);font-size:12px;overflow-wrap:break-word;word-break:break-all;line-height:1.6}
+.detail-sec{color:var(--text-3);font-size:11px;margin:12px 0 4px}
+.detail-pre{background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-family:var(--mono);font-size:11px;color:#fca5a5;white-space:pre-wrap;word-break:break-all;max-height:320px;overflow-y:auto;line-height:1.65;margin:0}
+.detail-pre.good{color:var(--text-2)}
+tr.clickable{cursor:pointer}
+tr.clickable:hover{background:rgba(99,102,241,.07)}
 
 /* 轻提示 Toast */
 .toast-wrap{position:fixed;top:16px;right:18px;display:flex;flex-direction:column;gap:10px;z-index:100;pointer-events:none}
@@ -273,6 +281,17 @@ tr td:first-child,tr th:first-child{padding-left:16px}
         开始更新
       </button>
       <button class="btn btn-ghost" id="usageCloseBtn" onclick="closeUsageModal()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 请求日志 / Research 任务 详情弹窗 -->
+<div class="modal-mask" id="detailMask">
+  <div class="modal-box" style="width:640px">
+    <h3><span class="toast-ic" style="background:rgba(96,165,250,.16);color:#60a5fa">ℹ</span><span id="detailTitle">详情</span></h3>
+    <div id="detailBody" style="font-size:12px;line-height:1.7;margin-bottom:18px;word-break:break-all"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeDetail()">关闭</button>
     </div>
   </div>
 </div>
@@ -387,6 +406,12 @@ tr td:first-child,tr th:first-child{padding-left:16px}
             <select id="trendDays" onchange="loadStats()" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:3px 8px;font-size:11px">
               <option value="7">近 7 天</option>
               <option value="30">近 30 天</option>
+            </select>
+            <select id="trendSource" onchange="loadStats()" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:3px 8px;font-size:11px">
+              <option value="">全部来源</option>
+              <option value="mcp">MCP</option>
+              <option value="proxy">搜索代理</option>
+              <option value="cli">CLI</option>
             </select>
             <span style="flex:1"></span>
             <span class="status" id="trendSummary" style="font-size:11px"></span>
@@ -543,6 +568,16 @@ tr td:first-child,tr th:first-child{padding-left:16px}
           <div class="setting-row">
             <label>会话归属 ID（可选）</label>
             <input id="setMcpHumanId" type="text" placeholder="转发 X-Human-Id 头，便于 Tavily 侧会话分析">
+          </div>
+          <div class="setting-row">
+            <label>默认参数（JSON，可选）</label>
+            <div style="display:flex;gap:8px;align-items:flex-start;width:100%">
+              <textarea id="setMcpDefaultParameters" rows="3" placeholder='{"search_depth":"advanced","chunks_per_source":3,"max_results":5}' style="flex:1;background:var(--bg-2);border:1px solid var(--border);color:var(--text);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);resize:vertical"></textarea>
+              <button class="btn btn-sm btn-ghost" onclick="applyMcpDefaultsPreset()" style="flex:none">推荐预设</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-3);margin-top:4px;line-height:1.6">
+              对所有 search 类请求注入的默认参数（客户端显式传入的参数优先）。提示：<code>auto_parameters</code> 可能自动把 <code>search_depth</code> 升为 <code>advanced</code>（每次 2 积分），需要控制成本时请显式指定 <code>search_depth</code>。
+            </div>
           </div>
           <div class="setting-actions">
             <button class="btn btn-primary" onclick="saveMcpSettings()">保存设置</button>
@@ -973,10 +1008,11 @@ function niceCeil(n) {
 }
 async function loadStats() {
   const days = document.getElementById('trendDays').value;
+  const source = document.getElementById('trendSource') ? document.getElementById('trendSource').value : '';
   try {
     const [s, t] = await Promise.all([
       api('/api/stats'),
-      api('/api/usage/trend?days=' + days),
+      api('/api/usage/trend?days=' + days + '&source=' + encodeURIComponent(source)),
     ]);
     renderStatsCards(s);
     renderTrend(t.trend || {});
@@ -1127,7 +1163,9 @@ async function loadTasks() {
         <td class="mono" style="font-size:10px;color:var(--text-3)">${escapeHtml(t.request_id)}</td>
         <td class="mono" style="font-size:11px">${escapeHtml(t.masked)}</td>
         <td><span class="badge ${cls}">${stLabel}</span></td>
-        <td style="font-size:11px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${detail}</td>`;
+        <td style="font-size:11px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="点击查看完整详情">${detail}</td>`;
+      tr.classList.add('clickable');
+      tr.addEventListener('click', () => taskDetail(t));
       tbody.appendChild(tr);
     }
   } catch(e) {
@@ -1179,7 +1217,9 @@ async function loadLogs() {
         <td>${fmtCredits(l)}</td>
         <td>${fmtLat(l.latency_ms)}</td>
         <td class="mono" style="font-size:10px;color:var(--text-3)">${escapeHtml(l.request_id||'')}</td>
-        <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
+        <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="点击查看完整详情">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
+      tr.classList.add('clickable');
+      tr.addEventListener('click', () => logDetail(l));
       tbody.appendChild(tr);
     }
   } catch(e) { console.error(e); }
@@ -1214,6 +1254,56 @@ async function exportLogs() {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   } catch(e) { console.error(e); }
+}
+
+// ── 详情弹窗（请求日志 / Research 任务）──────────────────────
+function showDetail(title, bodyHtml) {
+  document.getElementById('detailTitle').textContent = title;
+  document.getElementById('detailBody').innerHTML = bodyHtml;
+  document.getElementById('detailMask').classList.add('show');
+}
+function closeDetail() {
+  document.getElementById('detailMask').classList.remove('show');
+  document.getElementById('detailBody').innerHTML = '';
+}
+const _USAGE_SRC_LABEL = {response:'响应', unknown:'未知（接口不返回 usage）', none:'无'};
+const _SRC_LABEL = {mcp:'MCP', proxy:'搜索代理', cli:'CLI'};
+function logDetail(l) {
+  const rows = [
+    ['时间', fmtTs(l.created_at)],
+    ['Key', escapeHtml(l.key_masked)],
+    ['接口', escapeHtml(l.endpoint)],
+    ['状态', (l.success ? '成功' : '失败') + (l.is_client_error ? '（客户端参数错误）' : '')],
+    ['积分', fmtCredits(l)],
+    ['延迟', fmtLat(l.latency_ms)],
+    ['请求ID', escapeHtml(l.request_id || '—')],
+    ['用量来源', escapeHtml(_USAGE_SRC_LABEL[l.usage_source] || l.usage_source || '—')],
+    ['来源', escapeHtml(_SRC_LABEL[l.source] || l.source || '—')],
+  ];
+  let html = '<div class="detail-grid">' + rows.map(([k,v]) => `<div class="k">${k}</div><div class="v">${v || '—'}</div>`).join('') + '</div>';
+  if (l.error_msg) {
+    html += '<div class="detail-sec">错误信息</div><pre class="detail-pre">' + escapeHtml(l.error_msg) + '</pre>';
+  }
+  showDetail('请求详情', html);
+}
+const _TASK_LABEL = {completed:'完成', submitted:'进行中', running:'进行中', in_progress:'进行中', processing:'进行中', failed:'失败', error:'错误', cancelled:'已取消', unknown:'未知'};
+function taskDetail(t) {
+  const st = _TASK_LABEL[t.status] || t.status || '未知';
+  let html = '<div class="detail-grid">' + [
+    ['请求ID', escapeHtml(t.request_id)],
+    ['Key', escapeHtml(t.masked)],
+    ['状态', escapeHtml(st + (t.cached ? '（缓存）' : ''))],
+  ].map(([k,v]) => `<div class="k">${k}</div><div class="v">${v || '—'}</div>`).join('') + '</div>';
+  if (t.status === 'completed' && t.content !== undefined && t.content !== null) {
+    const c = t.content;
+    const text = typeof c === 'string' ? c : JSON.stringify(c, null, 2);
+    html += '<div class="detail-sec">内容摘要（预览）</div><pre class="detail-pre good">' + escapeHtml(text) + '</pre>';
+  } else if (t.error) {
+    html += '<div class="detail-sec">错误信息</div><pre class="detail-pre">' + escapeHtml(String(t.error)) + '</pre>';
+  } else if (t.status === 'unknown') {
+    html += '<p style="color:var(--text-2);font-size:12px">缓存未刷新（点「刷新」后查询）</p>';
+  }
+  showDetail('Research 任务详情', html);
 }
 
 // ── 数据备份与恢复 ────────────────────────────────────────────
@@ -1342,6 +1432,7 @@ document.addEventListener('keydown', e => {
     else if (document.getElementById('addKeyMask').classList.contains('show')) closeAddModal();
     else if (document.getElementById('healthMask').classList.contains('show')) closeHealthModal();
     else if (document.getElementById('usageMask').classList.contains('show')) closeUsageModal();
+    else if (document.getElementById('detailMask').classList.contains('show')) closeDetail();
   }
 });
 
@@ -1689,11 +1780,34 @@ async function loadMcpSettings() {
     document.getElementById('setMcpToken').value = s.mcp_token || '';
     document.getElementById('setMcpProjectId').value = s.mcp_project_id || '';
     document.getElementById('setMcpHumanId').value = s.mcp_human_id || '';
+    const dp = s.mcp_default_parameters || {};
+    document.getElementById('setMcpDefaultParameters').value = Object.keys(dp).length ? JSON.stringify(dp, null, 2) : '';
     mcpTokenSet = !!(s.mcp_token);
   } catch(e) { console.error(e); }
 }
 
+function applyMcpDefaultsPreset() {
+  const preset = { search_depth: 'advanced', chunks_per_source: 3, max_results: 5 };
+  document.getElementById('setMcpDefaultParameters').value = JSON.stringify(preset, null, 2);
+  toast('已填入官方推荐默认参数，可再修改后保存', 'info');
+}
+
 async function saveMcpSettings() {
+  const dpRaw = document.getElementById('setMcpDefaultParameters').value.trim();
+  let dp = {};
+  if (dpRaw) {
+    try { dp = JSON.parse(dpRaw); }
+    catch(e) {
+      document.getElementById('mcpSettingsStatus').textContent = '默认参数 JSON 格式错误';
+      toast('默认参数 JSON 格式错误', 'error');
+      return;
+    }
+    if (typeof dp !== 'object' || Array.isArray(dp)) {
+      document.getElementById('mcpSettingsStatus').textContent = '默认参数必须是 JSON 对象';
+      toast('默认参数必须是 JSON 对象', 'error');
+      return;
+    }
+  }
   const payload = {
     mcp_auto_start: document.getElementById('setMcpAutoStart').value === 'true',
     mcp_transport: document.getElementById('setMcpTransport').value,
@@ -1702,6 +1816,7 @@ async function saveMcpSettings() {
     mcp_token: document.getElementById('setMcpToken').value.trim(),
     mcp_project_id: document.getElementById('setMcpProjectId').value.trim(),
     mcp_human_id: document.getElementById('setMcpHumanId').value.trim(),
+    mcp_default_parameters: dp,
   };
   mcpTokenSet = !!payload.mcp_token;
   const status = document.getElementById('mcpSettingsStatus');
@@ -1731,7 +1846,7 @@ async function loadProxy() {
   try {
     const d = await api('/api/proxy/status');
     proxyRunning = d.running;
-    proxyTokenSet = !!(d.token);
+    proxyTokenSet = !!d.token_set;
     const badge = document.getElementById('proxyStatusBadge');
     const btn = document.getElementById('proxyToggleBtn');
     const urlRow = document.getElementById('proxyUrlRow');
@@ -1755,7 +1870,13 @@ async function loadProxy() {
       if (urls.ip) { ipRow.style.display = 'block'; document.getElementById('proxyUrlIp').value = urls.ip; } else { ipRow.style.display = 'none'; }
       if (urls.hostname_local) { hostRow.style.display = 'block'; document.getElementById('proxyUrlHost').value = urls.hostname_local; } else { hostRow.style.display = 'none'; }
       if (urls.local) { localRow.style.display = 'block'; document.getElementById('proxyUrlLocal').value = urls.local; } else { localRow.style.display = 'none'; }
-      document.getElementById('proxyToken').value = d.token || '';
+      // 状态接口只回脱敏 token；完整密钥由设置接口提供（状态卡展示/复制用）
+      let fullToken = d.token || '';
+      try {
+        const s = await api('/api/settings');
+        fullToken = (s.settings && s.settings.proxy_token) || '';
+      } catch(e) { /* 忽略：保留脱敏值 */ }
+      document.getElementById('proxyToken').value = fullToken || d.token || '';
       document.getElementById('proxyTokenNote').textContent = proxyTokenSet
         ? '已启用代理密钥：客户端需携带 Authorization: Bearer <密钥> 请求头。'
         : '⚠️ 未设置代理密钥，代理对外开放，任何能访问该地址的设备都可消耗 Key 池额度。';

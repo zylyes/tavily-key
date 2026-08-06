@@ -9,7 +9,7 @@
 - **Key 异常识别**：自动识别额度耗尽/疑似泄露/高错误率等 6 类异常，Webhook / 托盘气泡通知
 - **Web 控制台**：Key 列表、请求日志（筛选/导出）、统计、Research 任务看板、健康检查、部署设置
 - **MCP 服务一体化管理**：面板内置 MCP 服务开关/设置（sse / streamable-http / stdio），局域网 IP / 主机名 / 本机三种地址展示与复制
-- **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/research`、`/usage` 官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
+- **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/research`（含 `GET /research/{id}`）官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
 - **Research 增强**：异步任务（wait / status）、流式输出、结构化输出（output_schema）、报告长度与来源数控制
 - **数据备份与恢复**：CLI 与面板一键备份/恢复 `data/`（配置、Key 池、加密密钥、research 缓存），恢复前自动保留 `.pre-restore` 副本，绝不静默覆盖
 - **按端点分组限流**：`endpoint_rpm` 按接口独立限流（research 创建任务独立 18 RPM），未配置接口回退 `rate_limit_rpm`
@@ -117,7 +117,9 @@ scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard
 
 ## 搜索代理（Tavily 兼容 REST 服务）
 
-把 Key 池暴露为官方 Tavily API 形态（`POST /search`、`POST /extract`、`POST /crawl`、`POST /map`、`POST /research`、`GET /research/{id}`、`GET /usage`），供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接；内部走 Key 池轮询/限流/异常切换，额度与日志自动落账。
+把 Key 池暴露为官方 Tavily API 形态（`POST /search`、`POST /extract`、`POST /crawl`、`POST /map`、`POST /research`、`GET /research/{id}`），供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接；内部走 Key 池轮询/限流/异常切换，额度与日志自动落账。
+
+> 不提供 `GET /usage`：官方用量展示请使用面板统计页「更新用量」（内部对每个 Key 单独查官方 `/usage` 聚合），代理不转发用量查询。
 
 **启动方式**：
 
@@ -155,6 +157,7 @@ Web 控制台右上角「**设置**」标签页可配置：
 | 监听地址 | `0.0.0.0`（局域网） / `127.0.0.1`（仅本机） |
 | 端口 | MCP 服务端口（默认 8001） |
 | 项目/会话归属 ID | 可选，转发 `X-Project-ID` / `X-Human-Id` 头，便于 Tavily 侧按项目归类用量与会话分析 |
+| 默认参数（JSON） | 对 search 类请求注入默认参数（如 `search_depth=advanced`），客户端显式传值优先；「推荐预设」一键填入官方建议值；注意 `auto_parameters` 可能自动升级深度至 advanced（每次 2 积分） |
 
 「**搜索代理**」标签页可配置：
 
@@ -194,6 +197,7 @@ Web 控制台右上角「**设置**」标签页可配置：
 
 > 首次启动自动生成完整默认配置；以上为常用项示例，更多配置（限流、异常阈值、MCP 默认参数等）见 `data/config.json` 自动生成内容。
 > `endpoint_rpm` 为每 key × 每接口的限流（research 创建任务官方上限 20 RPM，默认留 10% 余量）；未配置的接口回退 `rate_limit_rpm`（默认 90）。
+> **配置热刷新**：`mcp_token`、`mcp_default_parameters`、`mcp_human_id`/`mcp_project_id`、`endpoint_rpm`、`proxy_token` 修改后**无需重启 MCP / 搜索代理即生效**（子进程每请求热读 config.json）；仅 `mcp_transport`/`mcp_host`/`mcp_port`、`proxy_host`/`proxy_port` 变更需重启（无法热绑定端口）。
 > 修改 `host`/`port` 需重启服务生效；`mode`/`domain`/`auth_token` 即时生效。
 > MCP 服务的传输方式/端口修改后，需在「MCP 服务」页点击「启动服务」（或重启软件）生效。
 
@@ -211,7 +215,7 @@ python app/cli.py list                    # 列出所有 key
 python app/cli.py list --active           # 仅活跃 key
 python app/cli.py stats                   # 用量统计
 python app/cli.py usage --sync            # 同步/查看官方用量
-python app/cli.py audit                   # 列出异常 key
+python app/cli.py audit                   # 异常 key + 近24h接口/来源统计 + Research 任务概览
 python app/cli.py proxy                   # 搜索代理状态/地址/密钥
 python app/cli.py backup                  # 备份 data/ 为 zip（默认系统临时目录）
 python app/cli.py restore <备份.zip>      # 从备份恢复 data/

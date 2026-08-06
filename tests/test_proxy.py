@@ -245,7 +245,6 @@ def test_map_ok(proxy_env):
     assert proxy_env["client"].last["include_usage"] is True
 
 
-# ── /usage ─────────────────────────────────────────────────────
 def _active_key():
     from key_pool import ApiKey
 
@@ -254,28 +253,6 @@ def _active_key():
         request_count=0, error_count=0, credits_used=0, credits_limit=0,
         last_used_at=0, added_at=0, last_error="",
     )
-
-
-def test_usage_no_keys_503(proxy_env, monkeypatch):
-    monkeypatch.setattr(tavily_proxy.pool, "list_keys", lambda: [])
-    assert _client().get("/usage").status_code == 503
-
-
-def test_usage_ok(proxy_env, monkeypatch):
-    monkeypatch.setattr(tavily_proxy.pool, "list_keys", lambda: [_active_key()])
-    monkeypatch.setattr(
-        "httpx.get",
-        lambda *a, **kw: _FakeResp(200, {"key": {"usage": 5, "limit": 1000}, "account": {}}),
-    )
-    r = _client().get("/usage")
-    assert r.status_code == 200
-    assert r.json()["key"]["usage"] == 5
-
-
-def test_usage_http_error_500(proxy_env, monkeypatch):
-    monkeypatch.setattr(tavily_proxy.pool, "list_keys", lambda: [_active_key()])
-    monkeypatch.setattr("httpx.get", lambda *a, **kw: _FakeResp(500, {}))
-    assert _client().get("/usage").status_code == 500
 
 
 # ── /research ─────────────────────────────────────────────────

@@ -5,6 +5,65 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.7.0] - 2026-08-06
+
+### Added
+
+- **统一配置热刷新**：`settings.get_settings_fresh(ttl=1s)`——stat
+  `config.json` 的 mtime+size 指纹，文件变化才 `reload()`（比无条件 TTL
+  reload 更省）。MCP 子进程与搜索代理统一复用：
+  - MCP 的 `mcp_token`（Bearer 鉴权中间件每次请求热读，面板设置/修改/清空
+    令牌**无需重启 MCP** 即生效）、`mcp_default_parameters`、
+    `mcp_human_id` / `mcp_project_id` 全部走热刷新；
+  - `key_pool._endpoint_rpm` 走热刷新，`_bucket` 检测配置速率变化时自动
+    重建令牌桶（限流参数热生效）；
+  - 搜索代理 `_fresh_settings` 迁移复用统一实现。
+  - 仅 `mcp_transport` / `mcp_host` / `mcp_port` 变更仍需重启（无法热绑定端口）。
+- **搜索代理 `/usage` 端点移除**：代理不再转发官方 `/usage`（用户确认不需要），
+  官方用量展示走面板统计页（`sync_usage` 对每个 Key 单独查询聚合）；同时移除
+  代理 `/usage` 路由、鉴权路径与对应测试（依赖 `GET /usage` 的客户端将收到 404，
+  官方用量请改用面板统计页或 `usage --sync`）。
+- **备份恢复后内存态重置**：`/api/restore` 成功后调用
+  `pool.reset_runtime_state()`（清空限流桶 / `/usage` 用量缓存 / 异常与趋势
+  缓存，并广播跨进程失效信号），避免恢复后旧限流状态残留。
+- **面板 MCP 默认参数配置**：MCP 设置页新增「默认参数（JSON）」输入框 +
+  「推荐预设」按钮（一键填入官方建议 `search_depth=advanced /
+  chunks_per_source=3 / max_results=5`）；提示 `auto_parameters` 可能自动
+  升级 `search_depth=advanced`（每次 2 积分）的成本风险。
+- **用量趋势按来源拆分**：`get_usage_trend(days, source=)` 支持按
+  `request_log.source`（mcp / proxy / cli）筛选；`/api/usage/trend?source=`
+  透传；面板统计页新增来源下拉。
+- **CLI `audit` 扩展**：输出近 24h 请求按接口 / 按来源统计，以及
+  Research 任务看板概览（进行中 / 完成 / 失败）。
+
+### Changed
+
+- `/api/proxy/status` 的 `proxy_token` 改为**脱敏**返回（前 4 后 4 位 +
+  `token_set` 标志），完整密钥仅由 `/api/settings` 提供（面板状态卡展示时
+  自动从设置接口读取），避免状态接口明文带出密钥。
+- `_save_research_key` 裁剪超过 1000 条映射时记录 warning 日志（原静默丢弃）。
+
+### Fixed
+
+- **🔴 streamable-http 模式下所有 MCP 请求 500**：`_wrap_bearer_auth` 原先用
+  外层 Starlette + Mount 包裹 MCP app，而 Starlette 的 Mount **不会代理子 app
+  的 lifespan**——mcp 的 `streamable_http_app()` 依赖 lifespan 调用 session
+  manager 的 `run()` 初始化 task_group，lifespan 被阻断后 `_task_group` 恒为
+  `None`，每个 `POST /mcp`（含 `mcp:list-tools`）都返回 500
+  `"Task group is not initialized. Make sure to use run()."`。sse 模式每次连接
+  自行 `run()`、不依赖 lifespan，故此前未暴露。修复：`_wrap_bearer_auth` 改为
+  **纯 ASGI 中间件**（不新建 Starlette、不干预 lifespan scope，直接透传），
+  内层 app 的 lifespan 正常触发；新增回归测试
+  `test_bearer_auth_passes_through_lifespan`，并用真实 streamable-http 客户端
+  验证 `initialize` / `tools/list` 均 200。
+- **🔴 备份恢复在 Windows 上报「文件被占用」**：`KeyPool._get_conn` 的
+  sqlite 连接默认 `check_same_thread=True`，`close_all_connections()` 从其他
+  线程（如 restore 的 API 工作线程）`close()` 会静默抛 `ProgrammingError`，
+  导致文件句柄不释放、`restore_from` 重命名 `tavily_keys.db` 失败
+  （WinError 32）。修复：连接改 `check_same_thread=False`（每线程仍各自持有
+  连接，仅允许跨线程关闭），且 `_get_conn` 检测本地连接已被关闭时自动重建，
+  避免「Cannot operate on a closed database」。
+
 ## [0.6.0] - 2026-08-06
 
 ### Added
@@ -191,6 +250,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.7.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.7.0
 [0.6.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.6.0
 [0.5.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.5.0
 [0.4.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.4.0

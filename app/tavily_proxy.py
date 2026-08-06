@@ -4,7 +4,7 @@ Tavily 兼容搜索代理 — 把 Key 池暴露为 Tavily 官方 REST API 形态
 
 供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接：客户端把本服务的
 地址填入「API 地址」、proxy_token 填入「API 密钥」，客户端发来的 /search、
-/extract、/crawl、/map、/usage 请求由本代理转发到 Tavily 官方 API，内部走 Key
+/extract、/crawl、/map 请求由本代理转发到 Tavily 官方 API，内部走 Key
 池轮询/限流/异常切换（复用 mcp_server._run_with_retry），额度与日志自动落账。
 
 - 鉴权：Authorization: Bearer <proxy_token>（或 body api_key 字段）；proxy_token
@@ -22,7 +22,6 @@ import time
 from typing import Any, Callable
 
 import anyio
-import httpx
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -42,20 +41,14 @@ pool = KeyPool()
 # settings.get_settings() 是进程内缓存：代理作为独立子进程，启动后不会感知
 # config.json 的变更（如面板后来设置/生成的 proxy_token、限流参数等），导致
 # 密钥配置不生效。鉴权前按 TTL 刷新缓存，让配置修改在数秒内生效、无需重启。
-_refresh_ts = 0.0
 _REFRESH_TTL = 1.0  # 秒：TTL 内复用缓存，避免每个请求都读盘
 
 
 def _fresh_settings() -> dict:
-    """返回最新配置（TTL 1s 内复用；超时则 reload 刷新进程内缓存）。"""
-    global _refresh_ts
-    import settings as settings_mod
+    """返回最新配置（TTL 内复用；config.json 变化时 reload 刷新进程内缓存）。"""
+    from settings import get_settings_fresh
 
-    now = time.time()
-    if now - _refresh_ts >= _REFRESH_TTL:
-        settings_mod.reload()
-        _refresh_ts = now
-    return settings_mod.get_settings()
+    return get_settings_fresh(ttl=_REFRESH_TTL)
 
 proxy_app = FastAPI(
     title="Tavily Compatible Search Proxy",
@@ -72,7 +65,7 @@ proxy_app.add_middleware(
 )
 
 # 需要鉴权的路径（与 Tavily 官方端点一致）
-_AUTH_PATHS = {"/search", "/extract", "/crawl", "/map", "/research", "/usage"}
+_AUTH_PATHS = {"/search", "/extract", "/crawl", "/map", "/research"}
 
 # 各类端点允许转发的字段白名单（其余字段忽略，避免把非法参数透传给官方 400）
 _SEARCH_FIELDS = (
@@ -362,29 +355,6 @@ async def proxy_research_status(request_id: str):
         _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id,
                 usage_source="none", source="proxy")
         return _error(500, str(e)[:300])
-
-
-@proxy_app.get("/usage")
-def proxy_usage():
-    """Tavily Usage：转发官方 /usage（取池内一个可用 key，不消耗搜索令牌桶）。"""
-    try:
-        keys = pool.list_keys()
-        active = [k for k in keys if k.is_active and not k.is_exhausted]
-        if not active:
-            return _error(503, "No active API keys in pool.")
-        k = active[0]
-        r = httpx.get(
-            "https://api.tavily.com/usage",
-            headers={"Authorization": f"Bearer {k.key}"},
-            timeout=20,
-        )
-        if r.status_code != 200:
-            _log.warning("proxy /usage HTTP %s masked=%s", r.status_code, k.masked)
-            return _error(500, f"usage sync failed: HTTP {r.status_code}")
-        return JSONResponse(r.json())
-    except Exception as e:  # noqa: BLE001
-        _log.warning("proxy /usage 失败: %s", str(e)[:200])
-        return _error(500, "Internal Server Error")
 
 
 def main() -> None:

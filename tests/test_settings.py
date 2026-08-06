@@ -38,6 +38,43 @@ def test_transport_enum():
         validate_patch({"mcp_transport": "ws"})
 
 
+def test_get_settings_fresh_reloads_on_file_change(tmp_path, monkeypatch):
+    """config.json 被外部（其他进程）修改后 get_settings_fresh 感知并 reload。"""
+    import json
+
+    import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(settings_mod, "_cache", None)
+    settings_mod._fresh_ts = 0.0
+    settings_mod._fresh_fp = None
+    settings_mod.get_settings_fresh(ttl=0.01)   # 初始化指纹 + 缓存
+    assert settings_mod.get_settings()["auth_token"] == ""
+
+    # 模拟子进程外其他进程改写 config.json（绕过进程内缓存）
+    (tmp_path / "config.json").write_text(
+        json.dumps({"auth_token": "external-token", "port": 8123}), encoding="utf-8"
+    )
+    settings_mod._fresh_ts = 0.0                 # 过期 TTL 窗口
+    settings_mod._fresh_fp = None
+    settings_mod.get_settings_fresh(ttl=0.01)
+    assert settings_mod.get_settings()["auth_token"] == "external-token"
+    assert settings_mod.get_settings()["port"] == 8123
+
+
+def test_get_settings_fresh_ttl_reuses_cache(tmp_path, monkeypatch):
+    """TTL 内不重新 stat：长 TTL 下重复调用复用进程缓存。"""
+    import settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(settings_mod, "_cache", None)
+    settings_mod._fresh_ts = 0.0
+    settings_mod._fresh_fp = None
+    settings_mod.get_settings_fresh(ttl=60.0)
+    settings_mod.get_settings_fresh(ttl=60.0)   # TTL 内复用，不触发 reload
+    assert settings_mod.get_settings()["auth_token"] == ""
+
+
 def test_tokens_stripped():
     assert validate_patch({"auth_token": "  abc  "})["auth_token"] == "abc"
     assert validate_patch({"mcp_token": " t "})["mcp_token"] == "t"

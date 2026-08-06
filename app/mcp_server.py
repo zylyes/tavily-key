@@ -20,7 +20,7 @@ from tavily import BadRequestError, TavilyClient
 from key_pool import KeyPool, _mask, _classify_error
 from logging_setup import get_logger
 from paths import runtime_dir
-from settings import get_settings
+from settings import get_settings, get_settings_fresh
 
 _log = get_logger("mcp_server")
 
@@ -59,7 +59,12 @@ def _save_research_key(request_id: str, masked: str) -> None:
     with _research_keys_lock:
         _research_keys[request_id] = masked
         if len(_research_keys) > 1000:
+            dropped = len(_research_keys) - 1000
             _research_keys = dict(list(_research_keys.items())[-1000:])
+            _log.warning(
+                "research_keys 映射超上限，裁剪最旧 %d 条（现 %d 条），"
+                "超龄 research 任务 status 将回退轮询", dropped, len(_research_keys)
+            )
         try:
             _RESEARCH_KEYS_PATH.write_text(
                 json.dumps(_research_keys, ensure_ascii=False), encoding="utf-8"
@@ -148,7 +153,7 @@ def _client_for(raw_key: str) -> TavilyClient:
     （对齐官方 tavily-mcp 的 per-process session），转发 X-Session-Id 头，
     便于 Tavily 侧按会话聚合分析。
     """
-    cfg = get_settings()
+    cfg = get_settings_fresh()
     client = TavilyClient(
         raw_key,
         session_id=_SESSION_ID,
@@ -261,8 +266,11 @@ def _norm_country(country: str) -> str:
 
 
 def _tool_kwargs(func, kwargs: dict) -> dict:
-    """应用 mcp_default_parameters：未显式传入的参数（值=声明默认）由默认参数覆盖。"""
-    defaults = get_settings().get("mcp_default_parameters") or {}
+    """应用 mcp_default_parameters：未显式传入的参数（值=声明默认）由默认参数覆盖。
+
+    用热刷新读配置：面板修改默认参数后无需重启 MCP 即生效。
+    """
+    defaults = get_settings_fresh().get("mcp_default_parameters") or {}
     if not isinstance(defaults, dict) or not defaults:
         return kwargs
     sig_defaults = {
@@ -1192,46 +1200,74 @@ def _structured_content(parts: list[str], structured: list[Any], output_schema: 
         return joined
 
 
-def _wrap_bearer_auth(inner_app: Any, token: str):
-    """给 MCP 网络服务包一层 Bearer token 鉴权中间件。
+def _wrap_bearer_auth(inner_app: Any, token: str | None = None):
+    """给 MCP 网络服务包一层 Bearer token 鉴权（纯 ASGI 中间件）。
 
     config.mcp_token 非空时，所有请求必须携带 `Authorization: Bearer <token>`
-    头，否则返回 401。用 starlette 外层包裹 sse_app()/streamable_http_app()
-    返回的 app（公开 API，不依赖 mcp 内部 OAuth 配置）。token 为空时不包装。
+    头，否则返回 401。
+
+    必须用纯 ASGI 包装（不新建 Starlette 应用、不干预 lifespan scope）：
+    mcp 的 streamable_http_app() 在 Starlette lifespan 里调用 session manager
+    的 run() 初始化 task_group；若用外层 Starlette + Mount 包裹，内层 app 的
+    lifespan 不会被触发（Mount 不代理子 app 的 lifespan），streamable-http 下
+    每个请求都会 500 "Task group is not initialized. Make sure to use run()."
+    sse 模式每次连接自行 run()、不依赖 lifespan，故此前未暴露该问题。
+
+    token=None（main 的调用方式）：每次请求按 TTL 热读最新配置——面板设置/
+    修改/清空 mcp_token 后无需重启 MCP 即生效，token 为空时放行。
+    显式传 token（测试/兼容）：固定用该值鉴权，不读配置。
     """
-    if not token:
-        return inner_app
     import secrets
-    from starlette.applications import Starlette
-    from starlette.middleware import Middleware
-    from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.responses import JSONResponse
-    from starlette.routing import Mount
 
-    class _AuthMiddleware(BaseHTTPMiddleware):
+    if token is None:
+        def _expected() -> str:
+            return (get_settings_fresh().get("mcp_token") or "").strip()
+    else:
+        def _expected() -> str:
+            return token
+
+    class _AuthASGI:
+        """纯 ASGI 包装：非 http scope（lifespan 等）原样透传，http 校验 Bearer。"""
+
         def __init__(self, app):
-            super().__init__(app)
-            self._expected = token
+            self.app = app
 
-        async def dispatch(self, request, call_next):
-            auth = request.headers.get("Authorization") or ""
-            if not auth.lower().startswith("bearer "):
-                return JSONResponse(
-                    status_code=401,
-                    content={"error": "invalid_token", "description": "Authentication required"},
-                )
-            provided = auth[7:].strip()
-            if not secrets.compare_digest(provided, self._expected):
-                return JSONResponse(
-                    status_code=401,
-                    content={"error": "invalid_token", "description": "Invalid token"},
-                )
-            return await call_next(request)
+        async def __call__(self, scope, receive, send):
+            # lifespan / websocket 等 scope 直接透传，保证内层 app 的 lifespan
+            # （streamable-http 的 task_group 初始化）正常触发
+            if scope["type"] != "http":
+                await self.app(scope, receive, send)
+                return
+            expected = _expected()
+            if not expected:
+                await self.app(scope, receive, send)
+                return
+            auth = ""
+            for k, v in scope.get("headers", []):
+                if k.lower() == b"authorization":
+                    auth = v.decode("latin-1", "replace")
+                    break
+            provided = ""
+            if auth.lower().startswith("bearer "):
+                provided = auth[7:].strip()
+            if not secrets.compare_digest(provided, expected):
+                body = json.dumps(
+                    {"error": "invalid_token", "description": "Authentication required"},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                await send({
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json; charset=utf-8"),
+                        (b"content-length", str(len(body)).encode("latin-1")),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": body})
+                return
+            await self.app(scope, receive, send)
 
-    return Starlette(
-        routes=[Mount("/", app=inner_app)],
-        middleware=[Middleware(_AuthMiddleware)],
-    )
+    return _AuthASGI(inner_app)
 
 
 def main():
@@ -1267,9 +1303,9 @@ def main():
     import uvicorn
 
     app = mcp.sse_app() if transport == "sse" else mcp.streamable_http_app()
-    token = (cfg.get("mcp_token") or "").strip()
-    if token:
-        app = _wrap_bearer_auth(app, token)
+    # 始终包一层鉴权中间件：token 热刷新（mcp_token 空则放行），面板设置/修改
+    # 令牌后无需重启 MCP 即生效；transport/host/port 变更仍需重启（无法热绑定）。
+    app = _wrap_bearer_auth(app)
     uvicorn.run(app, host=mcp.settings.host, port=mcp.settings.port, log_level="info")
 
 

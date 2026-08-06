@@ -137,6 +137,67 @@ def test_api_proxy_status_ttl_cache(client, monkeypatch):
     assert calls["n"] == 2                       # 失效后重查
 
 
+def test_proxy_status_masks_token(client, monkeypatch):
+    """/api/proxy/status 只回脱敏 token，不回明文（完整密钥由 /api/settings 提供）。"""
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"auth_token": "", "proxy_token": "supersecret123456"})
+    dashboard._api_cache.clear()
+    r = client.get("/api/proxy/status")
+    body = r.json()
+    assert body["token"] == "supe****3456"
+    assert "supersecret123456" not in body["token"]
+    assert body["token_set"] is True
+
+
+def test_proxy_status_token_set_flag(client, monkeypatch):
+    """未设置代理密钥时 token 为空串、token_set=False。"""
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"auth_token": "", "proxy_token": ""})
+    dashboard._api_cache.clear()
+    r = client.get("/api/proxy/status")
+    body = r.json()
+    assert body["token"] == ""
+    assert body["token_set"] is False
+
+
+def test_restore_calls_reset_runtime_state(client, monkeypatch, tmp_path):
+    """恢复备份后重置进程内运行时状态（限流桶/用量缓存清空），DB 可正常重连。"""
+    import backup as backup_mod
+    import key_pool as kp_mod
+    import settings as settings_mod
+
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    monkeypatch.setattr(backup_mod, "runtime_dir", lambda: tmp_path)
+    # 先用临时 DB 的 KeyPool 制造内存态（DB 为合法 sqlite）
+    kp_mod.KeyPool._instance = None
+    p = kp_mod.KeyPool(str(tmp_path / "tavily_keys.db"))
+    p.add_key("tvly-aaa111222333")
+    p.next_available_key("search")
+    assert p._buckets
+    monkeypatch.setattr(dashboard, "pool", p)
+    # 再备份：此时 db 是真实 sqlite，恢复后仍可重连
+    (tmp_path / "config.json").write_text('{"auth_token": ""}', encoding="utf-8")
+    (tmp_path / ".tavily-secret.key").write_bytes(b"secret")
+    dest = backup_mod.backup_to(tmp_path / "bk.zip")
+
+    class _FakeStop:
+        def stop(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(dashboard, "mcp_manager", _FakeStop())
+    monkeypatch.setattr(dashboard, "proxy_manager", _FakeStop())
+    monkeypatch.setattr(settings_mod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(settings_mod, "_cache", None)
+
+    r = client.post("/api/restore", content=dest.read_bytes())
+    assert r.status_code == 200
+    assert r.json()["restored"] >= 3
+    assert not p._buckets        # 恢复后限流桶已重置
+    assert not p._usage_cache
+    assert p.list_keys()         # 恢复后 DB 可正常重连（不抛异常）
+    kp_mod.KeyPool._instance = None  # 清理单例，避免污染后续测试
+
+
 def test_anomalies_endpoint(client, monkeypatch):
     monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
     monkeypatch.setattr(dashboard, "pool", dashboard.KeyPool())
@@ -163,7 +224,7 @@ def test_usage_trend_endpoint(client, monkeypatch):
     monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
 
     class _Fake:
-        def get_usage_trend(self, days):
+        def get_usage_trend(self, days, source=""):
             return {"days": days, "points": [{"date": "2026-08-05", "requests": 3, "success": 2, "failed": 1, "credits": 5, "endpoints": {"search": 3}}]}
 
     monkeypatch.setattr(dashboard, "pool", _Fake())
@@ -173,6 +234,9 @@ def test_usage_trend_endpoint(client, monkeypatch):
     assert body["ok"] is True
     assert body["trend"]["days"] == 7
     assert body["trend"]["points"][0]["requests"] == 3
+    # source 筛选透传
+    r2 = client.get("/api/usage/trend?days=7&source=proxy")
+    assert r2.status_code == 200
 
 
 def test_logs_endpoint(client, monkeypatch):

@@ -106,6 +106,16 @@ def _logs_ttl() -> float:
     return float(cache_ttls().get("logs", 1.0))
 
 
+def _mask_token(tok: str) -> str:
+    """脱敏展示令牌：仅显示首尾各 4 位，避免状态接口明文回传密钥。"""
+    tok = (tok or "").strip()
+    if not tok:
+        return ""
+    if len(tok) <= 8:
+        return "****"
+    return f"{tok[:4]}****{tok[-4:]}"
+
+
 def _resource_dir() -> Path:
     """只读资源（dashboard.html）目录：打包后为 _MEIPASS，开发时为源码目录。"""
     if getattr(sys, "frozen", False):
@@ -256,10 +266,10 @@ def api_usage_aggregate():
 
 
 @app.get("/api/usage/trend")
-def api_usage_trend(days: int = 7):
-    """按天聚合用量趋势（本地时区），days 1-90。"""
+def api_usage_trend(days: int = 7, source: str = ""):
+    """按天聚合用量趋势（本地时区），days 1-90；source 非空时只统计该来源。"""
     days = max(1, min(int(days), 90))
-    return {"ok": True, "trend": pool.get_usage_trend(days)}
+    return {"ok": True, "trend": pool.get_usage_trend(days, source.strip())}
 
 
 @app.get("/api/research/tasks")
@@ -406,14 +416,19 @@ def api_mcp_stop():
 # ── 搜索代理服务管理（面板开关 / 状态 / 地址）───────────────────
 @app.get("/api/proxy/status")
 def api_proxy_status():
-    """搜索代理运行状态 + 可用地址 + 代理密钥（短 TTL 缓存，供面板展示/复制）。"""
+    """搜索代理运行状态 + 可用地址 + 代理密钥（脱敏，短 TTL 缓存，供面板展示）。
+
+    完整 proxy_token 仅由设置接口 /api/settings 提供（设置页输入框回显用），
+    状态接口只回脱敏值，避免任何能访问面板的页面把代理密钥明文带出。
+    """
     hit = _api_cache.get("proxy:status")
     if hit is not None:
         return hit
     resp = {
         "ok": True,
         **proxy_manager.status(),
-        "token": (get_settings().get("proxy_token") or "").strip(),
+        "token": _mask_token((get_settings().get("proxy_token") or "").strip()),
+        "token_set": bool((get_settings().get("proxy_token") or "").strip()),
     }
     _api_cache.set("proxy:status", resp, _service_ttl())
     return resp
@@ -480,6 +495,9 @@ async def api_restore(request: Request):
         pool.close_all_connections()
         n = restore_from(tmp)
         reload_settings()
+        # 恢复后重置进程内运行时状态：限流桶/用量缓存/重计算缓存（数据库可能
+        # 换了 key 集合与用量），并广播失效信号让子进程同步清缓存
+        pool.reset_runtime_state()
         _api_cache.clear()
         return {"ok": True, "restored": n}
     except Exception as e:  # noqa: BLE001
