@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Body, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 import autostart
 import mcp_manager
@@ -271,17 +271,18 @@ def api_research_tasks(limit: int = 50):
 
 @app.get("/api/logs")
 def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
-             limit: int = 200, offset: int = 0):
-    """筛选请求日志（endpoint/key/状态/时间范围），分页返回（短 TTL 缓存）。"""
+             source: str = "", limit: int = 200, offset: int = 0):
+    """筛选请求日志（endpoint/key/状态/来源/时间范围），分页返回（短 TTL 缓存）。"""
     # 字符串缓存键：与 _api_cache.invalidate("logs:") 的前缀失效匹配
-    cache_key = f"logs:{endpoint}|{key}|{status}|{days}|{limit}|{offset}"
+    cache_key = f"logs:{endpoint}|{key}|{status}|{source}|{days}|{limit}|{offset}"
     hit = _api_cache.get(cache_key)
     if hit is not None:
         return hit
     since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
     rows, total = pool.query_logs(
         endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
-        since=since, limit=max(1, min(int(limit), 1000)), offset=max(0, int(offset)),
+        source=source.strip(), since=since, limit=max(1, min(int(limit), 1000)),
+        offset=max(0, int(offset)),
     )
     resp = {"ok": True, "logs": rows, "total": total, "limit": int(limit), "offset": max(0, int(offset))}
     _api_cache.set(cache_key, resp, _logs_ttl())
@@ -289,7 +290,8 @@ def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
 
 
 @app.get("/api/logs/export.csv")
-def api_logs_export(endpoint: str = "", key: str = "", status: str = "", days: int = 0):
+def api_logs_export(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
+                    source: str = ""):
     """按当前筛选导出请求日志为 CSV。"""
     import csv
     import io
@@ -297,16 +299,16 @@ def api_logs_export(endpoint: str = "", key: str = "", status: str = "", days: i
     since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
     rows, _ = pool.query_logs(
         endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
-        since=since, limit=100000,
+        source=source.strip(), since=since, limit=100000,
     )
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "key_masked", "endpoint", "success", "credits", "latency_ms", "request_id", "usage_source", "error"])
+    w.writerow(["time", "key_masked", "endpoint", "success", "credits", "latency_ms", "request_id", "usage_source", "source", "error"])
     for r in rows:
         w.writerow([
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"])),
             r["key_masked"], r["endpoint"], r["success"], r["credits_consumed"],
-            round(r["latency_ms"], 1), r["request_id"], r["usage_source"], r["error_msg"],
+            round(r["latency_ms"], 1), r["request_id"], r["usage_source"], r["source"], r["error_msg"],
         ])
     return Response(
         content=buf.getvalue(),
@@ -441,6 +443,47 @@ def api_proxy_token_generate():
     token = secrets.token_urlsafe(24)
     save_settings({"proxy_token": token})
     return {"ok": True, "token": token}
+
+
+@app.post("/api/backup")
+def api_backup():
+    """打包 data/ 关键文件为 zip 下载（配置/Key/密钥/缓存）。"""
+    from backup import backup_to
+
+    try:
+        dest = backup_to()
+        return FileResponse(str(dest), media_type="application/zip", filename=dest.name)
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.post("/api/restore")
+async def api_restore(request: Request):
+    """从上传的备份 zip 恢复 data/。
+
+    先停 MCP / 搜索代理子进程并释放本进程 DB 连接（Windows 文件占用会阻止
+    rename），随后解压；完成后刷新配置缓存，子进程由用户在面板重新启动。
+    """
+    import tempfile
+
+    from backup import restore_from
+    from settings import reload as reload_settings
+
+    try:
+        data = await request.body()
+        if not data:
+            return JSONResponse({"ok": False, "error": "请选择备份文件"}, status_code=400)
+        tmp = Path(tempfile.gettempdir()) / f"tavily-restore-{int(time.time())}.zip"
+        tmp.write_bytes(data)
+        mcp_manager.stop()
+        proxy_manager.stop()
+        pool.close_all_connections()
+        n = restore_from(tmp)
+        reload_settings()
+        _api_cache.clear()
+        return {"ok": True, "restored": n}
+    except Exception as e:  # noqa: BLE001
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 def _run_server_thread(host: str, port: int):

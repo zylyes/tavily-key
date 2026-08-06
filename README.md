@@ -9,8 +9,10 @@
 - **Key 异常识别**：自动识别额度耗尽/疑似泄露/高错误率等 6 类异常，Webhook / 托盘气泡通知
 - **Web 控制台**：Key 列表、请求日志（筛选/导出）、统计、Research 任务看板、健康检查、部署设置
 - **MCP 服务一体化管理**：面板内置 MCP 服务开关/设置（sse / streamable-http / stdio），局域网 IP / 主机名 / 本机三种地址展示与复制
-- **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/usage` 官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
+- **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/research`、`/usage` 官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
 - **Research 增强**：异步任务（wait / status）、流式输出、结构化输出（output_schema）、报告长度与来源数控制
+- **数据备份与恢复**：CLI 与面板一键备份/恢复 `data/`（配置、Key 池、加密密钥、research 缓存），恢复前自动保留 `.pre-restore` 副本，绝不静默覆盖
+- **按端点分组限流**：`endpoint_rpm` 按接口独立限流（research 创建任务独立 18 RPM），未配置接口回退 `rate_limit_rpm`
 - **访问鉴权**：可设置访问令牌，保护公网部署下的 `/api/*` 接口
 - **两套部署形态**：同一代码库，通过 `data/config.json` 切换
   - **Linux Server 版**：云服务器 + 域名对外服务（systemd + Nginx 反向代理）
@@ -115,7 +117,7 @@ scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard
 
 ## 搜索代理（Tavily 兼容 REST 服务）
 
-把 Key 池暴露为官方 Tavily API 形态（`POST /search`、`POST /extract`、`POST /crawl`、`POST /map`、`GET /usage`），供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接；内部走 Key 池轮询/限流/异常切换，额度与日志自动落账。
+把 Key 池暴露为官方 Tavily API 形态（`POST /search`、`POST /extract`、`POST /crawl`、`POST /map`、`POST /research`、`GET /research/{id}`、`GET /usage`），供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接；内部走 Key 池轮询/限流/异常切换，额度与日志自动落账。
 
 **启动方式**：
 
@@ -185,11 +187,13 @@ Web 控制台右上角「**设置**」标签页可配置：
   "proxy_auto_start": false,
   "proxy_host": "0.0.0.0",
   "proxy_port": 8002,
-  "proxy_token": ""
+  "proxy_token": "",
+  "endpoint_rpm": {"search": 90, "extract": 90, "crawl": 90, "map": 90, "research": 18}
 }
 ```
 
 > 首次启动自动生成完整默认配置；以上为常用项示例，更多配置（限流、异常阈值、MCP 默认参数等）见 `data/config.json` 自动生成内容。
+> `endpoint_rpm` 为每 key × 每接口的限流（research 创建任务官方上限 20 RPM，默认留 10% 余量）；未配置的接口回退 `rate_limit_rpm`（默认 90）。
 > 修改 `host`/`port` 需重启服务生效；`mode`/`domain`/`auth_token` 即时生效。
 > MCP 服务的传输方式/端口修改后，需在「MCP 服务」页点击「启动服务」（或重启软件）生效。
 
@@ -209,6 +213,8 @@ python app/cli.py stats                   # 用量统计
 python app/cli.py usage --sync            # 同步/查看官方用量
 python app/cli.py audit                   # 列出异常 key
 python app/cli.py proxy                   # 搜索代理状态/地址/密钥
+python app/cli.py backup                  # 备份 data/ 为 zip（默认系统临时目录）
+python app/cli.py restore <备份.zip>      # 从备份恢复 data/
 python app/cli.py health                  # 健康检查，自动停用失效 key
 python app/cli.py recent -n 20            # 最近 20 条请求日志
 python app/cli.py activate tvly-xxx****yyy  # 启用 key
@@ -221,9 +227,19 @@ python app/cli.py remove tvly-xxx****yyy      # 删除 key
 SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 
 - `api_keys` — key 列表、用量、状态（含官方套餐/用量同步、耗尽标记、异常计数）
-- `request_log` — 请求日志（含 request_id、积分来源 usage_source、客户端错误标记 is_client_error）
+- `request_log` — 请求日志（含 request_id、积分来源 usage_source、客户端错误标记 is_client_error、请求来源 source：mcp/proxy/cli）
 
 删除该文件不影响功能，下次启动自动重建空库。
+
+## 数据备份与恢复
+
+`data/` 目录一键备份/恢复为 zip：
+
+- **备份内容**：`config.json`、`tavily_keys.db`(+wal)、`research_keys.json`、`research_tasks_cache.json`、`.tavily-secret.key`（缺它恢复后无法解密 Key；不含日志）
+- **CLI**：`python app/cli.py backup [路径]`（默认系统临时目录）、`python app/cli.py restore <备份.zip>`
+- **面板**：「设置」页「数据备份与恢复」卡片——下载备份 / 上传恢复（恢复自动停止 MCP 与搜索代理子进程并释放数据库连接）
+
+> 注意事项：恢复前建议先停止 MCP / 搜索代理服务（面板恢复会自动停，CLI 需手动停）；恢复时现有文件会保留为 `.pre-restore-<时间戳>` 副本，绝不静默覆盖；备份 zip 含加密密钥与访问令牌等敏感配置，请加密保管。
 
 ## 开机自启
 
@@ -238,6 +254,7 @@ SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 | `app/settings.py` | 配置读写模块（含局域网地址推导） |
 | `app/notify.py` | 异常通知（Webhook / Windows 托盘气泡，去重节流） |
 | `app/cache.py` | 通用 TTL 缓存基础设施（KeyPool/Dashboard 接口缓存，跨进程失效） |
+| `app/backup.py` | data/ 备份与恢复（CLI backup/restore + 面板接口） |
 | `app/tavily_proxy.py` | 搜索代理本体（Tavily 兼容 REST 服务） |
 | `app/proxy_manager.py` | 搜索代理子进程管理（面板启停、端口检测） |
 | `app/mcp_manager.py` | MCP 服务子进程管理（面板启停、端口检测） |

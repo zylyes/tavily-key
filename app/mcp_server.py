@@ -11,7 +11,8 @@ import json
 import re
 import threading
 import time
-from typing import Any
+import uuid
+from typing import Any, Callable
 
 from mcp.server.fastmcp import FastMCP
 from tavily import BadRequestError, TavilyClient
@@ -85,6 +86,11 @@ _REQUEST_TIMEOUT = 60.0
 # 429 retry-after 低于此值则同 key 等待重试（避免白白消耗别的 key 限流预算）
 _RETRY_AFTER_SAME_KEY_MAX = 5.0
 
+# MCP 进程级会话 ID：进程启动时自动生成一次，经 SDK 原生 session_id 参数转发
+# X-Session-Id 头（对齐官方 tavily-mcp 的 per-process session 行为）。同一进程内
+# 所有 key/请求共用同一会话 ID，便于 Tavily 侧按会话聚合分析；不设配置项。
+_SESSION_ID = uuid.uuid4().hex
+
 
 def _apply_default_timeout(client: TavilyClient) -> None:
     """给 TavilyClient 的 requests.Session 注入默认超时，防止请求无限挂起。"""
@@ -138,12 +144,14 @@ def _client_for(raw_key: str) -> TavilyClient:
     """构造 TavilyClient：注入默认超时、429 retry-after 提取、会话归属头。
 
     mcp_human_id / mcp_project_id 配置（可选）通过 SDK 原生参数转发
-    X-Human-Id / X-Project-ID 头，便于 Tavily 侧会话与项目用量归类
-    （此前 human_id 配置存在但从未接线）。
+    X-Human-Id / X-Project-ID 头；session_id 为进程启动时自动生成的会话 ID
+    （对齐官方 tavily-mcp 的 per-process session），转发 X-Session-Id 头，
+    便于 Tavily 侧按会话聚合分析。
     """
     cfg = get_settings()
     client = TavilyClient(
         raw_key,
+        session_id=_SESSION_ID,
         human_id=(cfg.get("mcp_human_id") or None),
         project_id=(cfg.get("mcp_project_id") or None),
     )
@@ -152,9 +160,13 @@ def _client_for(raw_key: str) -> TavilyClient:
     return client
 
 
-def _get_client() -> tuple[TavilyClient, str]:
-    """取一个可用 key（未耗尽、未超限流）；全部受限时内部短暂等待。"""
-    result = pool.next_available_key()
+def _get_client(endpoint: str = "search") -> tuple[TavilyClient, str]:
+    """取一个可用 key（未耗尽、未超限流，按 endpoint 独立限流桶）；全部受限时内部短暂等待。
+
+    endpoint：'search'/'extract'/'crawl'/'map'/'research'。research「创建任务」走
+    独立的 20 RPM 桶（官方按 key 独立）；research 状态轮询/看板查询走默认桶。
+    """
+    result = pool.next_available_key(endpoint)
     if result is None:
         raise RuntimeError("No active API keys in pool. Add keys via CLI or dashboard.")
     raw, masked = result
@@ -163,10 +175,11 @@ def _get_client() -> tuple[TavilyClient, str]:
 
 def _record(masked: str, endpoint: str, start: float, success: bool,
             credits: int = 0, error_msg: str = "", request_id: str = "",
-            usage_source: str = "", is_client_error: bool = False):
+            usage_source: str = "", is_client_error: bool = False,
+            source: str = "mcp"):
     latency = (time.time() - start) * 1000
     pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id, usage_source,
-                        1 if is_client_error else 0)
+                        1 if is_client_error else 0, source)
 
 
 def _is_client_error(e: Exception) -> bool:
@@ -264,18 +277,22 @@ def _tool_kwargs(func, kwargs: dict) -> dict:
     return out
 
 
-def _run_with_retry(endpoint: str, fn) -> str:
+def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | None = None,
+                    source: str = "mcp") -> str:
     """执行工具调用并序列化返回。
 
     - 记录成功/失败（含 request_id）。
     - quota(额度耗尽)/auth(认证失效) 类错误自动切换其他 key 重试（最多 2 次）。
     - 429 带 retry-after 头：< 5s 同 key 等待后重试（不换 key，避免白白消耗别的
       key 限流预算）；>= 5s 切换其他 key 重试。
+    - on_success：成功后回调 (masked, resp)（代理提交 research 时用于固定
+      request_id→key 映射——research 任务按 key 隔离，状态查询须用同一 key）。
+    - source：请求来源标记（mcp 默认 / proxy），写入 request_log 便于筛选。
     """
     last_err = ""
     for attempt in range(3):
         try:
-            client, masked = _get_client()
+            client, masked = _get_client(endpoint)
         except RuntimeError as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
         t0 = time.time()
@@ -286,13 +303,19 @@ def _run_with_retry(endpoint: str, fn) -> str:
                 credits, has_usage = _usage_credits(resp)
                 _record(masked, endpoint, t0, True, credits,
                         request_id=_usage_request_id(resp),
-                        usage_source="response" if has_usage else "unknown")
+                        usage_source="response" if has_usage else "unknown",
+                        source=source)
+                if on_success is not None:
+                    try:
+                        on_success(masked, resp)
+                    except Exception:  # noqa: BLE001
+                        pass
                 return json.dumps(resp, ensure_ascii=False, indent=2)
             except Exception as e:  # noqa: BLE001
                 err = str(e)
                 _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
                 _record(masked, endpoint, t0, False, 0, err, usage_source="none",
-                        is_client_error=_is_client_error(e))
+                        is_client_error=_is_client_error(e), source=source)
                 cat = _classify_error(err)
                 last_err = err
                 ra = _retry_after(e)
@@ -645,9 +668,11 @@ def _research_impl(input: str, model: str, citation_format: str,
         timeout = _default_research_timeout(model)
     timeout = max(float(timeout), 1.0)
 
-    # 取可用 key（池空时返回友好错误，避免异常冒泡导致会话不稳定）
+    # 取可用 key（池空时返回友好错误，避免异常冒泡导致会话不稳定）。
+    # research「创建任务」走独立 20 RPM 限流桶（官方按 key 独立），提交与流式
+    # 都用同一桶；状态轮询/看板查询走默认桶（官方仅限创建任务）。
     try:
-        client, masked = _get_client()
+        client, masked = _get_client("research")
     except RuntimeError as e:
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
@@ -698,7 +723,7 @@ def _research_impl(input: str, model: str, citation_format: str,
             if cat in ("quota", "auth") and attempt < 2:
                 _log.info("research 提交失败(%s)，切换 key 重试: %s", cat, err[:200])
                 try:
-                    client, masked = _get_client()
+                    client, masked = _get_client("research")
                 except RuntimeError as e2:
                     return json.dumps({"error": str(e2)}, ensure_ascii=False)
                 continue

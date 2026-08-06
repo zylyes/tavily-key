@@ -125,9 +125,16 @@ class KeyPool:
         self._initialized = True
         self._db = db_path or str(DB_PATH)
         self._local = threading.local()
+        # 全部分配的 sqlite 连接（线程本地缓存 + 全局登记）：供 close_all_connections
+        # 在恢复 data/ 前统一释放文件句柄（Windows 下占用会导致 rename 失败）
+        self._conns: set[sqlite3.Connection] = set()
+        self._conns_lock = threading.Lock()
         self._next_index = 0
         self._index_lock = threading.Lock()
-        self._buckets: dict[str, _TokenBucket] = {}
+        # 每 key × 每 endpoint 的令牌桶（各 key 来自不同账号、限流独立）：
+        # {masked: {endpoint: _TokenBucket}}，research 创建任务 20 RPM、
+        # crawl 100 RPM 等官方按 endpoint 独立的限流在每 key 内分别生效。
+        self._buckets: dict[str, dict[str, _TokenBucket]] = {}
         self._bucket_lock = threading.Lock()
         self._usage_cache: dict[str, tuple[float, dict]] = {}
         # 重计算缓存（TTL 见 settings.cache_ttls）：异常识别与按天聚合结果
@@ -142,11 +149,29 @@ class KeyPool:
     # ── DB helpers ──────────────────────────────────────────────
     def _get_conn(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            self._local.conn = sqlite3.connect(self._db)
-            self._local.conn.row_factory = sqlite3.Row
-            self._local.conn.execute("PRAGMA journal_mode=WAL")
-            self._local.conn.execute("PRAGMA busy_timeout=3000")
+            conn = sqlite3.connect(self._db)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=3000")
+            with self._conns_lock:
+                self._conns.add(conn)
+            self._local.conn = conn
         return self._local.conn
+
+    def close_all_connections(self) -> None:
+        """关闭所有 sqlite 连接并清空线程本地缓存（恢复 data/ 前调用释放文件句柄）。
+
+        之后的 _get_conn() 会重新连接当前（可能已恢复的）数据库文件。
+        """
+        with self._conns_lock:
+            conns = list(self._conns)
+            self._conns.clear()
+        for c in conns:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._local.conn = None
 
     def _init_db(self):
         conn = sqlite3.connect(self._db)
@@ -185,6 +210,7 @@ class KeyPool:
                 latency_ms REAL DEFAULT 0,
                 request_id TEXT DEFAULT '',
                 usage_source TEXT DEFAULT '',
+                source TEXT DEFAULT '',
                 created_at REAL NOT NULL
             )
             """
@@ -205,6 +231,8 @@ class KeyPool:
             "usage_source": "TEXT DEFAULT ''",
             # 是否为客户端请求错误（HTTP 400/参数校验失败）：高错误率识别时忽略
             "is_client_error": "INTEGER DEFAULT 0",
+            # 请求来源：mcp（MCP 工具调用）/ proxy（搜索代理 REST）/ cli（命令行）
+            "source": "TEXT DEFAULT ''",
         })
         # masked 唯一索引：加密后 key 主键不可靠，作为重复检测的兜底约束。
         # 历史数据若存在重复 masked（理论不会），容忍创建失败。
@@ -399,22 +427,41 @@ class KeyPool:
             "ORDER BY last_used_at ASC"
         ).fetchall()
 
-    def _bucket(self, masked: str) -> _TokenBucket:
+    def _endpoint_rpm(self, endpoint: str) -> int:
+        """读取每 endpoint 的每 key 限流（config endpoint_rpm）；未配置的 endpoint 回退 rate_limit_rpm。
+
+        官方限流按 key 独立（池内 key 均来自不同账号）：research「创建任务」独立
+        20 RPM、crawl 独立 100 RPM、默认 dev 100 RPM。默认 90/18 等按官方上限留
+        10% 余量，避免贴近上限被 429。
+        """
+        ep = get_settings().get("endpoint_rpm") or {}
+        if isinstance(ep, dict) and endpoint in ep:
+            try:
+                return int(ep[endpoint])
+            except (TypeError, ValueError):
+                pass
+        return int(get_settings().get("rate_limit_rpm") or DEFAULT_RPM)
+
+    def _bucket(self, masked: str, endpoint: str) -> _TokenBucket:
         with self._bucket_lock:
-            b = self._buckets.get(masked)
+            by_endpoint = self._buckets.get(masked)
+            if by_endpoint is None:
+                by_endpoint = {}
+                self._buckets[masked] = by_endpoint
+            b = by_endpoint.get(endpoint)
             if b is None:
-                rpm = int(get_settings().get("rate_limit_rpm") or DEFAULT_RPM)
-                b = _TokenBucket(rpm)
-                self._buckets[masked] = b
+                b = _TokenBucket(self._endpoint_rpm(endpoint))
+                by_endpoint[endpoint] = b
             return b
 
-    def _consume_bucket(self, masked: str) -> None:
-        self._bucket(masked).try_acquire(1)
+    def _consume_bucket(self, masked: str, endpoint: str) -> None:
+        self._bucket(masked, endpoint).try_acquire(1)
 
-    def next_key(self, skip_limited: bool = False) -> tuple[str, str] | None:
-        """Round-robin 取下一个 active 且未耗尽的 key。
+    def next_key(self, endpoint: str = "search", skip_limited: bool = False) -> tuple[str, str] | None:
+        """Round-robin 取下一个 active 且未耗尽的 key（按 endpoint 独立限流桶）。
 
-        skip_limited=True 时跳过当前受限（令牌不足）的 key。
+        endpoint：'search'/'extract'/'crawl'/'map'/'research' 等，对应 endpoint_rpm
+        配置；skip_limited=True 时跳过该 endpoint 令牌不足的 key。
         """
         rows = self._active_rows()
         if not rows:
@@ -425,15 +472,15 @@ class KeyPool:
         for off in range(len(rows)):
             row = rows[(idx + off) % len(rows)]
             masked = row["masked"]
-            if not skip_limited or self._bucket(masked).wait_time() <= 0:
-                self._consume_bucket(masked)
+            if not skip_limited or self._bucket(masked, endpoint).wait_time() <= 0:
+                self._consume_bucket(masked, endpoint)
                 return (self._decrypt_or_migrate(row["key"], masked), masked)
         return None
 
-    def next_key_least_used(self, skip_limited: bool = False) -> tuple[str, str] | None:
-        """取今日请求最少的 active 且未耗尽 key。
+    def next_key_least_used(self, endpoint: str = "search", skip_limited: bool = False) -> tuple[str, str] | None:
+        """取今日请求最少的 active 且未耗尽 key（按 endpoint 独立限流桶）。
 
-        skip_limited=True 时跳过当前受限（令牌不足）的 key。
+        skip_limited=True 时跳过该 endpoint 令牌不足的 key。
         """
         conn = self._get_conn()
         day_start = time.time() - 86400
@@ -452,16 +499,19 @@ class KeyPool:
             return None
         for row in rows:
             masked = row["masked"]
-            if not skip_limited or self._bucket(masked).wait_time() <= 0:
-                self._consume_bucket(masked)
+            if not skip_limited or self._bucket(masked, endpoint).wait_time() <= 0:
+                self._consume_bucket(masked, endpoint)
                 return (self._decrypt_or_migrate(row["key"], masked), masked)
         return None
 
-    def next_available_key(self) -> tuple[str, str] | None:
-        """按配置策略取一个当前可用（未超限流）的 key；全部受限时短暂等待最早的可用时机。"""
+    def next_available_key(self, endpoint: str = "search") -> tuple[str, str] | None:
+        """按配置策略取一个当前可用（未超限流）的 key；全部受限时短暂等待最早的可用时机。
+
+        endpoint 指定限流桶：search/extract/crawl/map/research 各自独立，互不影响。
+        """
         strategy = (get_settings().get("key_strategy") or "round-robin").strip().lower()
         pick = self.next_key_least_used if strategy == "least-used" else self.next_key
-        r = pick(skip_limited=True)
+        r = pick(endpoint, skip_limited=True)
         if r is not None:
             return r
         # 全部受限：等待最短等待时间的 key（上限 rate_limit_max_wait 秒）
@@ -471,7 +521,7 @@ class KeyPool:
         best_wait = float("inf")
         for row in self._active_rows():
             masked = row["masked"]
-            w = self._bucket(masked).wait_time()
+            w = self._bucket(masked, endpoint).wait_time()
             if w < best_wait:
                 best_wait = w
                 best = (self._decrypt_or_migrate(row["key"], masked), masked)
@@ -481,17 +531,19 @@ class KeyPool:
             wait = min(best_wait, max(0.0, deadline - time.time()))
             if wait > 0:
                 time.sleep(wait)
-        self._consume_bucket(best[1])
+        self._consume_bucket(best[1], endpoint)
         return best
 
     # ── Usage recording ────────────────────────────────────────
     def record_request(self, masked: str, endpoint: str, latency_ms: float, success: bool,
                        credits: int = 0, error_msg: str = "", request_id: str = "",
-                       usage_source: str = "", is_client_error: int = 0):
+                       usage_source: str = "", is_client_error: int = 0,
+                       source: str = ""):
         """记录一次请求。usage_source：response/unknown/none（见 request_log 表注释）。
 
         is_client_error：1 表示该失败由客户端请求错误（HTTP 400/参数校验）导致，
         与 Key/服务器健康无关，高错误率识别时忽略（不改变 error_count 累计）。
+        source：请求来源标记（mcp / proxy / cli 等），便于日志筛选与统计。
         """
         now = time.time()
         conn = self._get_conn()
@@ -518,8 +570,8 @@ class KeyPool:
                     "UPDATE api_keys SET is_active=0 WHERE masked=?", (masked,)
                 )
         conn.execute(
-            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, is_client_error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], 1 if is_client_error else 0, now),
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, is_client_error, source, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], 1 if is_client_error else 0, source[:20], now),
         )
         conn.commit()
         # 日志保留：周期性清理超期记录，避免 request_log 无界增长
@@ -969,7 +1021,7 @@ class KeyPool:
         return {"days": days, "points": out}
 
     def query_logs(self, endpoint: str = "", key_masked: str = "", status: str = "",
-                   since: float = 0.0, until: float = 0.0,
+                   since: float = 0.0, until: float = 0.0, source: str = "",
                    limit: int = 200, offset: int = 0) -> tuple[list[dict], int]:
         """按条件筛选请求日志（倒序），返回 (行, 总数)。status: '' | success | failed。"""
         where: list[str] = []
@@ -980,6 +1032,9 @@ class KeyPool:
         if key_masked:
             where.append("key_masked = ?")
             params.append(key_masked)
+        if source:
+            where.append("source = ?")
+            params.append(source)
         if status == "success":
             where.append("success = 1")
         elif status == "failed":

@@ -27,9 +27,11 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import mcp_server
 from key_pool import KeyPool, _classify_error
 from logging_setup import get_logger
-from mcp_server import _run_with_retry, _norm_flag
+from mcp_server import (_run_with_retry, _norm_flag, _client_for, _get_client,
+                        _record, _usage_credits)
 from settings import get_settings
 
 _log = get_logger("tavily_proxy")
@@ -70,7 +72,7 @@ proxy_app.add_middleware(
 )
 
 # 需要鉴权的路径（与 Tavily 官方端点一致）
-_AUTH_PATHS = {"/search", "/extract", "/crawl", "/map", "/usage"}
+_AUTH_PATHS = {"/search", "/extract", "/crawl", "/map", "/research", "/usage"}
 
 # 各类端点允许转发的字段白名单（其余字段忽略，避免把非法参数透传给官方 400）
 _SEARCH_FIELDS = (
@@ -85,6 +87,12 @@ _EXTRACT_FIELDS = (
 )
 _CRAWL_FIELDS = ("url", "max_depth", "max_pages", "include_images", "include_raw_content")
 _MAP_FIELDS = ("url", "search_depth", "max_depth", "max_urls", "include_subdomains")
+# Research 提交参数白名单（代理只做「提交 + 轮询」，不做 SSE 流式透传）。
+# input 必填参数单独处理（显式传参），不进白名单避免重复。
+_RESEARCH_FIELDS = (
+    "model", "citation_format", "include_domains", "exclude_domains",
+    "output_length", "output_schema", "max_sources", "max_subsources",
+)
 
 
 def _error(status: int, msg: str) -> JSONResponse:
@@ -144,14 +152,17 @@ async def auth_middleware(request: Request, call_next):
 
 
 # ── 核心转发 ───────────────────────────────────────────────────
-def _call(endpoint: str, fn: Callable) -> JSONResponse:
+def _call(endpoint: str, fn: Callable,
+          on_success: Callable[[str, Any], None] | None = None) -> JSONResponse:
     """执行池转发（含 Key 轮询/限流/异常切换）并映射为 Tavily 风格响应。
 
     _run_with_retry 成功返回官方响应 JSON 串；失败返回 {"error": ...} JSON 串，
     这里按错误类别映射 HTTP 状态码（客户端把非 2xx 视为失败）。
+    on_success 透传给 _run_with_retry（research 提交后固定 request_id→key）；
+    source 固定为 proxy，请求日志可区分 MCP / 代理来源。
     """
     try:
-        raw = _run_with_retry(endpoint, fn)
+        raw = _run_with_retry(endpoint, fn, on_success, source="proxy")
         data = json.loads(raw)
     except Exception as e:  # noqa: BLE001
         _log.warning("proxy %s 转发异常: %s", endpoint, str(e)[:200])
@@ -182,7 +193,7 @@ def _pick(body: dict, fields: tuple) -> dict:
             continue
         v = body[k]
         if k in ("max_results", "chunks_per_source", "max_depth", "max_pages",
-                 "max_urls", "timeout"):
+                 "max_urls", "timeout", "max_sources", "max_subsources"):
             out[k] = _as_int(v, 3 if k == "chunks_per_source" else 5)
         elif k in ("include_images", "include_image_descriptions", "include_favicon",
                    "exact_match", "auto_parameters", "safe_search",
@@ -274,6 +285,83 @@ async def proxy_map(request: Request):
         return client.map(**kwargs)
 
     return await anyio.to_thread.run_sync(_call, "map", _do)
+
+
+@proxy_app.post("/research")
+async def proxy_research(request: Request):
+    """Tavily Research：提交任务，返回 request_id（客户端用 GET /research/{id} 轮询）。
+
+    与官方 POST /research 一致返回异步任务（request_id），不做 SSE 流式透传。
+    提交成功后把 request_id→masked 映射写入 research_keys.json（跨进程共享），
+    供 GET /research/{id} 用同一 key 查询（任务按 key 隔离，用其他 key 查 404）。
+    """
+    body = await _read_body(request)
+    if body is None:
+        return _error(400, "Request body must be a valid JSON object.")
+    inp = body.get("input")
+    if inp is None or not str(inp).strip():
+        return _error(400, "Missing required parameter: input.")
+    kwargs = _pick(body, _RESEARCH_FIELDS)
+
+    def _do(client):
+        return client.research(input=inp, **kwargs)
+
+    def _pin(masked, resp):
+        rid = resp.get("request_id") if isinstance(resp, dict) else None
+        if rid:
+            mcp_server._save_research_key(str(rid), masked)
+
+    return await anyio.to_thread.run_sync(_call, "research", _do, _pin)
+
+
+_research_keys_refresh_ts = 0.0
+_RESEARCH_KEYS_REFRESH_TTL = 2.0  # 秒：跨进程共享 research_keys.json 的读取节流
+
+
+def _refresh_research_keys() -> None:
+    """从磁盘重新加载 research 任务→key 映射（TTL 节流）。
+
+    代理与 MCP 是独立进程，提交侧（本进程或其他进程）写入 research_keys.json，
+    状态查询前刷新内存映射；TTL 内复用避免每次请求都读盘。
+    """
+    global _research_keys_refresh_ts
+    now = time.time()
+    if now - _research_keys_refresh_ts >= _RESEARCH_KEYS_REFRESH_TTL:
+        mcp_server._load_research_keys()
+        _research_keys_refresh_ts = now
+
+
+@proxy_app.get("/research/{request_id}")
+async def proxy_research_status(request_id: str):
+    """Tavily Research 状态：查询指定任务。
+
+    任务按 key 隔离：优先用提交时的同一 key（research_keys.json 映射，跨进程
+    共享），找不到/已失效才回退轮询取 key。
+    """
+    _refresh_research_keys()
+    pinned = mcp_server._research_keys.get(request_id) or ""
+    masked = ""
+    t0 = time.time()
+    try:
+        client = None
+        if pinned:
+            k = pool.get_key(pinned)
+            if k is not None and k.is_active and not k.is_exhausted:
+                client = _client_for(k.key)
+                masked = pinned
+        if client is None:
+            client, masked = _get_client()
+        resp = client.get_research(request_id)
+        if not isinstance(resp, dict):
+            resp = {"status": resp}
+        _record(masked, "research-status", t0, True, _usage_credits(resp)[0],
+                request_id=request_id, usage_source="unknown", source="proxy")
+        return JSONResponse(resp)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("proxy /research/%s 失败 masked=%s: %s", request_id, masked, str(e)[:200])
+        _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id,
+                usage_source="none", source="proxy")
+        return _error(500, str(e)[:300])
 
 
 @proxy_app.get("/usage")

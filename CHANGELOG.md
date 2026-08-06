@@ -5,6 +5,23 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.6.0] - 2026-08-06
+
+### Added
+
+- **数据备份与恢复**：新模块 `app/backup.py`——
+  - 备份集白名单：`config.json`、`tavily_keys.db`(+wal)、`research_keys.json`、`research_tasks_cache.json`、`.tavily-secret.key`（缺它恢复后无法解密 Key，必须备份；不含日志与 -shm 共享索引）；
+  - 恢复安全策略：必需文件校验（配置/数据库/密钥缺一直接拒绝，防半成品破坏现有数据）、仅解压白名单条目（防路径穿越/zip 炸弹）、恢复前现有文件改名 `.pre-restore-<ts>` 绝不静默覆盖、清理旧 WAL 共享索引；
+  - CLI 新增 `backup [path]`（默认系统临时目录）/ `restore <zip>` 子命令；面板「设置」页新增「数据备份与恢复」卡片（下载备份 / 上传恢复，恢复自动停止 MCP 与搜索代理子进程并释放数据库连接）；新 API `POST /api/backup`、`POST /api/restore`；`Tavily.spec` 打包 `backup`。
+- **按端点分组限流**：新配置 `endpoint_rpm`（默认 `search`/`extract`/`crawl`/`map`=90、`research`=18，未覆盖端点回退 `rate_limit_rpm`）；每 key × 每 endpoint 独立令牌桶；research「创建任务」独立 18 RPM 桶（官方上限 20 留 10% 余量，可按需调整），状态轮询/看板查询走默认桶。
+- **搜索代理支持 Research**：`POST /research`（提交返回 request_id，参数白名单含 output_length / output_schema / max_sources / max_subsources）+ `GET /research/{id}`（状态查询，跨进程共享 `research_keys.json` 固定同一 key）；`/research` 纳入代理鉴权路径。
+- **请求来源标记**：`request_log` 新增 `source` 列（`mcp`/`proxy`/`cli`，自动迁移）；`/api/logs` 与 CSV 导出新增 `source` 筛选；面板日志页新增「来源」下拉。
+- **X-Session-Id**：MCP 进程级会话 ID（进程启动自动生成，经 SDK `session_id` 参数转发，对齐官方 per-process session 行为）。
+
+### Changed
+
+- `rate_limit_rpm` 语义调整为「按端点限流兜底」（默认值 90 不变；未配置 `endpoint_rpm` 时行为与旧版完全一致）。
+
 ## [0.5.0] - 2026-08-06
 
 ### Added
@@ -174,6 +191,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.6.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.6.0
 [0.5.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.5.0
 [0.4.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.4.0
 [0.3.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.2

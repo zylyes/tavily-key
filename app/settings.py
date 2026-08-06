@@ -37,9 +37,13 @@ DEFAULTS: dict = {
     "mcp_token": "",          # MCP 服务访问令牌（非空时要求 Authorization: Bearer <token>，留空不鉴权）
     "key_strategy": "round-robin",  # Key 池负载均衡策略: round-robin | least-used
     # ── 限流与用量同步 ────────────────────────────────────────
-    "rate_limit_rpm": 90,        # 每 key 令牌桶速率（官方 dev 100 RPM，默认留 10% 余量）
+    "rate_limit_rpm": 90,        # 每 key 令牌桶速率兜底（endpoint_rpm 未覆盖的端点用）
     "rate_limit_max_wait": 1.0,  # 全部 key 受限时最多等待秒数
     "usage_cache_ttl": 60,       # /usage 同步结果缓存 TTL（秒）
+    # 按 endpoint 分组的每 key 限流（RPM）。官方限流按 key 独立（池内 key 均来自
+    # 不同账号）：research「创建任务」独立 20 RPM、crawl 独立 100 RPM、默认 dev
+    # 100 RPM。默认值按官方上限留 10% 余量；未列出的 endpoint 回退 rate_limit_rpm。
+    "endpoint_rpm": {"search": 90, "extract": 90, "crawl": 90, "map": 90, "research": 18},
     # ── 缓存 TTL（秒，0 = 关闭对应缓存）─────────────────────
     "cache_ttls": {
         "anomalies": 5,       # 异常识别结果缓存（近24h聚合，秒级变化无意义）
@@ -140,7 +144,7 @@ _STR_FIELDS = (
     "notify_webhook", "proxy_host", "proxy_token",
 )
 # 以 JSON 对象存储的字段：接受 dict 或 JSON 字符串
-_DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters", "cache_ttls")
+_DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters", "cache_ttls", "endpoint_rpm")
 _FLOAT_FIELDS = ("rate_limit_max_wait",)
 
 

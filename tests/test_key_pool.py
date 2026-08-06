@@ -354,6 +354,18 @@ def test_record_usage_source_logged(pool):
     assert any(l["usage_source"] == "none" for l in logs)
 
 
+def test_record_source_logged_and_filtered(pool):
+    """source 标记写入并按来源筛选（mcp/proxy 区分）。"""
+    pool.add_key(KEY1)
+    pool.record_request(MASK1, "search", 10, True, 1, source="proxy")
+    pool.record_request(MASK1, "search", 10, True, 1, source="mcp")
+    rows, _ = pool.query_logs(source="proxy")
+    assert len(rows) == 1
+    assert rows[0]["source"] == "proxy"
+    rows, _ = pool.query_logs(source="")
+    assert len(rows) == 2
+
+
 def test_local_credits_excludes_unknown(pool):
     """Research（unknown）不参与本地对账：避免官方 usage 与本地差值误报 suspected_leak。"""
     pool.add_key(KEY1)
@@ -385,11 +397,42 @@ def test_token_bucket_limits_rate():
 
 def test_next_available_key_skips_limited(monkeypatch, pool):
     pool.add_keys_batch([KEY1, KEY2])
+    monkeypatch.setattr(key_pool, "get_settings",
+                        lambda: {"endpoint_rpm": {"search": 90}, "rate_limit_rpm": 90})
     for _ in range(90):
-        pool._consume_bucket(MASK1)  # 打满 KEY1 令牌桶
-    monkeypatch.setattr(key_pool, "get_settings", lambda: {"rate_limit_rpm": 90})
-    _, masked = pool.next_available_key()
+        pool._consume_bucket(MASK1, "search")  # 打满 KEY1 的 search 令牌桶
+    _, masked = pool.next_available_key("search")
     assert masked == MASK2  # KEY1 受限被跳过
+
+
+# ── 每 key × 每 endpoint 分组限流 ──────────────────────────
+def test_endpoint_buckets_independent(monkeypatch, pool):
+    """research 与 search 桶互不影响：打满 research 桶只影响 research 选 key。"""
+    pool.add_keys_batch([KEY1, KEY2])
+    monkeypatch.setattr(key_pool, "get_settings",
+                        lambda: {"endpoint_rpm": {"research": 18}, "rate_limit_rpm": 90})
+    for _ in range(18):
+        pool._consume_bucket(MASK1, "research")  # 打满 KEY1 的 research 桶
+    # research 受限 → 跳过 KEY1 取 KEY2
+    _, masked = pool.next_available_key("research")
+    assert masked == MASK2
+    # search 桶未受影响 → 轮询仍可取 KEY1
+    seen = {pool.next_available_key("search")[1] for _ in range(2)}
+    assert MASK1 in seen
+
+
+def test_endpoint_rpm_config_and_fallback(monkeypatch, pool):
+    """endpoint_rpm 配置生效；未配置的 endpoint 回退 rate_limit_rpm。"""
+    pool.add_key(KEY1)
+    monkeypatch.setattr(key_pool, "get_settings",
+                        lambda: {"endpoint_rpm": {"research": 18}, "rate_limit_rpm": 90})
+    assert pool._bucket(MASK1, "research")._capacity == 18  # 配置生效
+    assert pool._bucket(MASK1, "crawl")._capacity == 90     # 未配置 → 回退 90
+    # research 桶打满不影响 crawl 桶
+    for _ in range(18):
+        pool._consume_bucket(MASK1, "research")
+    assert pool._bucket(MASK1, "research").wait_time() > 0
+    assert pool._bucket(MASK1, "crawl").wait_time() == 0
 
 
 # ── /usage 缓存与月度恢复 ────────────────────────────────────

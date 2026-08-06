@@ -425,6 +425,12 @@ tr td:first-child,tr th:first-child{padding-left:16px}
             <option value="success">成功</option>
             <option value="failed">失败</option>
           </select>
+          <select id="logSource" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 8px;font-size:12px">
+            <option value="">全部来源</option>
+            <option value="mcp">MCP</option>
+            <option value="proxy">搜索代理</option>
+            <option value="cli">CLI</option>
+          </select>
           <select id="logDays" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 8px;font-size:12px">
             <option value="0">全部时间</option>
             <option value="1">近 1 天</option>
@@ -747,6 +753,24 @@ tr td:first-child,tr th:first-child{padding-left:16px}
             <span class="status" id="settingsStatus"></span>
           </div>
           <div class="setting-hint" id="publicUrlHint"></div>
+        </div>
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            数据备份与恢复
+          </h3>
+          <div class="card-desc">备份/恢复 data/ 目录（配置、Key 池与加密密钥、research 缓存）。恢复会先停止 MCP 与搜索代理服务，完成后请手动重启。</div>
+          <div class="setting-row">
+            <label>备份</label>
+            <button class="btn btn-sm btn-primary" onclick="backupData()">下载备份</button>
+            <span class="status" id="backupStatus"></span>
+          </div>
+          <div class="setting-row">
+            <label>恢复</label>
+            <input id="restoreFile" type="file" accept=".zip" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 10px;font-size:12px">
+            <button class="btn btn-sm btn-ghost" onclick="restoreData()">恢复</button>
+            <span class="status" id="restoreStatus"></span>
+          </div>
         </div>
         <div class="deploy-guide" id="deployGuide"></div>
       </div>
@@ -1123,10 +1147,12 @@ function logFilterQuery() {
   const ep = document.getElementById('logEndpoint').value.trim();
   const key = document.getElementById('logKey').value.trim();
   const st = document.getElementById('logStatus').value;
+  const src = document.getElementById('logSource').value;
   const days = document.getElementById('logDays').value;
   if (ep) p.set('endpoint', ep);
   if (key) p.set('key', key);
   if (st) p.set('status', st);
+  if (src) p.set('source', src);
   if (days && days !== '0') p.set('days', days);
   p.set('limit', LOG_PAGE_SIZE);
   p.set('offset', logOffset);
@@ -1171,10 +1197,12 @@ async function exportLogs() {
     const ep = document.getElementById('logEndpoint').value.trim();
     const key = document.getElementById('logKey').value.trim();
     const st = document.getElementById('logStatus').value;
+    const src = document.getElementById('logSource').value;
     const days = document.getElementById('logDays').value;
     if (ep) p.set('endpoint', ep);
     if (key) p.set('key', key);
     if (st) p.set('status', st);
+    if (src) p.set('source', src);
     if (days && days !== '0') p.set('days', days);
     const resp = await fetch(BASE + '/api/logs/export.csv?' + p.toString(), { headers: authToken ? {'X-Auth-Token': authToken} : {} });
     if (resp.status === 401) { showLogin(); throw new Error('unauthorized'); }
@@ -1186,6 +1214,43 @@ async function exportLogs() {
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
   } catch(e) { console.error(e); }
+}
+
+// ── 数据备份与恢复 ────────────────────────────────────────────
+async function backupData() {
+  const st = document.getElementById('backupStatus');
+  st.textContent = '备份中…';
+  try {
+    const resp = await fetch(BASE + '/api/backup', { method: 'POST', headers: authToken ? {'X-Auth-Token': authToken} : {} });
+    if (resp.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    if (!resp.ok) { const d = await resp.json(); throw new Error((d && d.error) || '备份失败'); }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const cd = resp.headers.get('Content-Disposition') || '';
+    a.download = (cd.match(/filename="?([^";]+)"?/) || [, 'tavily-backup.zip'])[1];
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    st.textContent = '已下载备份';
+  } catch(e) { st.textContent = '备份失败：' + (e.message || e); }
+}
+async function restoreData() {
+  const fileEl = document.getElementById('restoreFile');
+  const st = document.getElementById('restoreStatus');
+  if (!fileEl.files || !fileEl.files[0]) { st.textContent = '请先选择备份文件'; return; }
+  if (!confirm('恢复将覆盖当前配置与 Key 池（现有文件会先保留为 .pre-restore 副本），并停止 MCP / 搜索代理服务。确定继续？')) return;
+  st.textContent = '恢复中…';
+  try {
+    const body = await fileEl.files[0].arrayBuffer();
+    const headers = { 'Content-Type': 'application/octet-stream' };
+    if (authToken) headers['X-Auth-Token'] = authToken;
+    const resp = await fetch(BASE + '/api/restore', { method: 'POST', headers, body });
+    if (resp.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    const d = await resp.json();
+    if (!resp.ok || !d.ok) throw new Error((d && d.error) || '恢复失败');
+    st.textContent = `已恢复 ${d.restored} 个文件，请重启 MCP / 搜索代理服务`;
+  } catch(e) { st.textContent = '恢复失败：' + (e.message || e); }
 }
 
 // ── 添加 API Key 弹窗（粘贴 / .txt 文件导入） ─────────────────

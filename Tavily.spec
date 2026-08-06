@@ -4,7 +4,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = [('app\\dashboard.html', '.'), ('assets\\tavily.ico', 'assets')]
 binaries = []
-hiddenimports = ['mcp_server', 'tavily_proxy', 'uvicorn.loops.auto', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
+hiddenimports = ['mcp_server', 'tavily_proxy', 'backup', 'uvicorn.loops.auto', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
 hiddenimports += collect_submodules('mcp.server')
 hiddenimports += collect_submodules('mcp.shared')
 hiddenimports += collect_submodules('mcp.transport')

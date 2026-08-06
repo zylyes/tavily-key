@@ -77,7 +77,7 @@ class _FakeSearchClient:
 
 
 def test_tavily_search_tool(monkeypatch):
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_FakeSearchClient(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_FakeSearchClient(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_search("hello")))
     assert out["results"][0]["title"] == "t"
@@ -100,7 +100,7 @@ class _FakeResearchClient:
 
 
 def test_tavily_research_stream_fallback(monkeypatch):
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_FakeResearchClient(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_FakeResearchClient(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", model="mini", timeout=10)))
     assert out["status"] == "completed"
@@ -124,7 +124,7 @@ def test_tavily_search_auto_parameters(monkeypatch):
             captured.update(kw)
             return {"query": kw["query"], "results": []}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     asyncio.run(mcp_server.tavily_search("q", auto_parameters=True))
     assert captured.get("auto_parameters") is True
@@ -141,7 +141,7 @@ def test_run_with_retry_switches_key_on_quota(monkeypatch):
         def search(self, **kw):
             return {"results": [{"title": "t", "url": "u", "content": "c"}]}
 
-    def fake_get_client():
+    def fake_get_client(*a, **k):
         state["calls"] += 1
         if state["calls"] == 1:
             return _Bad(), "tvly-bad***"
@@ -162,7 +162,7 @@ def test_tavily_research_wait_false_returns_request_id(monkeypatch):
         def get_research(self, request_id):
             return {"status": "completed", "content": "x"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", wait=False)))
     assert out["request_id"] == "rid-1"
@@ -174,7 +174,7 @@ def test_tavily_research_status_tool(monkeypatch):
         def get_research(self, request_id):
             return {"status": "completed", "content": "done"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research_status("rid-1")))
     assert out["status"] == "completed"
@@ -207,7 +207,7 @@ def test_tavily_search_normalizes_include_answer(monkeypatch):
             captured.update(kw)
             return {"query": kw["query"], "results": []}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     asyncio.run(mcp_server.tavily_search("q", include_answer="true", include_raw_content="false"))
     assert captured.get("include_answer") is True
@@ -237,7 +237,7 @@ def test_tavily_research_status_uses_same_key(monkeypatch):
         request_count=0, error_count=0, credits_used=0, credits_limit=0,
         last_used_at=0.0, added_at=0.0, last_error="",
     )
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C("tvly-fallback"), "tvly-fallback***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C("tvly-fallback"), "tvly-fallback***"))
     monkeypatch.setattr(mcp_server.pool, "get_key", lambda masked: fake_key)
     monkeypatch.setattr(mcp_server, "TavilyClient", _C)  # 构造真实 client 时返回 fake
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
@@ -335,7 +335,7 @@ def test_tavily_search_validates_country(monkeypatch):
             captured.update(kw)
             return {"query": kw["query"], "results": []}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
 
     # 非法 country：返回错误 JSON，且 client.search 不被调用
@@ -419,7 +419,7 @@ def test_research_impl_stream_timeout_no_fallback(monkeypatch):
             state["polled"] = True
             return {"status": "completed", "content": "fallback-report"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_Slow(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_Slow(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     fake = {"now": 1000.0}
 
@@ -483,7 +483,7 @@ def test_run_with_retry_short_retry_after_retries_same_key(monkeypatch):
                 raise e
             return {"results": [{"title": "t", "url": "u", "content": "c"}]}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     monkeypatch.setattr(mcp_server.time, "sleep", lambda s: state["sleeps"].append(s))
     out = json.loads(mcp_server._run_with_retry("search", lambda c: c.search(query="q")))
@@ -506,7 +506,7 @@ def test_run_with_retry_long_retry_after_switches_key(monkeypatch):
         def search(self, **kw):
             return {"results": [{"title": "t", "url": "u", "content": "c"}]}
 
-    def fake_get_client():
+    def fake_get_client(*a, **k):
         state["calls"] += 1
         if state["calls"] == 1:
             return _Bad(), "tvly-bad***"
@@ -569,7 +569,7 @@ def test_tavily_research_output_length_passthrough(monkeypatch):
         def get_research(self, rid):
             return {"status": "completed", "content": "x"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", output_length="LONG", timeout=5)))
     assert out["status"] == "completed"
@@ -585,7 +585,7 @@ def test_tavily_research_invalid_output_length(monkeypatch):
             captured["called"] = True
             return {"request_id": "rid"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", output_length="huge", timeout=5)))
     assert "error" in out
@@ -595,7 +595,7 @@ def test_tavily_research_invalid_output_length(monkeypatch):
 
 def test_tavily_research_max_sources_validation(monkeypatch):
     """max_sources 越界返回友好错误；合法值透传。"""
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (object(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (object(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", max_sources=20, timeout=5)))
     assert "error" in out
@@ -613,7 +613,7 @@ def test_tavily_research_max_sources_validation(monkeypatch):
         def get_research(self, rid):
             return {"status": "completed", "content": "x"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", max_sources=5, max_subsources=3, timeout=5)))
     assert out["status"] == "completed"
@@ -634,7 +634,7 @@ def test_tavily_research_output_schema_stream_structured(monkeypatch):
         def get_research(self, rid):
             return {"status": "completed", "content": "x"}
 
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research(
         "q", output_schema={"properties": {"summary": {"type": "string"}}}, timeout=5)))
@@ -644,7 +644,7 @@ def test_tavily_research_output_schema_stream_structured(monkeypatch):
 
 def test_tavily_research_output_schema_invalid(monkeypatch):
     """output_schema 非 dict 返回友好错误。"""
-    monkeypatch.setattr(mcp_server, "_get_client", lambda: (object(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (object(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     out = json.loads(asyncio.run(mcp_server.tavily_research("q", output_schema="not-a-dict", timeout=5)))
     assert "error" in out
@@ -670,6 +670,27 @@ def test_client_for_forwards_project_id(monkeypatch):
     assert captured["key"] == "tvly-raw"
     assert captured["project_id"] == "proj-1"
     assert captured["human_id"] == "human-1"
+
+
+def test_client_for_forwards_session_id(monkeypatch):
+    """X-Session-Id：进程启动时自动生成一次，进程内所有 key/请求复用同一会话 ID。"""
+    captured = {}
+
+    class _C:
+        def __init__(self, key, **kwargs):
+            captured["session_id"] = kwargs.get("session_id")
+
+    monkeypatch.setattr(mcp_server, "TavilyClient", _C)
+    monkeypatch.setattr(mcp_server, "get_settings", lambda: {})
+    monkeypatch.setattr(mcp_server, "_apply_default_timeout", lambda c: None)
+    monkeypatch.setattr(mcp_server, "_patch_error_headers", lambda c: None)
+    mcp_server._client_for("tvly-raw")
+    sid = captured["session_id"]
+    assert sid  # 非空
+    # 进程内稳定：不同 key 构造的 client 使用同一会话 ID
+    mcp_server._client_for("tvly-raw2")
+    assert captured["session_id"] == sid
+    assert sid == mcp_server._SESSION_ID
 
 
 # ── P2-3：Research 任务看板（缓存与查询上限） ────────────────

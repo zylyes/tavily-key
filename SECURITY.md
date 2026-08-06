@@ -26,6 +26,7 @@ Tavily API Key Pool 用于**集中管理多个 Tavily API key**，涉及密钥�
 - **不要提交 `config.json` 与 `keys.txt` 到版本库**：两者包含敏感配置与 API key。请确保它们被 `.gitignore` 排除，且不要在 issue、PR、截图或日志中泄露其内容。
 - **API key 脱敏**：在日志、issue、文档示例中展示 key 时，只保留前 4 位与后 4 位，中间用星号代替（如 `tvly-xxxx****yyyy`）。
 - **数据库文件**：`tavily_keys.db` 包含全部 key 与请求日志，等同机密文件。备份、迁移时注意保管，不要提交到版本库，也不要通过不安全的通道传输。
+- **备份文件**：备份 zip（`backup` 命令/面板导出）含 `.tavily-secret.key`、`config.json`（内含 `auth_token`/`proxy_token`）与数据库，等同机密文件，请加密存储、妥善保管；面板恢复接口受 `X-Auth-Token` 鉴权保护。
 
 ### 部署环境
 

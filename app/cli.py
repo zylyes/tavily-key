@@ -172,6 +172,28 @@ def cmd_proxy(args):
     print("（如 Cherry Studio 网络搜索 → Tavily 提供商，填后点「检测」验证）。")
 
 
+def cmd_backup(args):
+    """备份 data/ 关键文件为 zip。"""
+    from backup import backup_to
+
+    dest = backup_to(args.path)
+    print(f"备份完成: {dest}")
+    print("备份内容：config.json、tavily_keys.db(+wal)、research_keys.json、")
+    print("research_tasks_cache.json、.tavily-secret.key（恢复时解密 Key 必需）。")
+
+
+def cmd_restore(args):
+    """从备份 zip 恢复 data/。建议先停止 MCP/搜索代理/面板，避免文件占用。"""
+    from backup import restore_from
+
+    try:
+        n = restore_from(args.zip)
+    except Exception as e:  # noqa: BLE001
+        print(f"恢复失败: {e}")
+        return
+    print(f"已恢复 {n} 个文件。请重启服务使配置与 Key 生效。")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="tavily-pool", description="Tavily API Key Pool Manager")
     sub = parser.add_subparsers(dest="cmd")
@@ -208,6 +230,13 @@ def main():
 
     sub.add_parser("proxy", help="Show search proxy status/URL/key (Tavily-compatible REST)")
 
+    p_backup = sub.add_parser("backup", help="Backup data directory to a zip file")
+    p_backup.add_argument("path", nargs="?",
+                          help="Target directory or .zip path (default: system temp dir)")
+
+    p_restore = sub.add_parser("restore", help="Restore data directory from a backup zip")
+    p_restore.add_argument("zip", help="Backup zip file path")
+
     args = parser.parse_args()
     if args.cmd is None:
         parser.print_help()
@@ -225,6 +254,8 @@ def main():
         "usage": cmd_usage,
         "audit": cmd_audit,
         "proxy": cmd_proxy,
+        "backup": cmd_backup,
+        "restore": cmd_restore,
     }
     cmds[args.cmd](args)
 
