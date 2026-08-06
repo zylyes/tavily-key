@@ -21,6 +21,11 @@ _log = get_logger("key_pool")
 # 官方开发环境限流 100 RPM，默认按 90% 留余量
 DEFAULT_RPM = 90
 
+# request_log 保留策略：默认保留 90 天，每插入 _LOG_PRUNE_EVERY 条触发一次清理，
+# 避免长期运行 request_log 无界增长（可由配置 log_retention_days 覆盖，0=不清理）。
+LOG_RETENTION_DAYS = 90
+_LOG_PRUNE_EVERY = 500
+
 
 class _TokenBucket:
     """按 key 的令牌桶：速率取自配置 rate_limit_rpm，threading 安全。"""
@@ -124,6 +129,7 @@ class KeyPool:
         self._buckets: dict[str, _TokenBucket] = {}
         self._bucket_lock = threading.Lock()
         self._usage_cache: dict[str, tuple[float, dict]] = {}
+        self._log_inserts = 0
         self._init_db()
 
     # ── DB helpers ──────────────────────────────────────────────
@@ -471,6 +477,34 @@ class KeyPool:
             (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], now),
         )
         conn.commit()
+        # 日志保留：周期性清理超期记录，避免 request_log 无界增长
+        self._log_inserts += 1
+        if self._log_inserts % _LOG_PRUNE_EVERY == 0:
+            try:
+                self.prune_request_log()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def prune_request_log(self, retention_days: int | None = None) -> int:
+        """清理超期请求日志，返回删除行数。
+
+        retention_days 缺省读配置 log_retention_days（默认 LOG_RETENTION_DAYS=90）；
+        传 0 表示不清理。超期判定基于 created_at（unix 秒）。
+        """
+        days = retention_days
+        if days is None:
+            try:
+                cfg_val = get_settings().get("log_retention_days")
+                days = int(cfg_val) if cfg_val is not None else LOG_RETENTION_DAYS
+            except (TypeError, ValueError):
+                days = LOG_RETENTION_DAYS
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        conn = self._get_conn()
+        cur = conn.execute("DELETE FROM request_log WHERE created_at < ?", (cutoff,))
+        conn.commit()
+        return cur.rowcount
 
     # ── Health check ────────────────────────────────────────────
     def check_health(self, key_masked: str | None = None) -> list[dict]:
@@ -803,6 +837,74 @@ class KeyPool:
             "SELECT * FROM request_log ORDER BY created_at DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_usage_trend(self, days: int = 7) -> dict:
+        """按天聚合 request_log 用量（本地时区）：每日请求数/成功/失败/积分/按 endpoint 拆分。"""
+        days = max(1, min(int(days), 90))
+        since = time.time() - days * 86400
+        conn = self._get_conn()
+        rows = conn.execute(
+            """
+            SELECT date(created_at, 'unixepoch', 'localtime') AS day,
+                   endpoint,
+                   COUNT(*) AS cnt,
+                   COALESCE(SUM(CASE WHEN success=1 THEN 1 ELSE 0 END), 0) AS ok,
+                   COALESCE(SUM(CASE WHEN success=1 THEN credits_consumed ELSE 0 END), 0) AS credits
+            FROM request_log
+            WHERE created_at >= ?
+            GROUP BY day, endpoint
+            ORDER BY day
+            """,
+            (since,),
+        ).fetchall()
+        day_map: dict[str, dict] = {}
+        for r in rows:
+            d = day_map.setdefault(
+                r["day"], {"requests": 0, "success": 0, "failed": 0, "credits": 0, "endpoints": {}}
+            )
+            d["requests"] += r["cnt"]
+            d["success"] += r["ok"]
+            d["failed"] += r["cnt"] - r["ok"]
+            d["credits"] += r["credits"]
+            d["endpoints"][r["endpoint"]] = d["endpoints"].get(r["endpoint"], 0) + r["cnt"]
+        # 补齐无请求的日期（显示 0），保持时间顺序
+        out = []
+        for i in range(days - 1, -1, -1):
+            day = time.strftime("%Y-%m-%d", time.localtime(time.time() - i * 86400))
+            d = day_map.get(day, {"requests": 0, "success": 0, "failed": 0, "credits": 0, "endpoints": {}})
+            out.append({"date": day, **d})
+        return {"days": days, "points": out}
+
+    def query_logs(self, endpoint: str = "", key_masked: str = "", status: str = "",
+                   since: float = 0.0, until: float = 0.0,
+                   limit: int = 200, offset: int = 0) -> tuple[list[dict], int]:
+        """按条件筛选请求日志（倒序），返回 (行, 总数)。status: '' | success | failed。"""
+        where: list[str] = []
+        params: list = []
+        if endpoint:
+            where.append("endpoint = ?")
+            params.append(endpoint)
+        if key_masked:
+            where.append("key_masked = ?")
+            params.append(key_masked)
+        if status == "success":
+            where.append("success = 1")
+        elif status == "failed":
+            where.append("success = 0")
+        if since:
+            where.append("created_at >= ?")
+            params.append(since)
+        if until:
+            where.append("created_at <= ?")
+            params.append(until)
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
+        conn = self._get_conn()
+        total = conn.execute(f"SELECT COUNT(*) AS c FROM request_log{cond}", params).fetchone()["c"]
+        rows = conn.execute(
+            f"SELECT * FROM request_log{cond} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params + [int(limit), int(offset)],
+        ).fetchall()
+        return [dict(r) for r in rows], int(total)
 
 
 def _mask(key: str) -> str:

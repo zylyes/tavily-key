@@ -5,6 +5,51 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-08-05
+
+### Added
+
+- **MCP 地址多形式展示**：面板 MCP 服务地址区同时显示三种地址，各带复制按钮——
+  - **局域网 IP 地址**（随网络切换变化，如 `http://192.168.1.20:8001/sse`）；
+  - **主机名地址**（`http://<主机名>.local:8001/sse`，mDNS，**切换网络不变**，客户端需支持 `.local` 解析；Windows 设备也可用裸主机名 `http://<主机名>:8001/sse`）；
+  - **本机地址**（`http://127.0.0.1:8001/sse`，仅本机、不依赖网络）。
+  - `settings.mcp_urls()` 生成地址集合（ip / hostname / hostname_local / local），`mcp_manager.status()` 与 `/api/mcp/status` 新增 `urls` 字段（`url` 字段保持兼容）；监听仅 `127.0.0.1` 时面板提示「仅本机，局域网设备无法访问」，监听 `0.0.0.0` 时提示建议客户端使用主机名地址。
+- **Research 流式三段式超时加固**（对齐官方 tavily-mcp）：
+  - **整体 deadline**：流式消费受 `timeout` 总时长约束（默认按 model 区分：`mini`/`auto` 300s、`pro` 900s，显式传参可覆盖），杜绝滴灌流无限等待；
+  - **头部/连接超时**：30s 内未建立连接视为失败（`requests timeout=(connect, read)` 元组的 connect 段）；
+  - **idle 容忍**：单 chunk 读超时放宽到 300s（read 段），容忍官方报告生成阶段数分钟的静默期，不再误杀本可成功的 research；
+  - **超时不回退**：流已开始后的中断（整体超时/读异常）返回 `{"status":"timeout"|"error", content: 部分内容}` 并显式关闭连接，**不再回退「提交+轮询」**（服务端任务可能仍在运行，回退会造成重复任务双倍消耗）；仅提交阶段失败才回退。
+- **尊重 429 `retry-after`**：wrap SDK 错误处理把响应 `retry-after` 头附着到异常上（SDK 原生异常不带 headers），`_run_with_retry` 与 research 提交循环按值处理——`<5s` 同 key 等待重试（不白白消耗别的 key 限流预算）、`≥5s` 切换其他 key；无头 429 保持不重试。
+- **`mcp_human_id` 接线**：此前配置存在但从未传入 TavilyClient（死配置），现统一经 `_client_for()` 构造（`TavilyClient(key, human_id=...)` + 默认超时 + retry-after patch），`X-Human-Id` 头真正生效。
+- **request_log 保留策略**：新增 `log_retention_days` 配置（默认 90 天，`0`=不清理），`KeyPool.prune_request_log()` 每插入 500 条请求日志周期清理超期记录，防止 `request_log` 长期运行无界增长。
+- **Research 新参数**：`tavily_research` 新增 `output_length`（`short`/`standard`/`long`，枚举忽略大小写）、`output_schema`（传入 JSON Schema 后 `content` 直接返回结构化对象，AI Agent 无需再解析 Markdown；流式路径 `delta.content` 为对象时直接收集，字符串片段整体尝试 JSON 解析）、`max_sources`（3–10）/ `max_subsources`（1–8）来源数上限；非法值本地返回友好错误、不触达 API。
+- **`X-Project-ID` 支持**：新增 `mcp_project_id` 配置，经 SDK 原生 `project_id` 参数转发 `X-Project-ID` 头，按项目归类用量；面板「MCP 服务」设置页新增「项目归属 ID」「会话归属 ID」（`mcp_human_id`，此前仅配置文件可改）输入框。
+- **用量趋势图 / 统计页**：新增 `/api/usage/trend?days=7|30`（按本地时区按天聚合请求数/成功/失败/积分/按 endpoint 拆分，自动补齐无请求日期）；面板新增独立「**统计**」页签——顶部关键指标卡（总请求/近 24h 成功失败与成功率/总积分/剩余积分/活跃 Key）+ 用量趋势图（轻量 SVG 堆叠柱状图，无外部 CDN 依赖，离线可用，悬停查看明细）+ 接口分布（近 24h 各接口成功/失败横向条形）+ 积分消耗按天柱状图，均支持近 7/30 天切换。
+- **异常通知**：新增 `notify.py` 模块 + 后台周期检测（首次约 30s、此后按 `notify_interval_minutes`，默认 5 分钟）——
+  - **Webhook**（`notify_webhook` 配置，POST JSON，兼容钉钉/企业微信/Server酱）；
+  - **Windows 托盘气泡**（`notify_tray` 配置，`TrayIcon.notify()` 新增 `NIF_INFO` 气球提示，任意线程可调）；
+  - **去重/节流**：同一 (key, flag) 一小时只通知一次；新增**池空告警**（存在 key 但全部不可用）半小时去重。
+- **Research 任务看板**：新增 `/api/research/tasks` 与 `mcp_server.list_research_tasks()`（复用按 key 隔离的 status 查询 + TTL 缓存：非终态 30s / 终态 300s + 单次刷新最多查 15 个，避免烧官方限流）；面板新增「Research 任务」页签展示 request_id / 归属 key / 状态 / 结果摘要。
+- **请求日志筛选与导出**：新增 `/api/logs`（endpoint / key 掩码 / 成功失败 / 时间范围 + 分页）与 `/api/logs/export.csv`（同筛选导出 CSV）；面板日志页新增筛选栏、分页与「导出 CSV」按钮（前端 fetch 带鉴权头下载）。
+
+### Changed
+
+- `tavily_research` 的 `timeout` 默认值由 `300.0` 改为 `None`（按 model 计算：`mini`/`auto` 300s、`pro` 900s），显式传入仍优先。
+- 面板页签由 4 个增至 6 个（新增「统计」「Research 任务」）；请求日志从 `/api/stats` 内嵌改为独立的 `/api/logs` 分页查询。
+- **Research 任务页头部美化**：改为卡片式头部——左侧紫色图标块 + 标题 + 状态徽章（彩色圆点 + 「共 N · 已结束 N」，全部结束时圆点为绿色），副标题以 `<code>` 样式展示 `wait=false`，右侧主色「刷新」按钮（含图标）。
+
+### Fixed
+
+- **Research 任务看板显示不全 / 长时间空白**：
+  - 看板响应不再全量返回研究报告 `content`（全文可达数百 KB，导致响应巨大、页面长时间停留在空白/「加载中」），后端截断为 200 字符摘要（`_research_content_preview`）；
+  - 任务表格改 `table-layout:fixed` 并分配列宽，「详情」列不再因 `white-space:nowrap` 把表格横向撑出可视区；
+  - 加载中 / 加载失败现在有明确反馈（「加载中…」/「加载失败：原因」），不再出现无提示的空白表格；
+  - `_load_research_keys()` 改用 `utf-8-sig` 读取：带 BOM 的 UTF-8 文件（某些编辑器/工具会写入）此前会令 `json.loads` 抛异常、整份映射静默回退为空，导致看板永远显示「暂无任务」——现已与 `settings.load()` 的 BOM 兼容策略一致。
+
+### Tests
+
+- 新增 31 个用例（93 → 124 全绿）：流式整体超时返回部分内容并关闭连接、流读取中断返回部分内容、流超时**不回退**提交+轮询、默认超时按 model、429 短 retry-after 同 key 重试 / 长 retry-after 切 key、错误处理 patch 幂等与附着、`mcp_human_id` 接线与空值处理、request_log 保留清理与配置关闭、`output_length` 透传/非法值拦截、`max_sources`/`max_subsources` 校验与透传、`output_schema` 结构化流式返回/非 dict 拦截、`mcp_project_id` 接线与 settings 字段校验、趋势聚合、日志筛选/分页、看板缓存与查询上限、四个新 API 端点、notify 去重/托盘/池空/无渠道、BOM 兼容读取 `research_keys.json`。修复 research 映射测试对真实 `data/research_keys.json` 的污染（autouse 隔离 fixture）。
+
 ## [0.3.2] - 2026-08-05
 
 ### Fixed
@@ -84,6 +129,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.4.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.4.0
 [0.3.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.2
 [0.3.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.1
 [0.3.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.0

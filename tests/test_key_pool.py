@@ -1,5 +1,7 @@
 """KeyPool 单元测试：CRUD、负载均衡、健康检查防误伤、官方用量同步。"""
 import builtins
+import time
+
 import pytest
 
 import key_pool
@@ -536,3 +538,90 @@ def test_detect_anomalies_high_error_rate(pool, monkeypatch):
     monkeypatch.setattr(key_pool, "get_settings", lambda: {"anomaly_thresholds": {"error_rate": 0.3}})
     anomalies = pool.detect_anomalies()
     assert anomalies and "high_error_rate" in anomalies[0]["flags"]
+
+
+# ── request_log 保留策略 ──────────────────────────────────────
+def test_prune_request_log_removes_old(pool):
+    """超期日志被清理，未超期日志保留。"""
+    now = time.time()
+    pool.record_request(MASK1, "search", 10, True, credits=1, usage_source="response")
+    conn = pool._get_conn()
+    conn.execute(
+        "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("tvly-old***", "search", 1, 1, "", 10, "", "response", now - 100 * 86400),
+    )
+    conn.commit()
+    deleted = pool.prune_request_log(retention_days=90)
+    assert deleted >= 1
+    rows = conn.execute(
+        "SELECT key_masked FROM request_log WHERE created_at > ?", (now - 86400,)
+    ).fetchall()
+    assert all(r["key_masked"] != "tvly-old***" for r in rows)
+    assert any(r["key_masked"] == MASK1 for r in rows)
+
+
+def test_prune_request_log_config_disabled(pool, monkeypatch):
+    """配置 log_retention_days=0 表示不清理。"""
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"log_retention_days": 0})
+    conn = pool._get_conn()
+    conn.execute(
+        "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        ("tvly-old***", "search", 1, 1, "", 10, "", "response", time.time() - 100 * 86400),
+    )
+    conn.commit()
+    assert pool.prune_request_log() == 0
+
+
+# ── 用量趋势与日志筛选 ────────────────────────────────────────
+def test_get_usage_trend_aggregates(pool):
+    """趋势按天聚合：请求数/成功/失败/积分，并补齐无请求的日期。"""
+    now = time.time()
+    conn = pool._get_conn()
+    conn.execute(
+        "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (MASK1, "search", 1, 1, "", 10, "", "response", now),
+    )
+    conn.execute(
+        "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (MASK1, "research", 0, 0, "err", 20, "", "none", now),
+    )
+    conn.execute(
+        "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (MASK1, "extract", 2, 1, "", 15, "", "response", now - 86400),
+    )
+    conn.commit()
+    t = pool.get_usage_trend(7)
+    assert t["days"] == 7
+    assert len(t["points"]) == 7
+    last = t["points"][-1]  # 今天
+    assert last["requests"] == 2
+    assert last["success"] == 1
+    assert last["failed"] == 1
+    assert last["credits"] == 1
+    assert last["endpoints"].get("search") == 1
+    assert t["points"][-2]["requests"] == 1  # 昨天
+    assert t["points"][-2]["credits"] == 2
+
+
+def test_query_logs_filters(pool):
+    """日志筛选：按接口/状态/时间过滤，返回总数与分页。"""
+    now = time.time()
+    conn = pool._get_conn()
+    for ep, ok, dt in [("search", 1, now), ("search", 0, now), ("research", 1, now - 86400), ("extract", 1, now - 2 * 86400)]:
+        conn.execute(
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (MASK1, ep, 1, ok, "" if ok else "err", 10, "", "response", dt),
+        )
+    conn.commit()
+    rows, total = pool.query_logs(endpoint="search")
+    assert total == 2
+    assert len(rows) == 2
+    rows, total = pool.query_logs(status="failed")
+    assert total == 1
+    rows, total = pool.query_logs(since=now - 3600)
+    assert total == 2  # 近 1 小时内的两条
+    rows, total = pool.query_logs(limit=2)
+    assert total == 4
+    assert len(rows) == 2
+    rows, total = pool.query_logs(offset=2)
+    assert len(rows) == 2

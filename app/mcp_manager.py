@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 
 from paths import runtime_dir
-from settings import get_settings, mcp_is_network, mcp_url
+from settings import get_settings, mcp_is_network, mcp_url, mcp_urls
 
 _lock = threading.Lock()
 _proc: subprocess.Popen | None = None
@@ -125,6 +125,7 @@ def status() -> dict:
         "host": cfg.get("mcp_host", "0.0.0.0"),
         "port": port,
         "url": mcp_url(cfg),
+        "urls": mcp_urls(cfg),
         "network": network,
         "auto_start": bool(cfg.get("mcp_auto_start", False)),
     }

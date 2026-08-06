@@ -416,7 +416,8 @@ print(f"最近 24h 请求分布: {stats['recent_24h']}")
 本文所述能力在项目其他模块中的使用方式：
 
 - **CLI 命令**：Key 管理命令（添加、删除、激活、停用）与统计健康命令（健康检查、统计概览）直接封装了 `KeyPool` 的上述方法；
-- **Web Dashboard**：界面与 API 层通过 `get_stats()` / `check_health()` 展示 Key 状态与健康结果；
+- **Web Dashboard**：界面与 API 层通过 `get_stats()` / `check_health()` 展示 Key 状态与健康结果；「API Key 列表」顶部展示按天用量趋势（`get_usage_trend()`）；
+- **异常通知（v0.5.0）**：Dashboard 后台线程按 `notify_interval_minutes`（默认 5 分钟）周期调用 `notify.check_and_notify()`，对 `detect_anomalies()` 的新增异常推送 Webhook（`notify_webhook`，POST JSON）与 Windows 托盘气泡（`notify_tray`）；同一 (key, flag) 一小时内只通知一次；池内所有 Key 均不可用时触发**池空告警**（半小时去重）；
 - **MCP 工具集**：工具调用层使用 `next_available_key()`（按 `key_strategy` 策略选取并做令牌桶限流）完成请求分发，并用 `record_request()` 回写每次调用的成败、耗时与 `usage_source`。
 
 > <cite>更多实现细节请直接阅读源码：[`key_pool.py`](file://app/key_pool.py)</cite>

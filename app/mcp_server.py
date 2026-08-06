@@ -37,11 +37,15 @@ _RESEARCH_KEYS_PATH = runtime_dir() / "research_keys.json"
 
 
 def _load_research_keys() -> None:
-    """从磁盘加载 request_id→masked 映射（服务器重启后异步任务仍可查询）。"""
+    """从磁盘加载 request_id→masked 映射（服务器重启后异步任务仍可查询）。
+
+    utf-8-sig：兼容带 BOM 的 UTF-8（某些编辑器/工具会写 BOM，若按纯 utf-8
+    解析 json 会抛异常导致整份映射静默回退为空，任务看板/status 将找不到 key）。
+    """
     global _research_keys
     try:
         if _RESEARCH_KEYS_PATH.exists():
-            data = json.loads(_RESEARCH_KEYS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(_RESEARCH_KEYS_PATH.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
                 _research_keys = {str(k): str(v) for k, v in data.items()}
     except Exception:  # noqa: BLE001
@@ -78,6 +82,8 @@ def _key_strategy() -> str:
 # 整个服务器（所有 MCP 调用 180s 超时）。给 session 注入默认超时兜底：显式
 # 传 timeout 的调用不受影响（显式参数优先于 partial 的默认值）。
 _REQUEST_TIMEOUT = 60.0
+# 429 retry-after 低于此值则同 key 等待重试（避免白白消耗别的 key 限流预算）
+_RETRY_AFTER_SAME_KEY_MAX = 5.0
 
 
 def _apply_default_timeout(client: TavilyClient) -> None:
@@ -89,15 +95,70 @@ def _apply_default_timeout(client: TavilyClient) -> None:
         session.request = functools.partial(session.request, timeout=_REQUEST_TIMEOUT)
 
 
+def _patch_error_headers(client: TavilyClient) -> None:
+    """让 SDK 429 异常携带 retry-after 头。
+
+    tavily-python 的 _handle_error_response 只把 detail 字符串放进异常，
+    不带 response/headers，无法读取官方 429 的 retry-after。这里 wrap 该方法，
+    把 response 的 retry-after 附着到异常上。幂等：重复调用不重复包装。
+    """
+    orig = getattr(client, "_handle_error_response", None)
+    if orig is None or getattr(orig, "_tavily_retry_after_patched", False):
+        return
+
+    def _patched(response):
+        try:
+            orig(response)
+        except Exception as e:  # noqa: BLE001
+            headers = getattr(response, "headers", None)
+            ra = headers.get("retry-after") if headers is not None else None
+            if ra is not None and not hasattr(e, "retry_after"):
+                try:
+                    e.retry_after = float(ra)
+                except (TypeError, ValueError):
+                    e.retry_after = None
+            raise
+
+    _patched._tavily_retry_after_patched = True
+    client._handle_error_response = _patched
+
+
+def _retry_after(e: Exception) -> float | None:
+    """从异常读取 retry-after 头（由 _patch_error_headers 附着），非法值返回 None。"""
+    ra = getattr(e, "retry_after", None)
+    if ra is None:
+        return None
+    try:
+        return float(ra)
+    except (TypeError, ValueError):
+        return None
+
+
+def _client_for(raw_key: str) -> TavilyClient:
+    """构造 TavilyClient：注入默认超时、429 retry-after 提取、会话归属头。
+
+    mcp_human_id / mcp_project_id 配置（可选）通过 SDK 原生参数转发
+    X-Human-Id / X-Project-ID 头，便于 Tavily 侧会话与项目用量归类
+    （此前 human_id 配置存在但从未接线）。
+    """
+    cfg = get_settings()
+    client = TavilyClient(
+        raw_key,
+        human_id=(cfg.get("mcp_human_id") or None),
+        project_id=(cfg.get("mcp_project_id") or None),
+    )
+    _apply_default_timeout(client)
+    _patch_error_headers(client)
+    return client
+
+
 def _get_client() -> tuple[TavilyClient, str]:
     """取一个可用 key（未耗尽、未超限流）；全部受限时内部短暂等待。"""
     result = pool.next_available_key()
     if result is None:
         raise RuntimeError("No active API keys in pool. Add keys via CLI or dashboard.")
     raw, masked = result
-    client = TavilyClient(raw)
-    _apply_default_timeout(client)
-    return client, masked
+    return _client_for(raw), masked
 
 
 def _record(masked: str, endpoint: str, start: float, success: bool,
@@ -152,125 +213,22 @@ def _norm_flag(v: Any) -> Any:
 
 _COUNTRY_RE = re.compile(r"^[A-Za-z]{2}$")
 
-# Tavily 官方 /search 的 country 枚举为「完整国家名」（小写，如 'united states'）。
-# 客户端可能传两位 ISO 3166-1 alpha-2 代码（如 'us'），这里维护 代码→完整名
-# 映射（覆盖官方全部枚举），统一归一化并支持「完整名 ↔ 代码」自动切换——
-# 池内不同 Key 对 country 格式要求不一致（部分要求两位 ISO 码、部分要求完整
-# 国家名），单一格式无法通吃。
-_COUNTRY_ISO2_TO_NAME: dict[str, str] = {
-    "af": "afghanistan", "al": "albania", "dz": "algeria", "ad": "andorra",
-    "ao": "angola", "ar": "argentina", "am": "armenia", "au": "australia",
-    "at": "austria", "az": "azerbaijan", "bs": "bahamas", "bh": "bahrain",
-    "bd": "bangladesh", "bb": "barbados", "by": "belarus", "be": "belgium",
-    "bz": "belize", "bj": "benin", "bt": "bhutan", "bo": "bolivia",
-    "ba": "bosnia and herzegovina", "bw": "botswana", "br": "brazil",
-    "bn": "brunei", "bg": "bulgaria", "bf": "burkina faso", "bi": "burundi",
-    "kh": "cambodia", "cm": "cameroon", "ca": "canada", "cv": "cape verde",
-    "cf": "central african republic", "td": "chad", "cl": "chile",
-    "cn": "china", "co": "colombia", "km": "comoros", "cg": "congo",
-    "cr": "costa rica", "hr": "croatia", "cu": "cuba", "cy": "cyprus",
-    "cz": "czech republic", "dk": "denmark", "dj": "djibouti",
-    "do": "dominican republic", "ec": "ecuador", "eg": "egypt",
-    "sv": "el salvador", "gq": "equatorial guinea", "er": "eritrea",
-    "ee": "estonia", "et": "ethiopia", "fj": "fiji", "fi": "finland",
-    "fr": "france", "ga": "gabon", "gm": "gambia", "ge": "georgia",
-    "de": "germany", "gh": "ghana", "gr": "greece", "gt": "guatemala",
-    "gn": "guinea", "ht": "haiti", "hn": "honduras", "hu": "hungary",
-    "is": "iceland", "in": "india", "id": "indonesia", "ir": "iran",
-    "iq": "iraq", "ie": "ireland", "il": "israel", "it": "italy",
-    "jm": "jamaica", "jp": "japan", "jo": "jordan", "kz": "kazakhstan",
-    "ke": "kenya", "kw": "kuwait", "kg": "kyrgyzstan", "lv": "latvia",
-    "lb": "lebanon", "ls": "lesotho", "lr": "liberia", "ly": "libya",
-    "li": "liechtenstein", "lt": "lithuania", "lu": "luxembourg",
-    "mg": "madagascar", "mw": "malawi", "my": "malaysia", "mv": "maldives",
-    "ml": "mali", "mt": "malta", "mr": "mauritania", "mu": "mauritius",
-    "mx": "mexico", "md": "moldova", "mc": "monaco", "mn": "mongolia",
-    "me": "montenegro", "ma": "morocco", "mz": "mozambique", "mm": "myanmar",
-    "na": "namibia", "np": "nepal", "nl": "netherlands", "nz": "new zealand",
-    "ni": "nicaragua", "ne": "niger", "ng": "nigeria", "kp": "north korea",
-    "mk": "north macedonia", "no": "norway", "om": "oman", "pk": "pakistan",
-    "pa": "panama", "pg": "papua new guinea", "py": "paraguay", "pe": "peru",
-    "ph": "philippines", "pl": "poland", "pt": "portugal", "qa": "qatar",
-    "ro": "romania", "ru": "russia", "rw": "rwanda", "sa": "saudi arabia",
-    "sn": "senegal", "rs": "serbia", "sg": "singapore", "sk": "slovakia",
-    "si": "slovenia", "so": "somalia", "za": "south africa",
-    "kr": "south korea", "ss": "south sudan", "es": "spain",
-    "lk": "sri lanka", "sd": "sudan", "se": "sweden", "ch": "switzerland",
-    "sy": "syria", "tw": "taiwan", "tj": "tajikistan", "tz": "tanzania",
-    "th": "thailand", "tg": "togo", "tt": "trinidad and tobago",
-    "tn": "tunisia", "tr": "turkey", "tm": "turkmenistan", "ug": "uganda",
-    "ua": "ukraine", "ae": "united arab emirates", "gb": "united kingdom",
-    "us": "united states", "uy": "uruguay", "uz": "uzbekistan",
-    "ve": "venezuela", "vn": "vietnam", "ye": "yemen", "zm": "zambia",
-    "zw": "zimbabwe",
-}
-# 常见非 ISO 别名（仅输入归一化用，不参与反向切换）
-_COUNTRY_ALIAS_TO_NAME: dict[str, str] = {
-    "usa": "united states", "uk": "united kingdom", "uae": "united arab emirates",
-}
-# 反向映射：完整国家名 → 两位 ISO 代码（Invalid country 自动切换用）
-_COUNTRY_NAME_TO_ISO2: dict[str, str] = {
-    name: iso for iso, name in _COUNTRY_ISO2_TO_NAME.items()
-}
-
 
 def _norm_country(country: str) -> str:
-    """把 country 参数归一化为官方 API 接受的格式：完整国家名（小写）。
+    """校验 country 参数：必须是两位 ISO 3166-1 alpha-2 国家代码。
 
-    接受两种输入并自动转换：
-    - 两位 ISO 3166-1 alpha-2 代码（如 'us'/'cn'/'jp'）→ 完整国家名
-      （'united states'/'china'/'japan'）
-    - 完整国家名（如 'United States'/'united states'）→ 校验并小写化
-
-    注：官方 /search 的 country 枚举为完整国家名，但池内部分 Key 走旧版
-    接口只认两位 ISO 代码——若目标 Key 拒绝本函数输出格式，由
-    _run_with_retry 捕获 Invalid country 错误自动切换另一种格式重试。
+    返回规范化后的小写代码；非法值抛 ValueError 带友好中文提示，避免把
+    模糊的 API 400 错误抛给客户端。
     """
     c = (country or "").strip()
     if not c:
         return ""
-    c_lower = c.lower()
-    if _COUNTRY_RE.match(c_lower):
-        name = _COUNTRY_ISO2_TO_NAME.get(c_lower)
-        if name:
-            return name
-    if c_lower in _COUNTRY_ALIAS_TO_NAME:
-        return _COUNTRY_ALIAS_TO_NAME[c_lower]
-    if c_lower in _COUNTRY_NAME_TO_ISO2:
-        return c_lower
-    raise ValueError(
-        f"country 参数无效: '{country}'。需为两位 ISO 3166-1 国家代码"
-        "（如 'us'/'cn'/'jp'）或完整国家名（如 'united states'），"
-        "且仅 topic=general 时有效。"
-    )
-
-
-def _is_country_error(err: str) -> bool:
-    """判断错误是否为 country 参数格式不兼容（Invalid country ...）。"""
-    e = (err or "").lower()
-    return "invalid country" in e or ("country" in e and "must be a valid" in e)
-
-
-def _switch_country_format(kwargs: dict) -> bool:
-    """把 kwargs['country'] 在「两位 ISO 码 ↔ 完整国家名」间切换。
-
-    返回 True 表示已切换（存在另一种合法格式）；无 country 或无法切换返回
-    False。调用方应仅在 _is_country_error 判定后触发。
-    """
-    c = (kwargs.get("country") or "").strip().lower()
-    if not c:
-        return False
-    if _COUNTRY_RE.match(c):
-        name = _COUNTRY_ISO2_TO_NAME.get(c)
-        if not name:
-            return False
-        kwargs["country"] = name
-        return True
-    iso = _COUNTRY_NAME_TO_ISO2.get(c)
-    if not iso:
-        return False
-    kwargs["country"] = iso
-    return True
+    if not _COUNTRY_RE.match(c):
+        raise ValueError(
+            f"country 参数无效: '{country}'。需为两位 ISO 3166-1 国家代码"
+            "（如 'us'/'cn'/'jp'），且仅 topic=general 时有效。"
+        )
+    return c.lower()
 
 
 def _tool_kwargs(func, kwargs: dict) -> dict:
@@ -290,50 +248,48 @@ def _tool_kwargs(func, kwargs: dict) -> dict:
     return out
 
 
-def _run_with_retry(endpoint: str, fn, kwargs: dict | None = None) -> str:
+def _run_with_retry(endpoint: str, fn) -> str:
     """执行工具调用并序列化返回。
 
     - 记录成功/失败（含 request_id）。
     - quota(额度耗尽)/auth(认证失效) 类错误自动切换其他 key 重试（最多 2 次）。
-    - country 参数格式不兼容（Invalid country）时，自动在「完整国家名 ↔
-      两位 ISO 码」间切换后换 key 重试——池内不同 Key 对 country 格式要求
-      不一致，单一格式无法通吃（kwargs 传入含 country 的工具参数 dict）。
+    - 429 带 retry-after 头：< 5s 同 key 等待后重试（不换 key，避免白白消耗别的
+      key 限流预算）；>= 5s 切换其他 key 重试。
     """
     last_err = ""
-    country_switched = False
     for attempt in range(3):
         try:
             client, masked = _get_client()
         except RuntimeError as e:
             return json.dumps({"error": str(e)}, ensure_ascii=False)
         t0 = time.time()
-        try:
-            resp = fn(client)
-            credits, has_usage = _usage_credits(resp)
-            _record(masked, endpoint, t0, True, credits,
-                    request_id=_usage_request_id(resp),
-                    usage_source="response" if has_usage else "unknown")
-            return json.dumps(resp, ensure_ascii=False, indent=2)
-        except Exception as e:  # noqa: BLE001
-            err = str(e)
-            _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
-            _record(masked, endpoint, t0, False, 0, err, usage_source="none")
-            cat = _classify_error(err)
-            last_err = err
-            # country 格式不兼容：切换格式（完整名 ↔ 两位码）后换 key 重试
-            if (
-                kwargs is not None
-                and not country_switched
-                and _is_country_error(err)
-                and _switch_country_format(kwargs)
-            ):
-                country_switched = True
-                _log.info("%s country 格式不兼容，切换为 '%s' 重试",
-                          endpoint, kwargs.get("country"))
-                continue
-            if cat in ("quota", "auth") and attempt < 2:
-                continue  # 换 key 重试
-            return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
+        same_key_waits = 0
+        while True:
+            try:
+                resp = fn(client)
+                credits, has_usage = _usage_credits(resp)
+                _record(masked, endpoint, t0, True, credits,
+                        request_id=_usage_request_id(resp),
+                        usage_source="response" if has_usage else "unknown")
+                return json.dumps(resp, ensure_ascii=False, indent=2)
+            except Exception as e:  # noqa: BLE001
+                err = str(e)
+                _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
+                _record(masked, endpoint, t0, False, 0, err, usage_source="none")
+                cat = _classify_error(err)
+                last_err = err
+                ra = _retry_after(e)
+                if cat == "rate" and ra is not None:
+                    if ra < _RETRY_AFTER_SAME_KEY_MAX and same_key_waits < 2:
+                        # 短等待：同 key 重试，不消耗别的 key 限流预算
+                        time.sleep(ra)
+                        same_key_waits += 1
+                        continue
+                    if attempt < 2:
+                        break  # 长等待：切换其他 key 重试
+                if cat in ("quota", "auth") and attempt < 2:
+                    break  # 换 key 重试
+                return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
     return json.dumps({"error": last_err, "key_used": "?"}, ensure_ascii=False)
 
 
@@ -381,7 +337,6 @@ async def tavily_search(
         include_domains: List of domains to restrict search to (max 300).
         exclude_domains: List of domains to exclude (max 150).
         country: Prioritize results from this country (only with topic=general).
-            Accepts two-letter ISO codes (`us`) or full names (`united states`).
         exact_match: Only return results with exact quoted phrases.
         include_favicon: Include favicon URLs.
         auto_parameters: Let Tavily auto-tune parameters based on query intent.
@@ -432,8 +387,7 @@ async def tavily_search(
 
     # 同步工具在 MCP 事件循环内执行会阻塞整个服务器：async 工具 + to_thread
     # 让耗时调用（Tavily API、重试）在线程池中运行，避免阻塞其他请求。
-    # kwargs 传入供 _run_with_retry 在 Invalid country 时切换 country 格式重试。
-    return await anyio.to_thread.run_sync(_run_with_retry, "search", _do, kwargs)
+    return await anyio.to_thread.run_sync(_run_with_retry, "search", _do)
 
 
 @mcp.tool()
@@ -623,9 +577,16 @@ async def tavily_map(
     return await anyio.to_thread.run_sync(_run_with_retry, "map", _do)
 
 
+_RESEARCH_OUTPUT_LENGTHS = ("short", "standard", "long")
+
+
 def _research_impl(input: str, model: str, citation_format: str,
                    include_domains: list[str] | None, exclude_domains: list[str] | None,
-                   wait: bool, timeout: float, poll_interval: float) -> str:
+                   wait: bool, timeout: float | None, poll_interval: float,
+                   output_length: str = "standard",
+                   output_schema: dict | None = None,
+                   max_sources: int | None = None,
+                   max_subsources: int | None = None) -> str:
     """tavily_research 的同步实现，在线程池中执行，避免阻塞 MCP 事件循环。"""
     t0 = time.time()
     kwargs: dict[str, Any] = {}
@@ -633,6 +594,39 @@ def _research_impl(input: str, model: str, citation_format: str,
         kwargs["include_domains"] = include_domains
     if exclude_domains:
         kwargs["exclude_domains"] = exclude_domains
+
+    # ── 参数校验（客户端侧提前拦截，避免 400 才暴露给用户）──────
+    ol = (output_length or "standard").strip().lower()
+    if ol not in _RESEARCH_OUTPUT_LENGTHS:
+        return json.dumps({"error": f"output_length 无效: '{output_length}'。需为 short/standard/long。"},
+                          ensure_ascii=False)
+    if output_schema is not None and not isinstance(output_schema, dict):
+        return json.dumps({"error": "output_schema 必须是 JSON Schema 对象（dict）。"}, ensure_ascii=False)
+    if max_sources is not None:
+        try:
+            if not (3 <= int(max_sources) <= 10):
+                return json.dumps({"error": "max_sources 范围 3-10。"}, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "max_sources 必须是整数（范围 3-10）。"}, ensure_ascii=False)
+    if max_subsources is not None:
+        try:
+            if not (1 <= int(max_subsources) <= 8):
+                return json.dumps({"error": "max_subsources 范围 1-8。"}, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return json.dumps({"error": "max_subsources 必须是整数（范围 1-8）。"}, ensure_ascii=False)
+
+    # 透传 research 高级参数。output_schema 单独显式传：SDK research() 有同名
+    # 参数，不能放 kwargs 里（避免 'got multiple values for keyword argument'）。
+    kwargs["output_length"] = ol
+    if max_sources is not None:
+        kwargs["max_sources"] = max_sources
+    if max_subsources is not None:
+        kwargs["max_subsources"] = max_subsources
+
+    # 总时长默认按 model 对齐官方：mini/auto 300s、pro 900s（可显式覆盖）。
+    if not timeout:
+        timeout = _default_research_timeout(model)
+    timeout = max(float(timeout), 1.0)
 
     # 取可用 key（池空时返回友好错误，避免异常冒泡导致会话不稳定）
     try:
@@ -644,11 +638,20 @@ def _research_impl(input: str, model: str, citation_format: str,
     # 直接消费生成器组装报告，避免「先 400 research_stream_required 再回退」。
     if wait:
         try:
-            last = _research_stream(client, input, model, citation_format, timeout, kwargs)
+            last = _research_stream(client, input, model, citation_format, timeout, kwargs, output_schema)
+        except Exception as e:  # noqa: BLE001
+            # 提交阶段失败（连接/头部超时/认证等）：回退「提交+轮询」
+            _log.info("research 流式提交失败，回退提交+轮询 masked=%s: %s", masked, str(e)[:200])
+        else:
+            status = last.get("status")
+            if status in ("timeout", "error"):
+                # 流已开始但中断：返回部分结果，不回退（服务端任务可能仍在运行，
+                # 回退重新提交会造成重复任务、双倍消耗）
+                _record(masked, "research", t0, False, 0,
+                        last.get("error") or status, usage_source="unknown")
+                return json.dumps(last, ensure_ascii=False, indent=2)
             _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
             return json.dumps(last, ensure_ascii=False, indent=2)
-        except Exception as e:  # noqa: BLE001
-            _log.info("research 原生流式失败，回退提交+轮询 masked=%s: %s", masked, str(e)[:200])
 
     # ── 提交任务（quota/auth 错误自动切换其他 key 重试）──────────
     request_id = None
@@ -658,7 +661,8 @@ def _research_impl(input: str, model: str, citation_format: str,
             # tavily-python >= 0.7 的 research 为异步任务式 API：
             # research(input=...) 提交任务返回 request_id，需用 get_research() 轮询结果。
             resp = client.research(
-                input=input, model=model, citation_format=citation_format, **kwargs,
+                input=input, model=model, citation_format=citation_format,
+                output_schema=output_schema, **kwargs,
             )
             request_id = resp.get("request_id") if isinstance(resp, dict) else None
             if not request_id:
@@ -668,6 +672,12 @@ def _research_impl(input: str, model: str, citation_format: str,
         except Exception as e:  # noqa: BLE001
             err = str(e)
             cat = _classify_error(err)
+            ra = _retry_after(e)
+            if cat == "rate" and ra is not None and ra < _RETRY_AFTER_SAME_KEY_MAX:
+                # 短限流等待：同 key 稍等后重试，避免白白消耗别的 key 限流预算
+                _log.info("research 提交限流(retry-after=%.0fs)，同 key 等待重试: %s", ra, err[:200])
+                time.sleep(ra)
+                continue
             if cat in ("quota", "auth") and attempt < 2:
                 _log.info("research 提交失败(%s)，切换 key 重试: %s", cat, err[:200])
                 try:
@@ -680,13 +690,17 @@ def _research_impl(input: str, model: str, citation_format: str,
             if "research_stream_required" in err or ("stream" in err.lower() and "required" in err.lower()):
                 _log.info("research 要求流式，自动回退 stream=true: %s", err[:200])
                 try:
-                    last = _research_stream(client, input, model, citation_format, timeout, kwargs)
-                    _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
-                    return json.dumps(last, ensure_ascii=False, indent=2)
+                    last = _research_stream(client, input, model, citation_format, timeout, kwargs, output_schema)
                 except Exception as e2:  # noqa: BLE001
                     _log.warning("research 流式回退失败 masked=%s: %s", masked, str(e2)[:300])
                     _record(masked, "research", t0, False, 0, str(e2), usage_source="none")
                     return json.dumps({"error": str(e2), "key_used": masked}, ensure_ascii=False)
+                if last.get("status") in ("timeout", "error"):
+                    _record(masked, "research", t0, False, 0,
+                            last.get("error") or last.get("status"), usage_source="none")
+                else:
+                    _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
+                return json.dumps(last, ensure_ascii=False, indent=2)
             _log.warning("research 提交失败 masked=%s: %s", masked, err[:300])
             _record(masked, "research", t0, False, 0, err, usage_source="none")
             return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
@@ -726,8 +740,12 @@ async def tavily_research(
     include_domains: list[str] | None = None,
     exclude_domains: list[str] | None = None,
     wait: bool = True,
-    timeout: float = 300.0,
+    timeout: float | None = None,
     poll_interval: float = 2.0,
+    output_length: str = "standard",
+    output_schema: dict | None = None,
+    max_sources: int | None = None,
+    max_subsources: int | None = None,
 ) -> str:
     """AI-powered deep research producing a cited report. Takes 30-120 seconds.
 
@@ -742,12 +760,18 @@ async def tavily_research(
         include_domains: Soft preference for source domains (max 20).
         exclude_domains: Hard blocklist of domains to exclude (max 20).
         wait: If True, poll until the task completes; if False, return request_id immediately.
-        timeout: Max seconds to wait for the report (default 300).
+        timeout: Max seconds to wait for the report (default mini/auto 300, pro 900).
         poll_interval: Seconds between status polls.
+        output_length: Report length — `short`, `standard`, or `long`.
+        output_schema: JSON Schema dict for structured output — research returns a
+            structured object instead of markdown (ideal for agent consumption).
+        max_sources: Max sources to use (3-10).
+        max_subsources: Max sub-sources per source (1-8).
     """
     return await anyio.to_thread.run_sync(
         _research_impl, input, model, citation_format,
         include_domains, exclude_domains, wait, timeout, poll_interval,
+        output_length, output_schema, max_sources, max_subsources,
     )
 
 
@@ -761,20 +785,11 @@ async def tavily_research_status(request_id: str) -> str:
 
     def _impl() -> str:
         t0 = time.time()
+        masked = ""
         try:
-            client = None
-            masked = ""
             # research 任务按 key 隔离：优先用提交时的同一 key 查询，避免 404
-            pinned = _research_keys.get(request_id)
-            if pinned:
-                k = pool.get_key(pinned)
-                if k is not None and k.is_active and not k.is_exhausted:
-                    client = TavilyClient(k.key)
-                    _apply_default_timeout(client)
-                    masked = pinned
-            if client is None:
-                client, masked = _get_client()
-            resp = client.get_research(request_id)
+            pinned = _research_keys.get(request_id) or ""
+            resp, masked = _query_research_status(request_id, pinned)
             _record(masked, "research-status", t0, True, _usage_credits(resp)[0],
                     request_id=request_id, usage_source="unknown")
             return json.dumps(resp, ensure_ascii=False, indent=2)
@@ -784,6 +799,90 @@ async def tavily_research_status(request_id: str) -> str:
             return json.dumps({"error": str(e), "request_id": request_id}, ensure_ascii=False)
 
     return await anyio.to_thread.run_sync(_impl)
+
+
+# ── Research 任务看板 ─────────────────────────────────────────
+# request_id → (查询时间, 最近状态 dict) 的 TTL 缓存，供面板看板复用，
+# 避免每次刷新都对每个任务调 get_research 烧官方限流预算。
+_research_task_cache: dict[str, tuple[float, dict]] = {}
+_RESEARCH_TASK_TTL = 30.0        # 非终态任务缓存（秒）
+_RESEARCH_TASK_DONE_TTL = 300.0  # 终态任务缓存（秒）
+_RESEARCH_TASK_QUERY_CAP = 15   # 单次刷新最多实际查询多少个任务
+
+_TERMINAL_STATUSES = ("completed", "failed", "error", "cancelled")
+# 看板只返回 content 摘要（研究报告全文可达数百 KB，全量传输会导致页面长时间加载）
+_RESEARCH_TASK_CONTENT_PREVIEW = 200
+
+
+def _research_content_preview(resp: dict, n: int = _RESEARCH_TASK_CONTENT_PREVIEW) -> dict:
+    """把任务响应中的 content 截断为摘要（str 截断 / 对象序列化截断）。"""
+    out = dict(resp)
+    c = out.get("content")
+    if isinstance(c, str):
+        out["content"] = c[:n]
+    elif isinstance(c, (dict, list)):
+        out["content"] = json.dumps(c, ensure_ascii=False)[:n]
+    return out
+
+
+def _query_research_status(request_id: str, pinned_masked: str = "") -> tuple[dict, str]:
+    """查询 research 任务状态。任务按 key 隔离：优先用提交时的 key，避免 404。
+
+    返回 (响应 dict, 实际使用的 masked key)。池空等场景抛异常由调用方处理。
+    """
+    client = None
+    masked = ""
+    if pinned_masked:
+        k = pool.get_key(pinned_masked)
+        if k is not None and k.is_active and not k.is_exhausted:
+            client = _client_for(k.key)
+            masked = pinned_masked
+    if client is None:
+        client, masked = _get_client()
+    return client.get_research(request_id), masked
+
+
+def list_research_tasks(limit: int = 50) -> list[dict]:
+    """列出最近提交的 research 任务及状态（供面板「Research 任务」看板）。
+
+    成本控制：查询结果按 TTL 缓存（非终态 30s / 终态 300s），单次刷新最多查
+    _RESEARCH_TASK_QUERY_CAP 个任务，避免逐个调 get_research 烧官方限流预算。
+    """
+    with _research_keys_lock:
+        items = list(_research_keys.items())
+    items = items[-max(1, int(limit)):]
+    now = time.time()
+    tasks: list[dict] = []
+    queries = 0
+    for request_id, masked in reversed(items):
+        cached = _research_task_cache.get(request_id)
+        if cached is not None:
+            status = cached[1].get("status", "")
+            ttl = _RESEARCH_TASK_DONE_TTL if status in _TERMINAL_STATUSES else _RESEARCH_TASK_TTL
+            if now - cached[0] < ttl:
+                tasks.append({**cached[1], "request_id": request_id, "masked": masked, "cached": True})
+                continue
+        if queries >= _RESEARCH_TASK_QUERY_CAP:
+            tasks.append({"request_id": request_id, "masked": masked, "status": "unknown", "cached": True})
+            continue
+        queries += 1
+        try:
+            resp, used = _query_research_status(request_id, masked)
+            preview = _research_content_preview(resp)
+            _research_task_cache[request_id] = (now, preview)
+            tasks.append({
+                "request_id": request_id,
+                "masked": masked,
+                "status": resp.get("status", ""),
+                "content": preview.get("content"),
+                "key_used": used,
+                "cached": False,
+            })
+        except Exception as e:  # noqa: BLE001
+            _log.warning("research 看板查询失败 %s: %s", request_id, str(e)[:200])
+            tasks.append({"request_id": request_id, "masked": masked, "status": "error",
+                          "error": str(e)[:200], "cached": False})
+    return tasks
 
 
 @mcp.tool()
@@ -808,41 +907,103 @@ async def tavily_pool_status() -> str:
 # ═══════════════════════════════════════════════════════════════
 
 
+_STREAM_HEADER_TIMEOUT = 30.0   # 头部/连接超时（requests timeout=(connect, read) 的 connect 段）
+_STREAM_IDLE_TIMEOUT = 300.0    # 单 chunk 读超时（read 段）：容忍官方报告生成阶段静默期
+
+
+def _default_research_timeout(model: str) -> float:
+    """按 model 对齐官方默认总时长：mini/auto 300s、pro 900s。"""
+    return 900.0 if (model or "").strip().lower() == "pro" else 300.0
+
+
 def _research_stream(client: TavilyClient, input: str, model: str, citation_format: str,
-                     timeout: float, kwargs: dict) -> dict:
-    """research(stream=True) 的 SSE 流式组装：解析 choices[0].delta.content 拼接报告。"""
+                     timeout: float, kwargs: dict, output_schema: dict | None = None) -> dict:
+    """research(stream=True) 的 SSE 流式组装：解析 choices[0].delta.content 拼接报告。
+
+    三段式超时（对齐官方 tavily-mcp）：
+    - 头部超时：30s 内未建立连接视为失败（requests timeout 的 connect 段）；
+    - idle 容忍：单 chunk 读超时放宽到 300s（read 段），容忍官方报告生成阶段的静默期；
+    - 整体 deadline：超过总时长（timeout，默认 mini/auto 300 / pro 900）停止并返回部分内容。
+
+    流已开始后的中断（整体超时/读异常）返回 {"status":"timeout"|"error", ...} 部分结果，
+    不回退到「提交+轮询」（服务端任务可能仍在运行，回退会重复提交双倍消耗）；
+    只有提交阶段（client.research 发送请求/读响应头）异常才向上抛，由调用方决定回退。
+
+    output_schema 结构化输出：delta.content 可能直接是对象（dict/list），收集后作为
+    content 返回；若 API 以 JSON 分片字符串下发则尝试整体解析。
+    """
+    deadline = time.time() + max(float(timeout), 1.0)
+    idle = min(max(float(timeout), 1.0), _STREAM_IDLE_TIMEOUT)
     gen = client.research(
         input=input, model=model, citation_format=citation_format,
-        stream=True, timeout=timeout, **kwargs,
+        stream=True, timeout=(_STREAM_HEADER_TIMEOUT, idle),
+        output_schema=output_schema, **kwargs,
     )
     # 真实 SDK 返回 bytes 生成器（逐块 yield）；若直接返回 bytes/str，
     # 迭代会退化为逐字节(int)/逐字符(str)，需包成单元素列表防御。
     if isinstance(gen, (bytes, str)):
         gen = [gen]
     parts: list[str] = []
-    for chunk in gen:
-        if isinstance(chunk, bytes):
-            text = chunk.decode("utf-8", errors="replace")
-        elif isinstance(chunk, str):
-            text = chunk
-        else:
-            continue
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith("data:"):
+    structured: list[Any] = []
+    timed_out = False
+    try:
+        for chunk in gen:
+            if time.time() > deadline:
+                timed_out = True
+                break
+            if isinstance(chunk, bytes):
+                text = chunk.decode("utf-8", errors="replace")
+            elif isinstance(chunk, str):
+                text = chunk
+            else:
                 continue
-            payload = line[5:].strip()
-            if not payload:
-                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload:
+                    continue
+                try:
+                    obj = json.loads(payload)
+                except Exception:  # noqa: BLE001
+                    continue
+                delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                c = delta.get("content")
+                if isinstance(c, str):
+                    parts.append(c)
+                elif isinstance(c, (dict, list)):
+                    structured.append(c)  # output_schema 结构化输出：直接收集对象
+    except Exception as e:  # noqa: BLE001
+        # 流读取阶段失败：返回部分内容，不回退（避免重复提交双倍消耗）
+        _log.warning("research 流读取中断: %s", str(e)[:200])
+        return {"status": "error", "content": "".join(parts), "error": str(e)}
+    finally:
+        close = getattr(gen, "close", None)
+        if callable(close):
             try:
-                obj = json.loads(payload)
+                close()
             except Exception:  # noqa: BLE001
-                continue
-            delta = (obj.get("choices") or [{}])[0].get("delta") or {}
-            c = delta.get("content")
-            if isinstance(c, str):
-                parts.append(c)
-    return {"status": "completed", "content": "".join(parts)}
+                pass
+    if timed_out:
+        content = _structured_content(parts, structured, output_schema)
+        return {"status": "timeout", "content": content,
+                "error": f"research stream exceeded {timeout:.0f}s deadline"}
+    content = _structured_content(parts, structured, output_schema)
+    return {"status": "completed", "content": content}
+
+
+def _structured_content(parts: list[str], structured: list[Any], output_schema: dict | None) -> Any:
+    """组装流式 content：结构化输出优先返回对象；字符串片段整体尝试 JSON 解析。"""
+    if output_schema is None:
+        return "".join(parts)
+    if structured:
+        return structured[-1]
+    joined = "".join(parts)
+    try:
+        return json.loads(joined)
+    except Exception:  # noqa: BLE001
+        return joined
 
 
 def _wrap_bearer_auth(inner_app: Any, token: str):

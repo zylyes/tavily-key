@@ -42,9 +42,15 @@ DEFAULTS: dict = {
     "usage_cache_ttl": 60,       # /usage 同步结果缓存 TTL（秒）
     # ── 异常识别阈值 ──────────────────────────────────────────
     "anomaly_thresholds": {},    # error_rate / leak_diff_credits / stale_days / slow_ratio
+    "log_retention_days": 90,    # request_log 保留天数（0 = 不清理，防无界增长）
+    # ── 异常通知 ──────────────────────────────────────────────
+    "notify_webhook": "",          # 异常 Webhook URL（钉钉/企业微信/Server酱等，留空不推送）
+    "notify_tray": True,           # 异常时是否显示 Windows 托盘气泡
+    "notify_interval_minutes": 5,  # 异常检测后台周期（分钟）
     # ── MCP 默认参数与会话归属 ────────────────────────────────
     "mcp_default_parameters": {},  # 对 search 类请求注入的默认参数（对齐官方 DEFAULT_PARAMETERS）
     "mcp_human_id": "",          # 可选：转发 X-Human-Id 头，便于 Tavily 侧会话分析
+    "mcp_project_id": "",        # 可选：转发 X-Project-ID 头，按项目归类用量
 }
 
 MODE_DEFAULTS: dict = {
@@ -111,14 +117,15 @@ def save(patch: dict) -> dict:
     return dict(cfg)
 
 
-_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl")
+_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes")
 _BOOL_FIELDS = (
     "autostart", "start_to_tray", "close_to_tray", "minimize_to_tray",
-    "mcp_auto_start",
+    "mcp_auto_start", "notify_tray",
 )
 _STR_FIELDS = (
     "mode", "domain", "host", "auth_token",
-    "mcp_transport", "mcp_host", "mcp_token", "mcp_human_id",
+    "mcp_transport", "mcp_host", "mcp_token", "mcp_human_id", "mcp_project_id",
+    "notify_webhook",
 )
 # 以 JSON 对象存储的字段：接受 dict 或 JSON 字符串
 _DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters")
@@ -185,6 +192,45 @@ def lan_ip() -> str:
         return ip
     except Exception:
         return "127.0.0.1"
+
+
+def lan_hostname() -> str:
+    """获取本机主机名（用于 .local / NetBIOS 局域网地址，切换网络不变）。"""
+    try:
+        hn = socket.gethostname().strip()
+        if hn and hn.lower() not in ("localhost", "localhost.localdomain"):
+            return hn
+    except Exception:
+        pass
+    return ""
+
+
+def mcp_urls(cfg: dict | None = None) -> dict:
+    """返回 MCP 服务可用的访问地址集合（仅网络模式）。
+
+    返回 dict（stdio 返回空 dict）：
+      - ip             : 局域网 IP 地址（随网络变化）
+      - hostname       : 裸主机名（Windows 局域网 NetBIOS 解析）
+      - hostname_local : 主机名 .local（mDNS，macOS/Linux 可解析）
+      - local          : 127.0.0.1（仅本机，不依赖网络）
+    """
+    cfg = cfg or get_settings()
+    transport = (cfg.get("mcp_transport") or "sse").strip().lower()
+    if transport == "stdio":
+        return {}
+    port = int(cfg.get("mcp_port", 8001))
+    path = "/mcp" if transport == "streamable-http" else "/sse"
+    host = (cfg.get("mcp_host") or "0.0.0.0").strip()
+    urls: dict = {"local": f"http://127.0.0.1:{port}{path}"}
+    if host in ("0.0.0.0", "::"):
+        urls["ip"] = f"http://{lan_ip()}:{port}{path}"
+        hn = lan_hostname()
+        if hn:
+            urls["hostname"] = f"http://{hn}:{port}{path}"
+            urls["hostname_local"] = f"http://{hn}.local:{port}{path}"
+    elif host not in ("127.0.0.1", "localhost"):
+        urls["ip"] = f"http://{host}:{port}{path}"
+    return urls
 
 
 def _display_host(host: str) -> str:

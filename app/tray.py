@@ -121,10 +121,16 @@ WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
 
 NIM_ADD = 0x00000000
+NIM_MODIFY = 0x00000001
 NIM_DELETE = 0x00000002
 NIF_MESSAGE = 0x00000001
 NIF_ICON = 0x00000002
 NIF_TIP = 0x00000004
+NIF_INFO = 0x00000010
+NIIF_NONE = 0x00000000
+NIIF_INFO = 0x00000001
+NIIF_WARNING = 0x00000002
+NIIF_ERROR = 0x00000003
 IMAGE_ICON = 1
 LR_LOADFROMFILE = 0x00000010
 
@@ -180,6 +186,27 @@ class TrayIcon:
         if t is not threading.current_thread():
             t.join(timeout=2)
         self._thread = None
+
+    def notify(self, title: str, message: str, icon: int = NIIF_INFO) -> None:
+        """显示托盘气泡通知（NIF_INFO 气球提示）。未运行/非 Windows 时为空操作。
+
+        icon: NIIF_NONE / NIIF_INFO / NIIF_WARNING / NIIF_ERROR。
+        可从任意线程调用（Shell_NotifyIconW 本身线程安全）。
+        """
+        if os.name != "nt" or self._nid is None or not self._hwnd:
+            return
+        try:
+            nid = NOTIFYICONDATAW()
+            nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
+            nid.hWnd = self._hwnd
+            nid.uID = 1
+            nid.uFlags = NIF_INFO
+            nid.szInfoTitle = str(title)[:63]
+            nid.szInfo = str(message)[:255]
+            nid.dwInfoFlags = icon
+            _shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
+        except Exception:  # noqa: BLE001
+            pass
 
     # ── 内部实现 ─────────────────────────────────────────────
     def _run(self) -> None:

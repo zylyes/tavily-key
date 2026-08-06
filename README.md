@@ -4,10 +4,12 @@
 
 ## 功能特性
 
-- **Key 池管理**：批量导入、自动轮询（round-robin / least-used）、健康检查自动停用失效 Key
-- **用量追踪**：请求数、错误数、积分消耗、日志
-- **Web 控制台**：Key 列表、请求日志、健康检查、用量统计、部署设置
-- **MCP 服务一体化管理**：面板内置 MCP 服务开关/设置，支持局域网访问，地址自动复制
+- **Key 池管理**：批量导入、自动轮询（round-robin / least-used）、健康检查自动停用失效 Key、额度耗尽自动切换
+- **用量追踪**：请求数、错误数、积分消耗、请求日志、官方用量同步对账、用量趋势图
+- **Key 异常识别**：自动识别额度耗尽/疑似泄露/高错误率等 6 类异常，Webhook / 托盘气泡通知
+- **Web 控制台**：Key 列表、请求日志（筛选/导出）、统计、Research 任务看板、健康检查、部署设置
+- **MCP 服务一体化管理**：面板内置 MCP 服务开关/设置（sse / streamable-http / stdio），局域网 IP / 主机名 / 本机三种地址展示与复制
+- **Research 增强**：异步任务（wait / status）、流式输出、结构化输出（output_schema）、报告长度与来源数控制
 - **访问鉴权**：可设置访问令牌，保护公网部署下的 `/api/*` 接口
 - **两套部署形态**：同一代码库，通过 `data/config.json` 切换
   - **Linux Server 版**：云服务器 + 域名对外服务（systemd + Nginx 反向代理）
@@ -81,18 +83,18 @@ scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard
 (cd app && uvicorn dashboard:app --host 0.0.0.0 --port 8000)
 ```
 
-界面显示：key 列表、请求日志、健康检查、用量统计、**MCP 服务**、**设置**。
+界面显示：key 列表、请求日志、**统计**、**Research 任务**、MCP 服务、**设置**。
 
 ## MCP 服务管理（供 AI Agent 调用）
 
-对外提供 tavily-search/extract/crawl/map/research 等工具，自动轮询 key。
+对外提供 tavily-search/extract/crawl/map/research/research_status/pool_status 等工具，自动轮询 key。
 
 **Windows 打包版（推荐）**：双击 `out\dist\Tavily\Tavily.exe` 打开**原生应用窗口**（内置面板，WebView2 网页套壳）→ 顶部「**MCP 服务**」标签页：
 
 - **启动 / 停止开关**：一键启停 MCP 服务（SSE / Streamable HTTP 网络模式）
-- **地址自动复制**：服务启动后自动复制并显示服务地址（局域网内其他设备用同一地址连接）
+- **地址自动复制**：服务启动后自动复制并显示服务地址（局域网 IP / 主机名 / 本机三种地址，切换网络后主机名地址不变）
 - **随软件启动**：开启后，软件启动时自动拉起 MCP 服务；关闭软件时自动停止
-- **可设置项**：传输方式（sse / streamable-http / stdio）、监听地址、端口
+- **可设置项**：传输方式（sse / streamable-http / stdio）、监听地址、端口、项目/会话归属 ID
 - 默认监听 `0.0.0.0:8001`，**局域网内设备可直接访问**
 
 **Linux / macOS 独立进程**：
@@ -130,6 +132,7 @@ Web 控制台右上角「**设置**」标签页可配置：
 | 传输方式 | `sse` / `streamable-http`（局域网，可由面板启停）/ `stdio`（本机直连） |
 | 监听地址 | `0.0.0.0`（局域网） / `127.0.0.1`（仅本机） |
 | 端口 | MCP 服务端口（默认 8001） |
+| 项目/会话归属 ID | 可选，转发 `X-Project-ID` / `X-Human-Id` 头，便于 Tavily 侧按项目归类用量与会话分析 |
 
 等价地可手动编辑 `data/config.json`：
 
@@ -143,10 +146,17 @@ Web 控制台右上角「**设置**」标签页可配置：
   "mcp_auto_start": false,
   "mcp_transport": "sse",
   "mcp_host": "0.0.0.0",
-  "mcp_port": 8001
+  "mcp_port": 8001,
+  "mcp_human_id": "",
+  "mcp_project_id": "",
+  "log_retention_days": 90,
+  "notify_webhook": "",
+  "notify_tray": true,
+  "notify_interval_minutes": 5
 }
 ```
 
+> 首次启动自动生成完整默认配置；以上为常用项示例，更多配置（限流、异常阈值、MCP 默认参数等）见 `data/config.json` 自动生成内容。
 > 修改 `host`/`port` 需重启服务生效；`mode`/`domain`/`auth_token` 即时生效。
 > MCP 服务的传输方式/端口修改后，需在「MCP 服务」页点击「启动服务」（或重启软件）生效。
 
@@ -163,6 +173,8 @@ Web 控制台右上角「**设置**」标签页可配置：
 python app/cli.py list                    # 列出所有 key
 python app/cli.py list --active           # 仅活跃 key
 python app/cli.py stats                   # 用量统计
+python app/cli.py usage --sync            # 同步/查看官方用量
+python app/cli.py audit                   # 列出异常 key
 python app/cli.py health                  # 健康检查，自动停用失效 key
 python app/cli.py recent -n 20            # 最近 20 条请求日志
 python app/cli.py activate tvly-xxx****yyy  # 启用 key
@@ -174,8 +186,8 @@ python app/cli.py remove tvly-xxx****yyy      # 删除 key
 
 SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 
-- `api_keys` — key 列表、用量、状态
-- `request_log` — 请求日志
+- `api_keys` — key 列表、用量、状态（含官方套餐/用量同步、耗尽标记、异常计数）
+- `request_log` — 请求日志（含 request_id、积分来源 usage_source）
 
 删除该文件不影响功能，下次启动自动重建空库。
 
@@ -190,6 +202,7 @@ SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 | --- | --- |
 | `data/config.json` | 部署 + MCP 设置（mode/domain/host/port/auth_token/mcp_*），首次启动自动生成 |
 | `app/settings.py` | 配置读写模块（含局域网地址推导） |
+| `app/notify.py` | 异常通知（Webhook / Windows 托盘气泡，去重节流） |
 | `app/mcp_manager.py` | MCP 服务子进程管理（面板启停、端口检测） |
 | `app/mcp_server.py` | MCP 服务本体（sse / streamable-http / stdio） |
 | `deploy/linux-server/` | Linux Server 版部署包（systemd + Nginx） |

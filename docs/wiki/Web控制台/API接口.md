@@ -66,6 +66,10 @@ API 端点的设计遵循以下约定：
 | POST | `/api/health/one` | `{"masked": "..."}` | 对单个 Key 执行健康检查（供面板逐个进度展示） |
 | GET | `/api/keys/anomalies` | 无 | 识别异常 Key（耗尽/近耗尽/疑似泄露/高错误率/静默/慢） |
 | GET | `/api/usage/aggregate` | 无 | 全池聚合容量（剩余总积分、已用总积分、可用 Key 数） |
+| GET | `/api/usage/trend` | 无 | 按天聚合用量趋势（`days` 1-90，默认 7；本地时区） |
+| GET | `/api/research/tasks` | 无 | Research 任务看板：最近提交的异步任务与状态（TTL 缓存 + 查询上限） |
+| GET | `/api/logs` | 无 | 筛选请求日志（`endpoint`/`key`/`status`/`days`/`limit`/`offset`，分页） |
+| GET | `/api/logs/export.csv` | 无 | 按当前筛选导出请求日志为 CSV |
 | POST | `/api/keys/usage-sync` | 无 | 从 Tavily 官方 `/usage` 同步所有 active Key 的真实用量 |
 | POST | `/api/keys/usage-sync/one` | `{"masked": "..."}` | 更新单个 Key 的官方用量（供面板逐个进度展示） |
 | GET | `/api/settings` | 无 | 读取当前部署设置（mode/domain/host/port/auth_token 等） |
@@ -467,6 +471,65 @@ Key 不存在时 `result.error = "key not found"`，Key 已停用时 `result.ski
 
 对应 `KeyPool.get_aggregate()`：`total_limit` 为各 Key 官方额度（单 Key 无限额时回退账户套餐额度）之和，`remaining = max(0, total_limit - total_used)`，`usage_pct` 为全池用量占比。
 
+### GET /api/usage/trend
+
+按天聚合用量趋势（`days` 1-90，默认 7），按**本地时区**（`date(created_at,'unixepoch','localtime')`）分组并补齐无请求的日期：
+
+```json
+{
+  "ok": true,
+  "trend": {
+    "days": 7,
+    "points": [
+      {"date": "2026-08-04", "requests": 0, "success": 0, "failed": 0, "credits": 0, "endpoints": {}},
+      {"date": "2026-08-05", "requests": 5, "success": 5, "failed": 0, "credits": 1,
+       "endpoints": {"search": 1, "research": 3, "research-status": 1}}
+    ]
+  }
+}
+```
+
+对应 `KeyPool.get_usage_trend(days)`。面板「API Key 列表」顶部趋势卡片即调用此接口（轻量 SVG 柱状图，无外部依赖）。
+
+### GET /api/research/tasks
+
+Research 任务看板：列出最近提交的异步任务（`wait=false`）与状态，复用按 key 隔离的状态查询，带 TTL 缓存（非终态 30s / 终态 300s）与单次查询上限（15 个），避免逐个调 `get_research` 烧官方限流预算：
+
+```json
+{
+  "ok": true,
+  "tasks": [
+    {"request_id": "a03544da-...", "masked": "tvly-dev-4YY****0590",
+     "status": "completed", "content": "...", "cached": true}
+  ]
+}
+```
+
+对应 `mcp_server.list_research_tasks(limit)`。`status` 取值 `completed` / `submitted` / `running` / `failed` / `error` / `cancelled` / `unknown`（超查询上限或缓存未刷新）。
+
+### GET /api/logs
+
+筛选请求日志，按时间倒序分页返回（每页 `limit` 条，默认 200）：
+
+| 查询参数 | 说明 |
+| --- | --- |
+| `endpoint` | 接口名精确匹配（如 `search`/`research`） |
+| `key` | Key 掩码精确匹配 |
+| `status` | `success` / `failed` / 空（全部） |
+| `days` | 近 N 天（0 = 全部时间） |
+| `limit` | 每页条数（默认 200，上限 1000） |
+| `offset` | 分页偏移 |
+
+```json
+{"ok": true, "logs": [{...}], "total": 128, "limit": 200, "offset": 0}
+```
+
+对应 `KeyPool.query_logs(...)`。
+
+### GET /api/logs/export.csv
+
+按与 `/api/logs` 相同的筛选参数导出全部匹配日志为 CSV（`Content-Disposition: attachment`），列：`time, key_masked, endpoint, success, credits, latency_ms, request_id, usage_source, error`。前端以 fetch 携带鉴权头后 Blob 下载。
+
 ### POST /api/keys/usage-sync
 
 从 Tavily 官方 `/usage` 接口同步所有 active Key 的 billing cycle 真实用量（含套餐、单 Key 额度、research 用量等），并检测月度额度重置：已耗尽 Key 的用量归零/低于上限时自动恢复。请求体可为空，响应：
@@ -554,12 +617,18 @@ Key 不存在时 `result.error = "key not found"`，Key 已停用时 `result.ski
   "host": "0.0.0.0",
   "port": 8001,
   "url": "http://192.168.1.10:8001/sse",
+  "urls": {
+    "ip": "http://192.168.1.10:8001/sse",
+    "hostname": "http://ZYL:8001/sse",
+    "hostname_local": "http://ZYL.local:8001/sse",
+    "local": "http://127.0.0.1:8001/sse"
+  },
   "network": true,
   "auto_start": false
 }
 ```
 
-网络模式（sse / streamable-http）下 `running` 以端口监听为准；stdio 模式 `network` 为 `false`，无法由面板启停。
+网络模式（sse / streamable-http）下 `running` 以端口监听为准；stdio 模式 `network` 为 `false`，无法由面板启停。`url` 为局域网 IP 地址（兼容旧字段），`urls` 为地址集合：`ip`（随网络变化）、`hostname`（裸主机名，Windows 局域网 NetBIOS）、`hostname_local`（mDNS，切换网络不变，需客户端支持 `.local` 解析）、`local`（仅本机）。
 
 ### POST /api/mcp/start 与 /api/mcp/stop
 
@@ -587,6 +656,9 @@ Key 池相关的 API 端点都是对 `KeyPool` 方法的薄封装；设置、自
 | `POST /api/health/one` | `check_health(masked)` |
 | `GET /api/keys/anomalies` | `detect_anomalies()` |
 | `GET /api/usage/aggregate` | `get_aggregate()` |
+| `GET /api/usage/trend` | `get_usage_trend(days)` |
+| `GET /api/research/tasks` | `mcp_server.list_research_tasks(limit)` |
+| `GET /api/logs`、`GET /api/logs/export.csv` | `query_logs(...)` |
 | `POST /api/keys/usage-sync` | `sync_usage()` |
 | `POST /api/keys/usage-sync/one` | `sync_usage_one(masked)` |
 | `GET/POST /api/settings` | `settings` 模块读写 data/config.json（POST 经 `validate_patch` 校验） |

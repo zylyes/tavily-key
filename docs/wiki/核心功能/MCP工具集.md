@@ -77,7 +77,7 @@ graph LR
 | `start_date` | str | `""` | `YYYY-MM-DD` 格式，返回该日期之后的结果 |
 | `end_date` | str | `""` | `YYYY-MM-DD` 格式，返回该日期之前的结果 |
 | `max_results` | int | `5` | 返回结果数量，范围 0–20 |
-| `chunks_per_source` | int | `3` | 每个来源的最大内容块数（1–3），仅 `advanced` 深度生效 |
+| `chunks_per_source` | int | `3` | 每个来源的最大内容块数（1–3），适用于 `advanced`/`basic`/`fast` 深度（官方 2026-07 起 basic 同样返回 reranked chunks） |
 | `include_images` | bool | `False` | 结果中包含图片 |
 | `include_image_descriptions` | bool | `False` | 附带图片描述 |
 | `include_answer` | bool \| str | `False` | 生成 LLM 综合回答：`true`/`basic` 快速、`advanced` 更详细；字符串布尔（true/false/1/0/yes/no/on/off，任意大小写）自动归一化 |
@@ -316,8 +316,16 @@ AI 驱动的深度研究工具：自动收集来源、交叉分析，并生成�
 | `include_domains` | list[str] | `None` | 来源域名的软性偏好（最多 20 个） |
 | `exclude_domains` | list[str] | `None` | 硬性屏蔽的域名（最多 20 个） |
 | `wait` | bool | `True` | `True`：等待报告完成并返回最终报告；`False`：提交后立即返回 `request_id`，配合 `tavily_research_status` 查询 |
-| `timeout` | float | `300.0` | 等待报告的最大秒数 |
+| `timeout` | float | 按 model | 等待报告的最大秒数（总时长 deadline）。缺省按 `model` 计算：`mini`/`auto` 300s、`pro` 900s（对齐官方 mini 5min / pro 15min），显式传入优先 |
 | `poll_interval` | float | `2.0` | 状态轮询间隔（秒） |
+| `output_length` | str | `"standard"` | 报告长度：`short` / `standard` / `long`（v0.4.1） |
+| `output_schema` | dict | `None` | JSON Schema 结构化输出：`content` 返回对象而非 Markdown，AI Agent 直接消费无需解析报告（v0.4.1）。流式 delta 为对象时直接返回；传非 dict 返回友好错误 |
+| `max_sources` | int | `None` | 使用的来源数上限（3–10，越界返回友好错误） |
+| `max_subsources` | int | `None` | 每个来源的子来源数上限（1–8，越界返回友好错误） |
+
+> **会话 / 项目归属（v0.4.1）**：`config.json` 的 `mcp_human_id` / `mcp_project_id`（可选，面板「MCP 服务」设置页可配）经 SDK 原生参数转发 `X-Human-Id` / `X-Project-ID` 头，便于 Tavily 侧会话分析与按项目归类用量；留空则不发送。
+
+> **流式超时（v0.4.0）**：`wait=true` 主路径走官方强制流式（`stream=true`）。三段式超时对齐官方 tavily-mcp——连接/头部 30s、单 chunk 读超时放宽到 300s（容忍报告生成阶段数分钟静默期）、整体 deadline 受 `timeout` 约束；流中途超时/读异常返回部分内容（`status=timeout/error`）并**不回退**重新提交（防重复任务双倍消耗），仅提交阶段失败才回退「提交 + 轮询」。
 
 > **任务状态查询**：`wait=false` 提交后可用 `tavily_research_status(request_id)` 查询任务状态与结果。任务与提交时的 key 绑定（Tavily 任务按 key 隔离），状态查询优先使用同一 key，该 key 失效/耗尽时才回退轮询；key 映射持久化于 `data/research_keys.json`，MCP 服务重启后仍可查询。
 

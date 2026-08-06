@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -38,12 +39,38 @@ async def lifespan(app: FastAPI):
                 pass
 
         threading.Thread(target=_safe_start_mcp, daemon=True).start()
+    # 异常通知后台循环（Webhook / 托盘气泡，去重节流见 notify.check_and_notify）
+    notify_stop = threading.Event()
+    notify_thread = threading.Thread(
+        target=_anomaly_notify_loop, args=(notify_stop,), daemon=True, name="tavily-notify"
+    )
+    notify_thread.start()
     yield
+    notify_stop.set()
     # 关闭：停止由本软件管理的 MCP 服务
     try:
         mcp_manager.stop()
     except Exception:
         pass
+
+
+# ── 异常通知后台循环（Webhook / 托盘气泡）─────────────────────
+# run_app 创建托盘后写入，供通知线程读取（server/无托盘模式为 None）
+_TRAY = {"icon": None}
+
+
+def _anomaly_notify_loop(stop_event: threading.Event) -> None:
+    """周期检测异常并通知（首次约 30s 后检查，此后按 notify_interval_minutes）。"""
+    from notify import check_and_notify
+
+    interval = max(int(get_settings().get("notify_interval_minutes", 5)), 1) * 60
+    first = True
+    while not stop_event.wait(30 if first else interval):
+        first = False
+        try:
+            check_and_notify(pool, tray=_TRAY.get("icon"))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 app = FastAPI(title="Tavily Key Pool Dashboard", lifespan=lifespan)
@@ -193,6 +220,59 @@ def api_keys_anomalies():
 def api_usage_aggregate():
     """全池聚合容量：剩余总积分、已用总积分、可用 key 数。"""
     return {"ok": True, "aggregate": pool.get_aggregate()}
+
+
+@app.get("/api/usage/trend")
+def api_usage_trend(days: int = 7):
+    """按天聚合用量趋势（本地时区），days 1-90。"""
+    days = max(1, min(int(days), 90))
+    return {"ok": True, "trend": pool.get_usage_trend(days)}
+
+
+@app.get("/api/research/tasks")
+def api_research_tasks(limit: int = 50):
+    """Research 任务看板：最近提交的异步任务与状态（带 TTL 缓存与查询上限）。"""
+    from mcp_server import list_research_tasks
+    return {"ok": True, "tasks": list_research_tasks(limit=max(1, min(int(limit), 200)))}
+
+
+@app.get("/api/logs")
+def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
+             limit: int = 200, offset: int = 0):
+    """筛选请求日志（endpoint/key/状态/时间范围），分页返回。"""
+    since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
+    rows, total = pool.query_logs(
+        endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
+        since=since, limit=max(1, min(int(limit), 1000)), offset=max(0, int(offset)),
+    )
+    return {"ok": True, "logs": rows, "total": total, "limit": int(limit), "offset": max(0, int(offset))}
+
+
+@app.get("/api/logs/export.csv")
+def api_logs_export(endpoint: str = "", key: str = "", status: str = "", days: int = 0):
+    """按当前筛选导出请求日志为 CSV。"""
+    import csv
+    import io
+
+    since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
+    rows, _ = pool.query_logs(
+        endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
+        since=since, limit=100000,
+    )
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["time", "key_masked", "endpoint", "success", "credits", "latency_ms", "request_id", "usage_source", "error"])
+    for r in rows:
+        w.writerow([
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"])),
+            r["key_masked"], r["endpoint"], r["success"], r["credits_consumed"],
+            round(r["latency_ms"], 1), r["request_id"], r["usage_source"], r["error_msg"],
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=request_log.csv"},
+    )
 
 
 @app.post("/api/keys/usage-sync")
@@ -737,6 +817,7 @@ def run_app() -> None:
             # 「关闭/最小化/启动时进托盘」设置由 _WindowApi 与 shown 事件消费
             tray_icon = TrayIcon(_window_icon_path(), on_show=_tray_show, on_exit=_tray_exit)
             tray_icon.start()
+            _TRAY["icon"] = tray_icon
             # 创建时即传入居中坐标（pywebview 支持 x/y，避免依赖 shown 事件时序）
             _win_w, _win_h = 1280, 840
             _win_x, _win_y = _centered_pos(_win_w, _win_h)

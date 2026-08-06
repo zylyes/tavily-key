@@ -129,6 +129,12 @@ tbody tr:last-child td{border-bottom:none}
 .actions{display:flex;gap:6px}
 .status{font-size:11px;color:var(--text-2);max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* Research 任务页头部 */
+.task-pill{display:inline-flex;align-items:center;gap:5px;background:var(--bg-2);border:1px solid var(--border);border-radius:999px;padding:2px 10px;font-size:11px;font-weight:500;color:var(--text-2);margin-left:6px;white-space:nowrap}
+.task-pill b{color:var(--text);font-weight:700}
+.task-pill .dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.task-code{font-family:var(--mono);font-size:10px;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:#a5b4fc}
+
 .column-body::-webkit-scrollbar{width:8px;height:8px}
 .column-body::-webkit-scrollbar-track{background:transparent}
 .column-body::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:4px}
@@ -308,6 +314,10 @@ tr td:first-child,tr th:first-child{padding-left:16px}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="M16 7l3 3"/><path d="M12 11l2 2"/></svg>
       API Key 列表
     </button>
+    <button class="tab" data-tab="stats" onclick="switchTab('stats')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 14 4-4 4 3 5-6"/></svg>
+      统计
+    </button>
     <button class="tab" data-tab="logs" onclick="switchTab('logs')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4z"/><path d="M8 9h8"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
       请求日志
@@ -315,6 +325,10 @@ tr td:first-child,tr th:first-child{padding-left:16px}
     <button class="tab" data-tab="mcp" onclick="switchTab('mcp')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M12 14v3"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
       MCP 服务
+    </button>
+    <button class="tab" data-tab="tasks" onclick="switchTab('tasks')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+      Research 任务
     </button>
     <button class="tab" data-tab="settings" onclick="switchTab('settings')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -349,15 +363,85 @@ tr td:first-child,tr th:first-child{padding-left:16px}
     </div>
   </div>
 
+  <div class="tab-panel" id="panel-stats">
+    <div class="column">
+      <div class="column-body">
+        <div class="card" style="margin-bottom:12px">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h10"/></svg>
+            关键指标
+          </h3>
+          <div class="card-desc">Key 池与近 24 小时请求概览</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px;margin-top:10px" id="statsCards"></div>
+        </div>
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <h3 style="margin:0;display:flex;align-items:center;gap:8px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M3 3v18h18"/><path d="m7 14 4-4 4 3 5-6"/></svg>
+              用量趋势
+            </h3>
+            <select id="trendDays" onchange="loadStats()" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:3px 8px;font-size:11px">
+              <option value="7">近 7 天</option>
+              <option value="30">近 30 天</option>
+            </select>
+            <span style="flex:1"></span>
+            <span class="status" id="trendSummary" style="font-size:11px"></span>
+          </div>
+          <div class="card-desc">按天聚合请求数（绿=成功 / 红=失败），悬停柱子查看明细</div>
+          <div id="trendChart" style="margin-top:8px"></div>
+        </div>
+        <div class="card" style="margin-bottom:12px">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>
+            接口分布（近 24 小时）
+          </h3>
+          <div class="card-desc">各接口请求成功 / 失败数量</div>
+          <div id="endpointChart" style="margin-top:8px"></div>
+        </div>
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+            积分消耗
+          </h3>
+          <div class="card-desc">按天累计积分（响应含 usage 的接口）</div>
+          <div id="creditsChart" style="margin-top:8px"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="tab-panel" id="panel-logs">
     <div class="column">
       <div class="column-body">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+          <input id="logEndpoint" type="text" placeholder="接口（search/research/...）" style="width:130px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 10px;font-size:12px">
+          <input id="logKey" type="text" placeholder="Key 掩码" style="width:130px;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 10px;font-size:12px">
+          <select id="logStatus" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 8px;font-size:12px">
+            <option value="">全部状态</option>
+            <option value="success">成功</option>
+            <option value="failed">失败</option>
+          </select>
+          <select id="logDays" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text);padding:6px 8px;font-size:12px">
+            <option value="0">全部时间</option>
+            <option value="1">近 1 天</option>
+            <option value="7">近 7 天</option>
+            <option value="30">近 30 天</option>
+          </select>
+          <button class="btn btn-sm btn-primary" onclick="applyLogFilters()">筛选</button>
+          <button class="btn btn-sm btn-ghost" onclick="exportLogs()">导出 CSV</button>
+          <span class="status" style="margin-left:auto" id="logCount"></span>
+        </div>
         <table>
           <thead>
             <tr><th>时间</th><th>Key</th><th>接口</th><th>状态</th><th>积分</th><th>延迟</th><th>请求ID</th><th>错误</th></tr>
           </thead>
           <tbody id="logTableBody"></tbody>
         </table>
+        <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+          <button class="btn btn-sm btn-ghost" onclick="logPage(-1)">上一页</button>
+          <button class="btn btn-sm btn-ghost" onclick="logPage(1)">下一页</button>
+          <span class="status" id="logPageInfo"></span>
+        </div>
       </div>
     </div>
   </div>
@@ -380,10 +464,31 @@ tr td:first-child,tr th:first-child{padding-left:16px}
           </div>
           <div id="mcpUrlRow" style="margin-top:16px;display:none">
             <label style="font-size:11px;color:var(--text-2);display:block;margin-bottom:6px">服务地址（供 AI 客户端 / 局域网设备连接）</label>
-            <div style="display:flex;gap:8px;align-items:center">
-              <input id="mcpUrl" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
-              <button class="btn btn-sm btn-primary" onclick="copyMcpUrl()">复制地址</button>
+            <div id="mcpUrlIpRow" style="margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="font-size:11px;color:var(--text-2);width:96px;flex:none">局域网 IP 地址</span>
+                <input id="mcpUrlIp" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+                <button class="btn btn-sm btn-primary" onclick="copyMcpUrl('mcpUrlIp')">复制</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:2px;padding-left:104px">切换网络后可能变化</div>
             </div>
+            <div id="mcpUrlHostRow" style="margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="font-size:11px;color:var(--text-2);width:96px;flex:none">主机名地址</span>
+                <input id="mcpUrlHost" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+                <button class="btn btn-sm btn-primary" onclick="copyMcpUrl('mcpUrlHost')">复制</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:2px;padding-left:104px">切换网络不变（mDNS，客户端需支持 .local 解析）</div>
+            </div>
+            <div id="mcpUrlLocalRow" style="margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="font-size:11px;color:var(--text-2);width:96px;flex:none">本机地址</span>
+                <input id="mcpUrlLocal" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+                <button class="btn btn-sm btn-primary" onclick="copyMcpUrl('mcpUrlLocal')">复制</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:2px;padding-left:104px">仅本机可用，不依赖网络</div>
+            </div>
+            <div id="mcpUrlNote" style="margin-top:8px;font-size:11px;color:var(--text-3);line-height:1.7"></div>
           </div>
           <div id="mcpHint" style="margin-top:10px;font-size:11px;color:var(--text-2);line-height:1.7"></div>
         </div>
@@ -421,12 +526,53 @@ tr td:first-child,tr th:first-child{padding-left:16px}
             <label>访问令牌（留空则不鉴权）</label>
             <input id="setMcpToken" type="password" placeholder="非空时客户端需带 Authorization: Bearer <token> 请求头">
           </div>
+          <div class="setting-row">
+            <label>项目归属 ID（可选）</label>
+            <input id="setMcpProjectId" type="text" placeholder="转发 X-Project-ID 头，按项目归类用量">
+          </div>
+          <div class="setting-row">
+            <label>会话归属 ID（可选）</label>
+            <input id="setMcpHumanId" type="text" placeholder="转发 X-Human-Id 头，便于 Tavily 侧会话分析">
+          </div>
           <div class="setting-actions">
             <button class="btn btn-primary" onclick="saveMcpSettings()">保存设置</button>
             <span class="status" id="mcpSettingsStatus"></span>
           </div>
           <div class="setting-hint" id="mcpHint2"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-tasks">
+    <div class="column">
+      <div class="column-body">
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+            <div style="width:38px;height:38px;border-radius:10px;background:rgba(99,102,241,.14);display:flex;align-items:center;justify-content:center;color:var(--accent);flex-shrink:0">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:14px;font-weight:700;display:flex;align-items:center;flex-wrap:wrap">
+                Research 任务
+                <span class="task-pill" id="tasksSummary"></span>
+              </div>
+              <div style="font-size:11px;color:var(--text-3);margin-top:3px;line-height:1.7">
+                <code class="task-code">wait=false</code> 提交的异步研究任务 · 查询带缓存，刷新频率受官方限流保护
+              </div>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="loadTasks()">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              刷新
+            </button>
+          </div>
+        </div>
+        <table style="table-layout:fixed">
+          <thead>
+            <tr><th style="width:32%">request_id</th><th style="width:26%">Key</th><th style="width:12%">状态</th><th style="width:30%">详情</th></tr>
+          </thead>
+          <tbody id="taskTableBody"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -618,11 +764,16 @@ function fmtCredits(l) {
 function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.getElementById('panel-keys').classList.toggle('active', name === 'keys');
+  document.getElementById('panel-stats').classList.toggle('active', name === 'stats');
   document.getElementById('panel-logs').classList.toggle('active', name === 'logs');
   document.getElementById('panel-mcp').classList.toggle('active', name === 'mcp');
   document.getElementById('panel-settings').classList.toggle('active', name === 'settings');
+  document.getElementById('panel-tasks').classList.toggle('active', name === 'tasks');
   if (name === 'settings') loadSettings();
   if (name === 'mcp') { loadMcp(); loadMcpSettings(); }
+  if (name === 'stats') loadStats();
+  if (name === 'logs') loadLogs();
+  if (name === 'tasks') loadTasks();
 }
 
 async function load() {
@@ -690,13 +841,212 @@ async function load() {
         </td>`;
       keyTbody.appendChild(tr);
     }
+  } catch(e) { console.error(e); }
+}
 
-    const logTbody = document.getElementById('logTableBody');
-    logTbody.innerHTML = '';
-    if (!d.logs || d.logs.length === 0) {
-      logTbody.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无请求日志</td></tr>';
+// ── 用量趋势（轻量 SVG，无外部依赖） ────────────────────────
+function niceCeil(n) {
+  if (n <= 5) return 5;
+  const mag = Math.pow(10, Math.floor(Math.log10(n)));
+  for (const m of [1,2,5,10]) if (n <= m*mag) return m*mag;
+  return Math.ceil(n);
+}
+async function loadStats() {
+  const days = document.getElementById('trendDays').value;
+  try {
+    const [s, t] = await Promise.all([
+      api('/api/stats'),
+      api('/api/usage/trend?days=' + days),
+    ]);
+    renderStatsCards(s);
+    renderTrend(t.trend || {});
+    renderEndpointBar(s.recent_24h || {});
+    renderCredits((t.trend || {}).points || []);
+  } catch(e) { console.error(e); }
+}
+function renderStatsCards(d) {
+  const el = document.getElementById('statsCards');
+  const r24 = Object.values(d.recent_24h || {}).reduce((a,e)=>({s:a.s+e.success, f:a.f+e.failed}), {s:0,f:0});
+  const total = r24.s + r24.f;
+  const rate = total ? (r24.s/total*100).toFixed(1)+'%' : '-';
+  const agg = d.aggregate || {};
+  const cards = [
+    {label:'总请求', value:d.total_requests},
+    {label:'近24h 成功', value:r24.s},
+    {label:'近24h 失败', value:r24.f},
+    {label:'近24h 成功率', value:rate},
+    {label:'总积分', value:d.total_credits},
+    {label:'剩余积分', value:agg.remaining ?? '-'},
+    {label:'活跃 Key', value:`${d.active_keys}/${d.total_keys}`},
+  ];
+  el.innerHTML = cards.map(c => `
+    <div style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px">
+      <div style="font-size:11px;color:var(--text-2)">${c.label}</div>
+      <div style="font-size:20px;font-weight:700;margin-top:2px">${c.value}</div>
+    </div>`).join('');
+}
+function renderEndpointBar(ep) {
+  const el = document.getElementById('endpointChart');
+  const entries = Object.entries(ep || {});
+  if (!entries.length) { el.innerHTML = '<div style="color:var(--text-3);font-size:12px">近 24h 暂无请求</div>'; return; }
+  const max = Math.max(1, ...entries.map(([,v])=>v.success+v.failed));
+  const W = 720, rowH = 26;
+  const H = entries.length * rowH + 10;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">`;
+  entries.forEach(([epn, v], i) => {
+    const y = i * rowH + 6;
+    const total = v.success + v.failed;
+    const bw = (W-150) * total / max;
+    const okW = (W-150) * v.success / max;
+    const label = epn.length > 18 ? epn.slice(0,18)+'…' : epn;
+    svg += `<text x="140" y="${y+11}" text-anchor="end" font-size="11" fill="#94a3b8">${escapeHtml(label)}</text>`;
+    svg += `<rect x="150" y="${y}" width="${bw}" height="12" rx="2" fill="rgba(248,113,113,.85)"/>`;
+    svg += `<rect x="150" y="${y}" width="${okW}" height="12" rx="2" fill="#34d399"/>`;
+    svg += `<text x="${155+bw}" y="${y+10}" font-size="10" fill="#64748b">${total}</text>`;
+    svg += `<title>${escapeHtml(epn)}：成功 ${v.success} / 失败 ${v.failed}</title>`;
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+}
+function renderCredits(points) {
+  const el = document.getElementById('creditsChart');
+  if (!points.length) { el.innerHTML = '<div style="color:var(--text-3);font-size:12px">暂无积分数据</div>'; return; }
+  const max = Math.max(1, ...points.map(p=>p.credits));
+  const yMax = niceCeil(max);
+  const W = 720, H = 130, padL = 30, padB = 20;
+  const bw = (W - padL - 8) / points.length;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">`;
+  for (let g=0; g<=3; g++) {
+    const y = 6 + (H-6-padB) * g/3;
+    const v = Math.round(yMax * (1-g/3));
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="rgba(148,163,184,.15)" stroke-width="1"/>`;
+    svg += `<text x="${padL-5}" y="${y+3}" text-anchor="end" font-size="9" fill="#64748b">${v}</text>`;
+  }
+  points.forEach((p,i)=>{
+    const x = padL + i*bw;
+    const h = (H-6-padB) * p.credits / yMax;
+    const y = H-padB - h;
+    svg += `<rect x="${x+1}" y="${y}" width="${bw-2}" height="${h}" rx="2" fill="#38bdf8"/>`;
+    svg += `<title>${p.date}：${p.credits} 积分</title>`;
+    if (points.length <= 8 || i % Math.ceil(points.length/8) === 0) {
+      svg += `<text x="${x+bw/2}" y="${H-6}" text-anchor="middle" font-size="8.5" fill="#64748b">${p.date.slice(5)}</text>`;
     }
-    for (const l of d.logs||[]) {
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+}
+function renderTrend(t) {
+  const pts = t.points || [];
+  const el = document.getElementById('trendChart');
+  const summary = document.getElementById('trendSummary');
+  if (!pts.length) { el.innerHTML = ''; summary.textContent = ''; return; }
+  const totalReq = pts.reduce((s,p)=>s+p.requests,0);
+  const totalOk = pts.reduce((s,p)=>s+p.success,0);
+  const totalCredits = pts.reduce((s,p)=>s+p.credits,0);
+  summary.textContent = `${t.days} 天：请求 ${totalReq} · 成功 ${totalOk} · 积分 ${totalCredits}`;
+  const W = 760, H = 150, padL = 34, padR = 8, padT = 8, padB = 20;
+  const maxV = Math.max(1, ...pts.map(p=>p.requests));
+  const yMax = niceCeil(maxV);
+  const bw = (W - padL - padR) / Math.max(pts.length, 1);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto" xmlns="http://www.w3.org/2000/svg">`;
+  for (let g=0; g<=4; g++) {
+    const y = padT + (H-padT-padB) * g / 4;
+    const v = Math.round(yMax * (1 - g/4));
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="rgba(148,163,184,.15)" stroke-width="1"/>`;
+    svg += `<text x="${padL-6}" y="${y+3}" text-anchor="end" font-size="9" fill="#64748b">${v}</text>`;
+  }
+  pts.forEach((p,i)=>{
+    const x = padL + i*bw;
+    const bh = (H-padT-padB) * (p.requests/yMax);
+    const okH = (H-padT-padB) * (p.success/yMax);
+    const yFail = padT + (H-padT-padB) - bh;
+    const yOk = padT + (H-padT-padB) - okH;
+    const tip = `${p.date}：${p.requests} 请求（成功 ${p.success} / 失败 ${p.failed}），积分 ${p.credits}`;
+    svg += `<rect x="${x+1}" y="${yFail}" width="${bw-2}" height="${bh}" rx="2" fill="rgba(248,113,113,.85)"/>`;
+    svg += `<rect x="${x+1}" y="${yOk}" width="${bw-2}" height="${okH}" rx="2" fill="#34d399"/>`;
+    svg += `<title>${tip}</title>`;
+    if (pts.length <= 8 || i % Math.ceil(pts.length/8) === 0) {
+      svg += `<text x="${x+bw/2}" y="${H-6}" text-anchor="middle" font-size="8.5" fill="#64748b">${p.date.slice(5)}</text>`;
+    }
+  });
+  svg += '</svg>';
+  el.innerHTML = svg;
+}
+
+// ── Research 任务看板 ─────────────────────────────────────────
+async function loadTasks() {
+  const tbody = document.getElementById('taskTableBody');
+  const summary = document.getElementById('tasksSummary');
+  tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">加载中…</td></tr>';
+  try {
+    const d = await api('/api/research/tasks');
+    const tasks = d.tasks || [];
+    tbody.innerHTML = '';
+    if (!tasks.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">暂无 Research 任务（wait=false 提交后显示在这里）</td></tr>';
+      summary.innerHTML = '';
+      return;
+    }
+    const done = tasks.filter(t=>['completed','failed','error','cancelled'].includes(t.status)).length;
+    const dotColor = done > 0 && done === tasks.length ? '#34d399' : '#fbbf24';
+    summary.innerHTML = `<span class="dot" style="background:${dotColor}"></span>共 <b>${tasks.length}</b> · 已结束 <b>${done}</b>`;
+    const label = {completed:'完成', submitted:'进行中', running:'进行中', in_progress:'进行中', processing:'进行中', failed:'失败', error:'错误', cancelled:'已取消', unknown:'未知'};
+    for (const t of tasks) {
+      const cls = {completed:'badge-success', failed:'badge-fail', error:'badge-fail', cancelled:'badge-inactive', unknown:'badge-warn'}[t.status] || 'badge-active';
+      const stLabel = label[t.status] || t.status || '未知';
+      let detail = '';
+      if (t.status === 'completed') {
+        const c = t.content;
+        detail = typeof c === 'string' ? escapeHtml(c.substring(0,60)) : escapeHtml(JSON.stringify(c).substring(0,60));
+      } else if (t.error) {
+        detail = escapeHtml(String(t.error).substring(0,80));
+      } else if (t.status === 'unknown') {
+        detail = '缓存未刷新（点「刷新」后查询）';
+      }
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mono" style="font-size:10px;color:var(--text-3)">${escapeHtml(t.request_id)}</td>
+        <td class="mono" style="font-size:11px">${escapeHtml(t.masked)}</td>
+        <td><span class="badge ${cls}">${stLabel}</span></td>
+        <td style="font-size:11px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${detail}</td>`;
+      tbody.appendChild(tr);
+    }
+  } catch(e) {
+    console.error(e);
+    tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">加载失败：' + escapeHtml(String(e && e.message || e)) + '</td></tr>';
+    summary.innerHTML = '';
+  }
+}
+
+// ── 请求日志筛选 / 分页 / 导出 ────────────────────────────────
+const LOG_PAGE_SIZE = 200;
+let logOffset = 0;
+function logFilterQuery() {
+  const p = new URLSearchParams();
+  const ep = document.getElementById('logEndpoint').value.trim();
+  const key = document.getElementById('logKey').value.trim();
+  const st = document.getElementById('logStatus').value;
+  const days = document.getElementById('logDays').value;
+  if (ep) p.set('endpoint', ep);
+  if (key) p.set('key', key);
+  if (st) p.set('status', st);
+  if (days && days !== '0') p.set('days', days);
+  p.set('limit', LOG_PAGE_SIZE);
+  p.set('offset', logOffset);
+  return p.toString();
+}
+async function loadLogs() {
+  const tbody = document.getElementById('logTableBody');
+  try {
+    const d = await api('/api/logs?' + logFilterQuery());
+    document.getElementById('logCount').textContent = d.total ? `共 ${d.total} 条` : '';
+    document.getElementById('logPageInfo').textContent = d.total ? `第 ${Math.floor(d.offset/LOG_PAGE_SIZE)+1} 页 / 共 ${Math.max(1,Math.ceil(d.total/LOG_PAGE_SIZE))} 页` : '';
+    tbody.innerHTML = '';
+    if (!d.logs || d.logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">暂无匹配的请求日志</td></tr>';
+      return;
+    }
+    for (const l of d.logs) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-size:10px;color:var(--text-3)">${fmtTs(l.created_at)}</td>
@@ -706,9 +1056,38 @@ async function load() {
         <td>${fmtCredits(l)}</td>
         <td>${fmtLat(l.latency_ms)}</td>
         <td class="mono" style="font-size:10px;color:var(--text-3)">${escapeHtml(l.request_id||'')}</td>
-        <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
-      logTbody.appendChild(tr);
+        <td style="font-size:10px;color:#fca5a5;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml((l.error_msg||'').substring(0,80))}</td>`;
+      tbody.appendChild(tr);
     }
+  } catch(e) { console.error(e); }
+}
+function applyLogFilters() { logOffset = 0; loadLogs(); }
+function logPage(delta) {
+  const next = logOffset + delta * LOG_PAGE_SIZE;
+  if (next < 0) return;
+  logOffset = next;
+  loadLogs();
+}
+async function exportLogs() {
+  try {
+    const p = new URLSearchParams();
+    const ep = document.getElementById('logEndpoint').value.trim();
+    const key = document.getElementById('logKey').value.trim();
+    const st = document.getElementById('logStatus').value;
+    const days = document.getElementById('logDays').value;
+    if (ep) p.set('endpoint', ep);
+    if (key) p.set('key', key);
+    if (st) p.set('status', st);
+    if (days && days !== '0') p.set('days', days);
+    const resp = await fetch(BASE + '/api/logs/export.csv?' + p.toString(), { headers: authToken ? {'X-Auth-Token': authToken} : {} });
+    if (resp.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    if (!resp.ok) throw new Error('export failed');
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'request_log.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
   } catch(e) { console.error(e); }
 }
 
@@ -1061,7 +1440,11 @@ async function loadMcp() {
     const badge = document.getElementById('mcpStatusBadge');
     const btn = document.getElementById('mcpToggleBtn');
     const urlRow = document.getElementById('mcpUrlRow');
-    const urlInput = document.getElementById('mcpUrl');
+    const urls = d.urls || {};
+    const ipRow = document.getElementById('mcpUrlIpRow');
+    const hostRow = document.getElementById('mcpUrlHostRow');
+    const localRow = document.getElementById('mcpUrlLocalRow');
+    const urlNote = document.getElementById('mcpUrlNote');
     const pidEl = document.getElementById('mcpPid');
     const hint = document.getElementById('mcpHint');
 
@@ -1074,7 +1457,17 @@ async function loadMcp() {
         btn.className = 'btn btn-danger';
         btn.disabled = false;
         pidEl.textContent = 'PID: ' + (d.pid || '-');
-        urlInput.value = d.url || '';
+        if (urls.ip) { ipRow.style.display = 'block'; document.getElementById('mcpUrlIp').value = urls.ip; } else { ipRow.style.display = 'none'; }
+        if (urls.hostname_local) { hostRow.style.display = 'block'; document.getElementById('mcpUrlHost').value = urls.hostname_local; } else { hostRow.style.display = 'none'; }
+        if (urls.local) { localRow.style.display = 'block'; document.getElementById('mcpUrlLocal').value = urls.local; } else { localRow.style.display = 'none'; }
+        if (urls.hostname_local) {
+          urlNote.textContent = '💡 切换网络后 IP 会变化，建议 AI 客户端配置使用「主机名地址」则无需改动；' +
+            'Windows 设备也可用裸主机名形式；本机使用 127.0.0.1 最稳定（仅本机）。';
+        } else if (urls.local) {
+          urlNote.textContent = '当前监听 127.0.0.1（仅本机），局域网设备无法访问；如需局域网访问，请把监听地址改为 0.0.0.0。';
+        } else {
+          urlNote.textContent = '';
+        }
         const authNote = mcpTokenSet ? '（已启用访问令牌：客户端需携带 Authorization: Bearer <token> 请求头）' : '';
         hint.textContent = '将上方地址填入 AI 客户端的 MCP 服务器配置即可（局域网内设备使用同一地址连接）。' + authNote;
       } else {
@@ -1118,8 +1511,8 @@ async function toggleMcp() {
   loadMcp();
 }
 
-async function copyMcpUrl() {
-  copyText(document.getElementById('mcpUrl').value);
+async function copyMcpUrl(id) {
+  copyText(document.getElementById(id).value);
   if (mcpTokenSet) toast('地址已复制（该服务启用了 Bearer 访问令牌）', 'info');
 }
 
@@ -1132,6 +1525,8 @@ async function loadMcpSettings() {
     document.getElementById('setMcpHost').value = s.mcp_host || '0.0.0.0';
     document.getElementById('setMcpPort').value = s.mcp_port || 8001;
     document.getElementById('setMcpToken').value = s.mcp_token || '';
+    document.getElementById('setMcpProjectId').value = s.mcp_project_id || '';
+    document.getElementById('setMcpHumanId').value = s.mcp_human_id || '';
     mcpTokenSet = !!(s.mcp_token);
   } catch(e) { console.error(e); }
 }
@@ -1143,6 +1538,8 @@ async function saveMcpSettings() {
     mcp_host: document.getElementById('setMcpHost').value.trim(),
     mcp_port: parseInt(document.getElementById('setMcpPort').value, 10) || 8001,
     mcp_token: document.getElementById('setMcpToken').value.trim(),
+    mcp_project_id: document.getElementById('setMcpProjectId').value.trim(),
+    mcp_human_id: document.getElementById('setMcpHumanId').value.trim(),
   };
   mcpTokenSet = !!payload.mcp_token;
   const status = document.getElementById('mcpSettingsStatus');
@@ -1281,7 +1678,11 @@ async function autoCopyMcpUrl() {
 }
 
 load();
-setInterval(load, 10000);
+setInterval(() => {
+  load();
+  if (document.getElementById('panel-logs').classList.contains('active')) loadLogs();
+  if (document.getElementById('panel-stats').classList.contains('active')) loadStats();
+}, 10000);
 loadMcp();
 loadMcpSettings();
 autoCopyMcpUrl();
