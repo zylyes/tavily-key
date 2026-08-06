@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
-from tavily import TavilyClient
+from tavily import BadRequestError, TavilyClient
 
 from key_pool import KeyPool, _mask, _classify_error
 from logging_setup import get_logger
@@ -163,9 +163,25 @@ def _get_client() -> tuple[TavilyClient, str]:
 
 def _record(masked: str, endpoint: str, start: float, success: bool,
             credits: int = 0, error_msg: str = "", request_id: str = "",
-            usage_source: str = ""):
+            usage_source: str = "", is_client_error: bool = False):
     latency = (time.time() - start) * 1000
-    pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id, usage_source)
+    pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id, usage_source,
+                        1 if is_client_error else 0)
+
+
+def _is_client_error(e: Exception) -> bool:
+    """是否为客户端请求错误（HTTP 400/参数校验失败），与 Key/服务器健康无关。
+
+    依据异常类型/响应状态码判定（比消息字符串更可靠）：SDK 对 HTTP 400 抛
+    BadRequestError；401/403/429/432/433/5xx/超时/网络错误均视为服务器侧，计入错误率。
+    """
+    if isinstance(e, BadRequestError):
+        return True
+    resp = getattr(e, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 400:
+        return True
+    s = str(e).lower()
+    return "400 bad request" in s or "http 400" in s or "bad request" in s
 
 
 def _usage_credits(resp: Any) -> tuple[int, bool]:
@@ -275,7 +291,8 @@ def _run_with_retry(endpoint: str, fn) -> str:
             except Exception as e:  # noqa: BLE001
                 err = str(e)
                 _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
-                _record(masked, endpoint, t0, False, 0, err, usage_source="none")
+                _record(masked, endpoint, t0, False, 0, err, usage_source="none",
+                        is_client_error=_is_client_error(e))
                 cat = _classify_error(err)
                 last_err = err
                 ra = _retry_after(e)
@@ -693,7 +710,8 @@ def _research_impl(input: str, model: str, citation_format: str,
                     last = _research_stream(client, input, model, citation_format, timeout, kwargs, output_schema)
                 except Exception as e2:  # noqa: BLE001
                     _log.warning("research 流式回退失败 masked=%s: %s", masked, str(e2)[:300])
-                    _record(masked, "research", t0, False, 0, str(e2), usage_source="none")
+                    _record(masked, "research", t0, False, 0, str(e2), usage_source="none",
+                            is_client_error=_is_client_error(e2))
                     return json.dumps({"error": str(e2), "key_used": masked}, ensure_ascii=False)
                 if last.get("status") in ("timeout", "error"):
                     _record(masked, "research", t0, False, 0,
@@ -702,7 +720,8 @@ def _research_impl(input: str, model: str, citation_format: str,
                     _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
                 return json.dumps(last, ensure_ascii=False, indent=2)
             _log.warning("research 提交失败 masked=%s: %s", masked, err[:300])
-            _record(masked, "research", t0, False, 0, err, usage_source="none")
+            _record(masked, "research", t0, False, 0, err, usage_source="none",
+                    is_client_error=_is_client_error(e))
             return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
     if request_id is None:
         return json.dumps({"error": last_err, "key_used": masked}, ensure_ascii=False)
@@ -727,7 +746,8 @@ def _research_impl(input: str, model: str, citation_format: str,
         return json.dumps(last, ensure_ascii=False, indent=2)
     except Exception as e:  # noqa: BLE001
         _log.warning("research 轮询失败 masked=%s: %s", masked, str(e)[:300])
-        _record(masked, "research", t0, False, 0, str(e), request_id=request_id, usage_source="none")
+        _record(masked, "research", t0, False, 0, str(e), request_id=request_id, usage_source="none",
+                is_client_error=_is_client_error(e))
         return json.dumps({"error": str(e), "request_id": request_id, "key_used": masked},
                           ensure_ascii=False)
 
@@ -795,19 +815,29 @@ async def tavily_research_status(request_id: str) -> str:
             return json.dumps(resp, ensure_ascii=False, indent=2)
         except Exception as e:  # noqa: BLE001
             _log.warning("research-status 失败 masked=%s: %s", masked, str(e)[:300])
-            _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id, usage_source="none")
+            _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id, usage_source="none",
+                    is_client_error=_is_client_error(e))
             return json.dumps({"error": str(e), "request_id": request_id}, ensure_ascii=False)
 
     return await anyio.to_thread.run_sync(_impl)
 
 
 # ── Research 任务看板 ─────────────────────────────────────────
-# request_id → (查询时间, 最近状态 dict) 的 TTL 缓存，供面板看板复用，
-# 避免每次刷新都对每个任务调 get_research 烧官方限流预算。
-_research_task_cache: dict[str, tuple[float, dict]] = {}
+# request_id → (查询时间, 状态摘要 dict, 持久化 TTL 或 None) 的 TTL 缓存。
+# 前两项为内存缓存：避免每次刷新都对每个任务调 get_research 烧官方限流预算。
+# 第三项：落盘加载的终态任务携带持久化 TTL（重启后无需重新调官方 API）。
+_research_task_cache: dict[str, tuple[float, dict, float | None]] = {}
 _RESEARCH_TASK_TTL = 30.0        # 非终态任务缓存（秒）
 _RESEARCH_TASK_DONE_TTL = 300.0  # 终态任务缓存（秒）
 _RESEARCH_TASK_QUERY_CAP = 15   # 单次刷新最多实际查询多少个任务
+_RESEARCH_TASK_QUERY_TIMEOUT = 10.0  # 单次看板状态查询超时（秒）：看板只需状态，避免慢请求拖到全局 60s
+# 终态任务摘要落盘（data/research_tasks_cache.json）：跨重启恢复，避免重启后
+# 重新调官方 API 拉取已完成任务状态。仅终态任务落盘（进行中任务会过期，不固化）；
+# 7 天有效期（月度重置前任务状态基本可信，超过则重新查询确认）。
+_RESEARCH_TASK_PERSIST_TTL = 7 * 86400.0
+_RESEARCH_TASKS_CACHE_PATH = runtime_dir() / "research_tasks_cache.json"
+_TASKS_CACHE_SAVE_INTERVAL = 5.0   # 落盘节流（秒）：避免每次刷新都写盘
+_last_tasks_cache_save = 0.0
 
 _TERMINAL_STATUSES = ("completed", "failed", "error", "cancelled")
 # 看板只返回 content 摘要（研究报告全文可达数百 KB，全量传输会导致页面长时间加载）
@@ -825,10 +855,92 @@ def _research_content_preview(resp: dict, n: int = _RESEARCH_TASK_CONTENT_PREVIE
     return out
 
 
-def _query_research_status(request_id: str, pinned_masked: str = "") -> tuple[dict, str]:
+def _load_research_tasks_cache() -> None:
+    """加载落盘的终态任务摘要到内存缓存（跨重启，避免重新调官方 API）。
+
+    只加载终态且未超过 _RESEARCH_TASK_PERSIST_TTL 的任务；进行中任务不落盘、
+    不加载（其状态会过期）。文件损坏/格式异常时安全回退为空缓存。
+    """
+    global _research_task_cache
+    try:
+        if not _RESEARCH_TASKS_CACHE_PATH.exists():
+            return
+        data = json.loads(_RESEARCH_TASKS_CACHE_PATH.read_text(encoding="utf-8-sig"))
+        if not isinstance(data, dict):
+            return
+        now = time.time()
+        loaded = 0
+        for rid, item in data.items():
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("status") or "")
+            if status not in _TERMINAL_STATUSES:
+                continue
+            ts = float(item.get("ts") or 0)
+            if now - ts >= _RESEARCH_TASK_PERSIST_TTL:
+                continue
+            preview: dict = {"status": status, "content": item.get("content")}
+            if item.get("error"):
+                preview["error"] = item["error"]
+            _research_task_cache[str(rid)] = (ts, preview, _RESEARCH_TASK_PERSIST_TTL)
+            loaded += 1
+        if loaded:
+            _log.info("research 看板缓存落盘加载 %d 个终态任务", loaded)
+    except Exception:  # noqa: BLE001
+        _log.warning("research 看板缓存落盘加载失败，回退空缓存")
+        _research_task_cache = {}
+
+
+def _save_research_tasks_cache() -> None:
+    """把内存中的终态任务摘要原子落盘（先写临时文件再 rename）。
+
+    仅持久化终态且未过期任务（进行中任务状态会变化，不固化）。
+    """
+    now = time.time()
+    persist: dict[str, dict] = {}
+    with _research_keys_lock:
+        for rid, (ts, preview, _pttl) in _research_task_cache.items():
+            status = preview.get("status", "")
+            if status not in _TERMINAL_STATUSES:
+                continue
+            if now - ts >= _RESEARCH_TASK_PERSIST_TTL:
+                continue
+            item: dict = {"status": status, "content": preview.get("content"), "ts": ts}
+            if preview.get("error"):
+                item["error"] = preview["error"]
+            persist[str(rid)] = item
+    if not persist:
+        return
+    try:
+        _RESEARCH_TASKS_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _RESEARCH_TASKS_CACHE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(persist, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_RESEARCH_TASKS_CACHE_PATH)
+    except Exception as e:  # noqa: BLE001
+        _log.warning("research 看板缓存落盘失败: %s", str(e)[:200])
+
+
+def _maybe_save_research_tasks_cache() -> None:
+    """节流版落盘：距上次写盘小于 _TASKS_CACHE_SAVE_INTERVAL 则跳过。"""
+    global _last_tasks_cache_save
+    now = time.time()
+    if now - _last_tasks_cache_save < _TASKS_CACHE_SAVE_INTERVAL:
+        return
+    _last_tasks_cache_save = now
+    _save_research_tasks_cache()
+
+
+# 模块加载时恢复落盘的终态任务（须在常量定义之后调用）
+_load_research_tasks_cache()
+
+
+def _query_research_status(request_id: str, pinned_masked: str = "",
+                           timeout: float | None = None) -> tuple[dict, str]:
     """查询 research 任务状态。任务按 key 隔离：优先用提交时的 key，避免 404。
 
     返回 (响应 dict, 实际使用的 masked key)。池空等场景抛异常由调用方处理。
+    timeout：单次查询超时（秒）。SDK 的 get_research 不支持 timeout 参数，这里
+    通过临时覆盖 session 默认超时实现；为 None 时沿用 _REQUEST_TIMEOUT。
     """
     client = None
     masked = ""
@@ -839,7 +951,28 @@ def _query_research_status(request_id: str, pinned_masked: str = "") -> tuple[di
             masked = pinned_masked
     if client is None:
         client, masked = _get_client()
-    return client.get_research(request_id), masked
+    if timeout is None:
+        return client.get_research(request_id), masked
+    return _get_research_with_timeout(client, request_id, timeout), masked
+
+
+def _get_research_with_timeout(client: TavilyClient, request_id: str, timeout: float) -> dict:
+    """带显式超时调用 get_research：临时替换 session.request 的默认超时并恢复。
+
+    get_research 不支持 timeout 参数（内部走 session.get），此处临时覆盖
+    session.request 的默认超时，保证看板查询不会无限期阻塞。
+    """
+    import functools
+
+    session = getattr(client, "session", None)
+    orig = getattr(session, "request", None) if session is not None else None
+    if session is not None and orig is not None:
+        try:
+            session.request = functools.partial(orig, timeout=max(float(timeout), 1.0))
+            return client.get_research(request_id)
+        finally:
+            session.request = orig
+    return client.get_research(request_id)
 
 
 def list_research_tasks(limit: int = 50) -> list[dict]:
@@ -847,41 +980,69 @@ def list_research_tasks(limit: int = 50) -> list[dict]:
 
     成本控制：查询结果按 TTL 缓存（非终态 30s / 终态 300s），单次刷新最多查
     _RESEARCH_TASK_QUERY_CAP 个任务，避免逐个调 get_research 烧官方限流预算。
+    性能：需要实际查询的任务用线程池并发执行（每个限时
+    _RESEARCH_TASK_QUERY_TIMEOUT 秒），避免串行逐个阻塞导致看板长时间加载。
+    持久化：查询到的终态任务摘要落盘（_save_research_tasks_cache），重启后
+    由 _load_research_tasks_cache 直接恢复展示，避免重新调官方 API。
     """
     with _research_keys_lock:
         items = list(_research_keys.items())
     items = items[-max(1, int(limit)):]
     now = time.time()
     tasks: list[dict] = []
-    queries = 0
+    pending: list[tuple[str, str]] = []
     for request_id, masked in reversed(items):
         cached = _research_task_cache.get(request_id)
         if cached is not None:
-            status = cached[1].get("status", "")
+            ts = cached[0]
+            preview = cached[1]
+            persist_ttl = cached[2] if len(cached) > 2 else None
+            status = preview.get("status", "")
             ttl = _RESEARCH_TASK_DONE_TTL if status in _TERMINAL_STATUSES else _RESEARCH_TASK_TTL
-            if now - cached[0] < ttl:
-                tasks.append({**cached[1], "request_id": request_id, "masked": masked, "cached": True})
+            if persist_ttl is not None:
+                ttl = persist_ttl  # 落盘恢复的终态任务：在持久化有效期内始终命中
+            if now - ts < ttl:
+                tasks.append({**preview, "request_id": request_id, "masked": masked, "cached": True})
                 continue
-        if queries >= _RESEARCH_TASK_QUERY_CAP:
+        if len(pending) >= _RESEARCH_TASK_QUERY_CAP:
             tasks.append({"request_id": request_id, "masked": masked, "status": "unknown", "cached": True})
             continue
-        queries += 1
+        pending.append((request_id, masked))
+    if not pending:
+        return tasks
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _query_one(item: tuple[str, str]) -> tuple[dict, bool]:
+        rid, rmasked = item
         try:
-            resp, used = _query_research_status(request_id, masked)
+            resp, used = _query_research_status(rid, rmasked, timeout=_RESEARCH_TASK_QUERY_TIMEOUT)
             preview = _research_content_preview(resp)
-            _research_task_cache[request_id] = (now, preview)
-            tasks.append({
-                "request_id": request_id,
-                "masked": masked,
-                "status": resp.get("status", ""),
+            status = resp.get("status", "")
+            _research_task_cache[rid] = (time.time(), preview, None)
+            return ({
+                "request_id": rid,
+                "masked": rmasked,
+                "status": status,
                 "content": preview.get("content"),
                 "key_used": used,
                 "cached": False,
-            })
+            }, status in _TERMINAL_STATUSES)
         except Exception as e:  # noqa: BLE001
-            _log.warning("research 看板查询失败 %s: %s", request_id, str(e)[:200])
-            tasks.append({"request_id": request_id, "masked": masked, "status": "error",
-                          "error": str(e)[:200], "cached": False})
+            _log.warning("research 看板查询失败 %s: %s", rid, str(e)[:200])
+            # 查询失败不是任务真实终态：不落盘，重启后重新查询
+            return ({"request_id": rid, "masked": rmasked, "status": "error",
+                     "error": str(e)[:200], "cached": False}, False)
+
+    with ThreadPoolExecutor(max_workers=min(_RESEARCH_TASK_QUERY_CAP, len(pending))) as ex:
+        results = list(ex.map(_query_one, pending))
+    need_save = False
+    for task, is_terminal in results:
+        tasks.append(task)
+        if is_terminal:
+            need_save = True
+    if need_save:
+        _maybe_save_research_tasks_cache()
     return tasks
 
 

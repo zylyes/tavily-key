@@ -326,6 +326,10 @@ tr td:first-child,tr th:first-child{padding-left:16px}
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"/><path d="M12 14v3"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>
       MCP 服务
     </button>
+    <button class="tab" data-tab="proxy" onclick="switchTab('proxy')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+      搜索代理
+    </button>
     <button class="tab" data-tab="tasks" onclick="switchTab('tasks')">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
       Research 任务
@@ -544,6 +548,96 @@ tr td:first-child,tr th:first-child{padding-left:16px}
     </div>
   </div>
 
+  <div class="tab-panel" id="panel-proxy">
+    <div class="column">
+      <div class="column-body settings-body">
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/><path d="M8 11h6"/><path d="M11 8v6"/></svg>
+            搜索代理状态
+          </h3>
+          <div class="card-desc">Tavily 兼容 REST 服务：把 Key 池暴露为官方 API 地址，供 Cherry Studio 等客户端「自定义 API 地址」直接对接</div>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <span style="font-size:12px;color:var(--text-2)">状态:</span>
+            <span id="proxyStatusBadge" class="badge badge-inactive">未知</span>
+            <span id="proxyPid" style="font-size:11px;color:var(--text-3)"></span>
+            <span style="flex:1"></span>
+            <button class="btn btn-primary" id="proxyToggleBtn" onclick="toggleProxy()">启动服务</button>
+          </div>
+          <div id="proxyUrlRow" style="margin-top:16px;display:none">
+            <label style="font-size:11px;color:var(--text-2);display:block;margin-bottom:6px">API 地址（填入客户端的「API 地址」字段）</label>
+            <div id="proxyUrlIpRow" style="margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="font-size:11px;color:var(--text-2);width:96px;flex:none">局域网 IP 地址</span>
+                <input id="proxyUrlIp" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+                <button class="btn btn-sm btn-primary" onclick="copyProxyUrl('proxyUrlIp')">复制</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:2px;padding-left:104px">切换网络后可能变化</div>
+            </div>
+            <div id="proxyUrlHostRow" style="margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="font-size:11px;color:var(--text-2);width:96px;flex:none">主机名地址</span>
+                <input id="proxyUrlHost" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+                <button class="btn btn-sm btn-primary" onclick="copyProxyUrl('proxyUrlHost')">复制</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:2px;padding-left:104px">切换网络不变（mDNS，客户端需支持 .local 解析）</div>
+            </div>
+            <div id="proxyUrlLocalRow" style="margin-bottom:8px">
+              <div style="display:flex;gap:8px;align-items:center">
+                <span style="font-size:11px;color:var(--text-2);width:96px;flex:none">本机地址</span>
+                <input id="proxyUrlLocal" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--green);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+                <button class="btn btn-sm btn-primary" onclick="copyProxyUrl('proxyUrlLocal')">复制</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:2px;padding-left:104px">仅本机可用，不依赖网络</div>
+            </div>
+          </div>
+          <div id="proxyTokenRow" style="margin-top:16px;display:none">
+            <label style="font-size:11px;color:var(--text-2);display:block;margin-bottom:6px">API 密钥（填入客户端的「API 密钥」字段）</label>
+            <div style="display:flex;gap:8px;align-items:center">
+              <input id="proxyToken" type="text" readonly style="background:var(--bg-2);border:1px solid var(--border);color:var(--text-1);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;font-family:var(--mono);flex:1">
+              <button class="btn btn-sm btn-primary" onclick="copyProxyToken()">复制</button>
+              <button class="btn btn-sm btn-ghost" onclick="generateProxyToken()">生成随机密钥</button>
+            </div>
+            <div id="proxyTokenNote" style="font-size:11px;color:var(--text-2);margin-top:6px;line-height:1.6"></div>
+          </div>
+          <div id="proxyHint" style="margin-top:10px;font-size:11px;color:var(--text-2);line-height:1.7"></div>
+        </div>
+
+        <div class="card">
+          <h3>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
+            搜索代理设置
+          </h3>
+          <div class="card-desc">配置搜索代理的启动方式与网络参数</div>
+          <div class="setting-row">
+            <label>随软件启动搜索代理</label>
+            <select id="setProxyAutoStart">
+              <option value="true">是（软件启动后自动启动搜索代理）</option>
+              <option value="false">否（仅手动启动）</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label>监听地址</label>
+            <input id="setProxyHost" type="text" placeholder="0.0.0.0（局域网）/ 127.0.0.1（仅本机）">
+          </div>
+          <div class="setting-row">
+            <label>端口</label>
+            <input id="setProxyPort" type="number" placeholder="8002">
+          </div>
+          <div class="setting-row">
+            <label>代理密钥（留空则不鉴权）</label>
+            <input id="setProxyToken" type="text" placeholder="客户端需带 Authorization: Bearer <密钥> 请求头">
+          </div>
+          <div class="setting-actions">
+            <button class="btn btn-primary" onclick="saveProxySettings()">保存设置</button>
+            <span class="status" id="proxySettingsStatus"></span>
+          </div>
+          <div class="setting-hint" id="proxyHint2"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="tab-panel" id="panel-tasks">
     <div class="column">
       <div class="column-body">
@@ -561,7 +655,7 @@ tr td:first-child,tr th:first-child{padding-left:16px}
                 <code class="task-code">wait=false</code> 提交的异步研究任务 · 查询带缓存，刷新频率受官方限流保护
               </div>
             </div>
-            <button class="btn btn-sm btn-primary" onclick="loadTasks()">
+            <button id="tasksRefreshBtn" class="btn btn-sm btn-primary" onclick="loadTasks()">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
               刷新
             </button>
@@ -767,10 +861,12 @@ function switchTab(name) {
   document.getElementById('panel-stats').classList.toggle('active', name === 'stats');
   document.getElementById('panel-logs').classList.toggle('active', name === 'logs');
   document.getElementById('panel-mcp').classList.toggle('active', name === 'mcp');
+  document.getElementById('panel-proxy').classList.toggle('active', name === 'proxy');
   document.getElementById('panel-settings').classList.toggle('active', name === 'settings');
   document.getElementById('panel-tasks').classList.toggle('active', name === 'tasks');
   if (name === 'settings') loadSettings();
   if (name === 'mcp') { loadMcp(); loadMcpSettings(); }
+  if (name === 'proxy') { loadProxy(); loadProxySettings(); }
   if (name === 'stats') loadStats();
   if (name === 'logs') loadLogs();
   if (name === 'tasks') loadTasks();
@@ -900,10 +996,9 @@ function renderEndpointBar(ep) {
     const okW = (W-150) * v.success / max;
     const label = epn.length > 18 ? epn.slice(0,18)+'…' : epn;
     svg += `<text x="140" y="${y+11}" text-anchor="end" font-size="11" fill="#94a3b8">${escapeHtml(label)}</text>`;
-    svg += `<rect x="150" y="${y}" width="${bw}" height="12" rx="2" fill="rgba(248,113,113,.85)"/>`;
-    svg += `<rect x="150" y="${y}" width="${okW}" height="12" rx="2" fill="#34d399"/>`;
+    svg += `<rect x="150" y="${y}" width="${bw}" height="12" rx="2" fill="rgba(248,113,113,.85)"><title>${escapeHtml(epn)}：成功 ${v.success} / 失败 ${v.failed}</title></rect>`;
+    svg += `<rect x="150" y="${y}" width="${okW}" height="12" rx="2" fill="#34d399"><title>${escapeHtml(epn)}：成功 ${v.success} / 失败 ${v.failed}</title></rect>`;
     svg += `<text x="${155+bw}" y="${y+10}" font-size="10" fill="#64748b">${total}</text>`;
-    svg += `<title>${escapeHtml(epn)}：成功 ${v.success} / 失败 ${v.failed}</title>`;
   });
   svg += '</svg>';
   el.innerHTML = svg;
@@ -926,8 +1021,7 @@ function renderCredits(points) {
     const x = padL + i*bw;
     const h = (H-6-padB) * p.credits / yMax;
     const y = H-padB - h;
-    svg += `<rect x="${x+1}" y="${y}" width="${bw-2}" height="${h}" rx="2" fill="#38bdf8"/>`;
-    svg += `<title>${p.date}：${p.credits} 积分</title>`;
+    svg += `<rect x="${x+1}" y="${y}" width="${bw-2}" height="${h}" rx="2" fill="#38bdf8"><title>${p.date}：${p.credits} 积分</title></rect>`;
     if (points.length <= 8 || i % Math.ceil(points.length/8) === 0) {
       svg += `<text x="${x+bw/2}" y="${H-6}" text-anchor="middle" font-size="8.5" fill="#64748b">${p.date.slice(5)}</text>`;
     }
@@ -962,9 +1056,8 @@ function renderTrend(t) {
     const yFail = padT + (H-padT-padB) - bh;
     const yOk = padT + (H-padT-padB) - okH;
     const tip = `${p.date}：${p.requests} 请求（成功 ${p.success} / 失败 ${p.failed}），积分 ${p.credits}`;
-    svg += `<rect x="${x+1}" y="${yFail}" width="${bw-2}" height="${bh}" rx="2" fill="rgba(248,113,113,.85)"/>`;
-    svg += `<rect x="${x+1}" y="${yOk}" width="${bw-2}" height="${okH}" rx="2" fill="#34d399"/>`;
-    svg += `<title>${tip}</title>`;
+    svg += `<rect x="${x+1}" y="${yFail}" width="${bw-2}" height="${bh}" rx="2" fill="rgba(248,113,113,.85)"><title>${tip}</title></rect>`;
+    svg += `<rect x="${x+1}" y="${yOk}" width="${bw-2}" height="${okH}" rx="2" fill="#34d399"><title>${tip}</title></rect>`;
     if (pts.length <= 8 || i % Math.ceil(pts.length/8) === 0) {
       svg += `<text x="${x+bw/2}" y="${H-6}" text-anchor="middle" font-size="8.5" fill="#64748b">${p.date.slice(5)}</text>`;
     }
@@ -977,7 +1070,9 @@ function renderTrend(t) {
 async function loadTasks() {
   const tbody = document.getElementById('taskTableBody');
   const summary = document.getElementById('tasksSummary');
+  const btn = document.getElementById('tasksRefreshBtn');
   tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">加载中…</td></tr>';
+  if (btn) { btn.disabled = true; btn.style.opacity = '.5'; }
   try {
     const d = await api('/api/research/tasks');
     const tasks = d.tasks || [];
@@ -1015,6 +1110,8 @@ async function loadTasks() {
     console.error(e);
     tbody.innerHTML = '<tr><td colspan="4" class="empty-cell">加载失败：' + escapeHtml(String(e && e.message || e)) + '</td></tr>';
     summary.innerHTML = '';
+  } finally {
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; }
   }
 }
 
@@ -1561,6 +1658,136 @@ async function saveMcpSettings() {
   }
 }
 
+// ── 搜索代理（Tavily 兼容 REST 服务）───────────────────────────
+let proxyRunning = false;
+let proxyTokenSet = false;  // 搜索代理是否配置了代理密钥
+
+async function loadProxy() {
+  try {
+    const d = await api('/api/proxy/status');
+    proxyRunning = d.running;
+    proxyTokenSet = !!(d.token);
+    const badge = document.getElementById('proxyStatusBadge');
+    const btn = document.getElementById('proxyToggleBtn');
+    const urlRow = document.getElementById('proxyUrlRow');
+    const tokenRow = document.getElementById('proxyTokenRow');
+    const urls = d.urls || {};
+    const ipRow = document.getElementById('proxyUrlIpRow');
+    const hostRow = document.getElementById('proxyUrlHostRow');
+    const localRow = document.getElementById('proxyUrlLocalRow');
+    const pidEl = document.getElementById('proxyPid');
+    const hint = document.getElementById('proxyHint');
+
+    if (d.running) {
+      urlRow.style.display = 'block';
+      tokenRow.style.display = 'block';
+      badge.textContent = '运行中';
+      badge.className = 'badge badge-active';
+      btn.textContent = '停止服务';
+      btn.className = 'btn btn-danger';
+      btn.disabled = false;
+      pidEl.textContent = 'PID: ' + (d.pid || '-');
+      if (urls.ip) { ipRow.style.display = 'block'; document.getElementById('proxyUrlIp').value = urls.ip; } else { ipRow.style.display = 'none'; }
+      if (urls.hostname_local) { hostRow.style.display = 'block'; document.getElementById('proxyUrlHost').value = urls.hostname_local; } else { hostRow.style.display = 'none'; }
+      if (urls.local) { localRow.style.display = 'block'; document.getElementById('proxyUrlLocal').value = urls.local; } else { localRow.style.display = 'none'; }
+      document.getElementById('proxyToken').value = d.token || '';
+      document.getElementById('proxyTokenNote').textContent = proxyTokenSet
+        ? '已启用代理密钥：客户端需携带 Authorization: Bearer <密钥> 请求头。'
+        : '⚠️ 未设置代理密钥，代理对外开放，任何能访问该地址的设备都可消耗 Key 池额度。';
+      hint.textContent = '在客户端（如 Cherry Studio 网络搜索 → Tavily 提供商）中：API 地址填入上方地址，API 密钥填入上方密钥，点击「检测」应提示连接成功。';
+    } else {
+      urlRow.style.display = 'none';
+      tokenRow.style.display = 'none';
+      badge.textContent = '已停止';
+      badge.className = 'badge badge-inactive';
+      btn.textContent = '启动服务';
+      btn.className = 'btn btn-primary';
+      btn.disabled = false;
+      pidEl.textContent = '';
+      hint.textContent = '搜索代理未运行。点击「启动服务」，或在下方设置中开启「随软件启动」。';
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function toggleProxy() {
+  const btn = document.getElementById('proxyToggleBtn');
+  btn.disabled = true;
+  const wasRunning = proxyRunning;
+  const hint = document.getElementById('proxyHint');
+  try {
+    const ep = wasRunning ? '/api/proxy/stop' : '/api/proxy/start';
+    const d = await api(ep, {method:'POST'});
+    if (!d.ok) {
+      hint.textContent = d.error || '操作失败';
+    } else if (wasRunning) {
+      hint.textContent = '已停止搜索代理。';
+    } else {
+      hint.textContent = '搜索代理已启动，请复制上方 API 地址与密钥填入客户端。';
+    }
+  } catch(e) { console.error(e); }
+  loadProxy();
+}
+
+async function copyProxyUrl(id) {
+  copyText(document.getElementById(id).value);
+  if (proxyTokenSet) toast('地址已复制（该服务启用了代理密钥）', 'info');
+  else toast('地址已复制（注意：代理未设置密钥，对外开放）', 'info');
+}
+
+async function copyProxyToken() {
+  const v = document.getElementById('proxyToken').value || document.getElementById('setProxyToken').value || '';
+  copyText(v);
+  toast('代理密钥已复制', 'success');
+}
+
+async function generateProxyToken() {
+  try {
+    const d = await api('/api/proxy/token/generate', {method:'POST'});
+    if (d.ok && d.token) {
+      document.getElementById('setProxyToken').value = d.token;
+      document.getElementById('proxyToken').value = d.token;
+      proxyTokenSet = true;
+      toast('已生成新的代理密钥', 'success');
+      loadProxy();
+    } else {
+      toast('生成失败', 'error');
+    }
+  } catch(e) { console.error(e); }
+}
+
+async function loadProxySettings() {
+  try {
+    const d = await api('/api/settings');
+    const s = d.settings;
+    document.getElementById('setProxyAutoStart').value = String(!!s.proxy_auto_start);
+    document.getElementById('setProxyHost').value = s.proxy_host || '0.0.0.0';
+    document.getElementById('setProxyPort').value = s.proxy_port || 8002;
+    document.getElementById('setProxyToken').value = s.proxy_token || '';
+    proxyTokenSet = !!(s.proxy_token);
+  } catch(e) { console.error(e); }
+}
+
+async function saveProxySettings() {
+  const payload = {
+    proxy_auto_start: document.getElementById('setProxyAutoStart').value === 'true',
+    proxy_host: document.getElementById('setProxyHost').value.trim(),
+    proxy_port: parseInt(document.getElementById('setProxyPort').value, 10) || 8002,
+    proxy_token: document.getElementById('setProxyToken').value.trim(),
+  };
+  proxyTokenSet = !!payload.proxy_token;
+  const status = document.getElementById('proxySettingsStatus');
+  status.textContent = '保存中...';
+  try {
+    const d = await api('/api/settings', {method:'POST', body: JSON.stringify(payload)});
+    status.textContent = '✓ 已保存';
+    toast('搜索代理设置已保存', 'success');
+    loadProxy();
+  } catch(e) {
+    status.textContent = '保存失败';
+    toast('搜索代理设置保存失败', 'error');
+  }
+}
+
 // ── 更新用量弹窗（并行更新，显示进度） ───────────────────────
 // 从 Tavily /usage 拉取 billing cycle 真实用量并更新本地统计
 let usageRunning = false;
@@ -1685,8 +1912,11 @@ setInterval(() => {
 }, 10000);
 loadMcp();
 loadMcpSettings();
+loadProxy();
+loadProxySettings();
 autoCopyMcpUrl();
 setInterval(loadMcp, 5000);
+setInterval(loadProxy, 5000);
 </script>
 </body>
 </html>

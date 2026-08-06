@@ -40,6 +40,13 @@ DEFAULTS: dict = {
     "rate_limit_rpm": 90,        # 每 key 令牌桶速率（官方 dev 100 RPM，默认留 10% 余量）
     "rate_limit_max_wait": 1.0,  # 全部 key 受限时最多等待秒数
     "usage_cache_ttl": 60,       # /usage 同步结果缓存 TTL（秒）
+    # ── 缓存 TTL（秒，0 = 关闭对应缓存）─────────────────────
+    "cache_ttls": {
+        "anomalies": 5,       # 异常识别结果缓存（近24h聚合，秒级变化无意义）
+        "trend": 30,          # 用量趋势（按天聚合）缓存
+        "logs": 1,            # 请求日志查询缓存
+        "service_status": 1,  # MCP / 搜索代理服务状态缓存
+    },
     # ── 异常识别阈值 ──────────────────────────────────────────
     "anomaly_thresholds": {},    # error_rate / leak_diff_credits / stale_days / slow_ratio
     "log_retention_days": 90,    # request_log 保留天数（0 = 不清理，防无界增长）
@@ -51,6 +58,11 @@ DEFAULTS: dict = {
     "mcp_default_parameters": {},  # 对 search 类请求注入的默认参数（对齐官方 DEFAULT_PARAMETERS）
     "mcp_human_id": "",          # 可选：转发 X-Human-Id 头，便于 Tavily 侧会话分析
     "mcp_project_id": "",        # 可选：转发 X-Project-ID 头，按项目归类用量
+    # ── 网络搜索代理（Tavily 兼容 REST 服务，供 Cherry Studio 等客户端对接）──
+    "proxy_auto_start": False,     # 软件启动时是否自动启动搜索代理服务
+    "proxy_host": "0.0.0.0",       # 代理监听地址（0.0.0.0 = 局域网可用）
+    "proxy_port": 8002,            # 代理监听端口
+    "proxy_token": "",             # 代理 API 密钥（客户端 Bearer 鉴权；留空则不鉴权=开放）
 }
 
 MODE_DEFAULTS: dict = {
@@ -117,18 +129,18 @@ def save(patch: dict) -> dict:
     return dict(cfg)
 
 
-_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes")
+_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes", "proxy_port")
 _BOOL_FIELDS = (
     "autostart", "start_to_tray", "close_to_tray", "minimize_to_tray",
-    "mcp_auto_start", "notify_tray",
+    "mcp_auto_start", "notify_tray", "proxy_auto_start",
 )
 _STR_FIELDS = (
     "mode", "domain", "host", "auth_token",
     "mcp_transport", "mcp_host", "mcp_token", "mcp_human_id", "mcp_project_id",
-    "notify_webhook",
+    "notify_webhook", "proxy_host", "proxy_token",
 )
 # 以 JSON 对象存储的字段：接受 dict 或 JSON 字符串
-_DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters")
+_DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters", "cache_ttls")
 _FLOAT_FIELDS = ("rate_limit_max_wait",)
 
 
@@ -266,3 +278,57 @@ def mcp_is_network(cfg: dict | None = None) -> bool:
     """MCP 是否为网络服务（可被面板启停、局域网访问）；stdio 为客户端直连模式。"""
     cfg = cfg or get_settings()
     return (cfg.get("mcp_transport") or "sse").strip().lower() != "stdio"
+
+
+# 各缓存 TTL 默认值（秒）；配置 cache_ttls 可覆盖，0 = 关闭对应缓存
+_CACHE_TTL_DEFAULTS = {
+    "anomalies": 5.0,       # 异常识别结果缓存
+    "trend": 30.0,          # 用量趋势（按天聚合）缓存
+    "logs": 1.0,            # 请求日志查询缓存
+    "service_status": 1.0,  # MCP / 搜索代理服务状态缓存
+}
+
+
+def cache_ttls() -> dict:
+    """读取缓存 TTL 配置（秒，合并默认值，非法值回退默认）。"""
+    cfg = get_settings()
+    out = dict(_CACHE_TTL_DEFAULTS)
+    for k, v in (cfg.get("cache_ttls") or {}).items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        out[k] = fv if fv >= 0 else 0.0
+    return out
+
+
+def proxy_urls(cfg: dict | None = None) -> dict:
+    """返回搜索代理（Tavily 兼容 REST）可用的访问地址集合。
+
+    返回 dict（始终可用，搜索代理恒为网络服务）：
+      - ip             : 局域网 IP 地址（随网络变化）
+      - hostname       : 裸主机名（Windows 局域网 NetBIOS 解析）
+      - hostname_local : 主机名 .local（mDNS，macOS/Linux 可解析）
+      - local          : 127.0.0.1（仅本机，不依赖网络）
+    客户端把该地址填入「API 地址」即直接作为 Tavily base URL 使用（无路径后缀）。
+    """
+    cfg = cfg or get_settings()
+    port = int(cfg.get("proxy_port", 8002))
+    host = (cfg.get("proxy_host") or "0.0.0.0").strip()
+    urls: dict = {"local": f"http://127.0.0.1:{port}"}
+    if host in ("0.0.0.0", "::"):
+        urls["ip"] = f"http://{lan_ip()}:{port}"
+        hn = lan_hostname()
+        if hn:
+            urls["hostname"] = f"http://{hn}:{port}"
+            urls["hostname_local"] = f"http://{hn}.local:{port}"
+    elif host not in ("127.0.0.1", "localhost"):
+        urls["ip"] = f"http://{host}:{port}"
+    return urls
+
+
+def proxy_url(cfg: dict | None = None) -> str:
+    """根据配置推导搜索代理对外地址（默认返回局域网可访问地址）。"""
+    cfg = cfg or get_settings()
+    host = _display_host(cfg.get("proxy_host", "0.0.0.0"))
+    return f"http://{host}:{int(cfg.get('proxy_port', 8002))}"

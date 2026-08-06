@@ -1,7 +1,7 @@
 """settings.validate_patch 配置校验单元测试。"""
 import pytest
 
-from settings import mcp_urls, validate_patch
+from settings import mcp_urls, proxy_url, proxy_urls, validate_patch
 
 
 def test_valid_port_normalized():
@@ -56,6 +56,39 @@ def test_key_strategy_passthrough():
 def test_mcp_project_id_accepted():
     assert validate_patch({"mcp_project_id": " proj-9 "})["mcp_project_id"] == "proj-9"
     assert validate_patch({"mcp_human_id": "human-1"})["mcp_human_id"] == "human-1"
+
+
+# ── 搜索代理字段 ───────────────────────────────────────────────
+def test_proxy_port_normalized():
+    assert validate_patch({"proxy_port": 8002})["proxy_port"] == 8002
+    assert validate_patch({"proxy_port": "9000"})["proxy_port"] == 9000
+    with pytest.raises(ValueError):
+        validate_patch({"proxy_port": 70000})
+
+
+def test_proxy_token_stripped():
+    assert validate_patch({"proxy_token": "  abc  "})["proxy_token"] == "abc"
+
+
+def test_proxy_host_accepted():
+    assert validate_patch({"proxy_host": "127.0.0.1"})["proxy_host"] == "127.0.0.1"
+
+
+def test_proxy_auto_start_boolean():
+    assert validate_patch({"proxy_auto_start": "yes"})["proxy_auto_start"] is True
+    assert validate_patch({"proxy_auto_start": 0})["proxy_auto_start"] is False
+
+
+def test_proxy_urls_shapes():
+    # 仅本机监听：只返回 local
+    urls = proxy_urls({"proxy_host": "127.0.0.1", "proxy_port": 8002})
+    assert urls == {"local": "http://127.0.0.1:8002"}
+    # 局域网监听：ip 是 http 地址且端口正确（lan_ip 在无网络时回退 127.0.0.1）
+    urls = proxy_urls({"proxy_host": "0.0.0.0", "proxy_port": 8002})
+    assert urls["local"] == "http://127.0.0.1:8002"
+    assert urls["ip"].startswith("http://") and urls["ip"].endswith(":8002")
+    # 单地址推导
+    assert proxy_url({"proxy_host": "127.0.0.1", "proxy_port": 8002}) == "http://127.0.0.1:8002"
 
 
 def test_mcp_urls_stdio_empty():

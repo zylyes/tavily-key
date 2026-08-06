@@ -321,7 +321,7 @@ flowchart TD
 | `exhausted`（额度耗尽） | `is_exhausted`（官方 usage ≥ limit，已触发 432） | 已移出轮询；新计费周期 usage 归零后由 `sync_usage()` 自动恢复 |
 | `near_exhausted`（近耗尽） | 官方 `usage_pct` ≥ 90% | 提示补充额度或更换 Key |
 | `suspected_leak`（疑似泄露） | 官方用量明显大于本地可对账积分（差值 ≥ `leak_diff_credits`，默认 50） | 见下方对账公式 |
-| `high_error_rate`（高错误率） | 近 24h 错误率 > `error_rate`（默认 0.3） | 附带最主要错误类别（quota/auth/rate/other） |
+| `high_error_rate`（高错误率） | 近 24h 服务器错误率 > `error_rate`（默认 0.3） | 仅统计服务器/Key 侧错误（quota/auth/rate/5xx/超时等），忽略客户端请求错误（HTTP 400/参数校验，`request_log.is_client_error=1`），分子分母均排除；附带最主要服务器错误类别（quota/auth/rate/bad_request/other） |
 | `stale`（静默失效） | active 但近 `stale_days`（默认 7）天无本地调用 | 疑似被外部使用或已无人使用 |
 | `slow`（延迟异常） | 近 24h 平均延迟 > 池内均值 × `slow_ratio`（默认 2.0）且 > 100ms | 疑似网络路径异常 |
 

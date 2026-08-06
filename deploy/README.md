@@ -29,6 +29,10 @@
 > 修改 `host` / `port` 需**重启服务**生效；修改 `mode` / `domain` / `auth_token` 即时生效。
 > `data/config.json` 不存在时首次启动自动生成默认值。
 
+## 搜索代理（可选服务）
+
+搜索代理（Tavily 兼容 REST，默认监听 `0.0.0.0:8002`）是独立子进程，**不随 Linux systemd 服务自动启动**。需使用时在面板「搜索代理」页开启（或设置 `proxy_auto_start: true`）；Linux Server 若需对外暴露，请为其单独配置 Nginx 反向代理，并**务必设置 `proxy_token` 密钥**（留空则对外开放）。
+
 ## 部署流程图
 
 ```mermaid

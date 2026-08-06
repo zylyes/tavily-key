@@ -60,6 +60,83 @@ def test_settings_accepts_valid_patch(client, monkeypatch, tmp_path):
     assert r.json()["ok"] is True
 
 
+# ── API 端点 TTL 缓存 ─────────────────────────────────────────
+def _fresh_pool(tmp_path, monkeypatch):
+    """把 dashboard.pool 替换为隔离的 KeyPool 实例。"""
+    import key_pool as kp_mod
+    kp_mod.KeyPool._instance = None
+    p = kp_mod.KeyPool(str(tmp_path / "db.sqlite"))
+    monkeypatch.setattr(dashboard, "pool", p)
+    return p
+
+
+def test_api_logs_ttl_cache(client, monkeypatch, tmp_path):
+    """/api/logs 短 TTL 缓存：同参数命中，不同参数分键，写操作后失效。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    p = _fresh_pool(tmp_path, monkeypatch)
+    calls = {"n": 0}
+
+    def fake_query_logs(*a, **k):
+        calls["n"] += 1
+        return [], 0
+
+    monkeypatch.setattr(p, "query_logs", fake_query_logs)
+    assert client.get("/api/logs").status_code == 200
+    assert client.get("/api/logs").status_code == 200
+    assert calls["n"] == 1                       # 第二次命中缓存
+    client.get("/api/logs?status=success")
+    assert calls["n"] == 2                       # 不同筛选 → 不同缓存键
+    client.get("/api/logs")
+    client.post("/api/keys/add", json={"keys": []})
+    client.get("/api/logs")
+    assert calls["n"] == 3                       # add 后失效重查
+
+
+def test_api_mcp_status_ttl_cache_and_invalidate(client, monkeypatch):
+    """/api/mcp/status 缓存；start/stop 后失效。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    calls = {"n": 0}
+
+    def fake_status():
+        calls["n"] += 1
+        return {"running": False, "pid": None, "port": 8001}
+
+    monkeypatch.setattr(dashboard.mcp_manager, "status", fake_status)
+    monkeypatch.setattr(dashboard.mcp_manager, "start", lambda: {})
+    monkeypatch.setattr(dashboard.mcp_manager, "stop", lambda: {})
+    client.get("/api/mcp/status")
+    client.get("/api/mcp/status")
+    assert calls["n"] == 1                       # 命中缓存
+    # start 端点内部会立即取一次最新状态（invalidate + status）
+    client.post("/api/mcp/start")
+    assert calls["n"] == 2
+    client.get("/api/mcp/status")
+    assert calls["n"] == 3                       # start 后失效重查
+    client.get("/api/mcp/status")
+    client.post("/api/mcp/stop")
+    assert calls["n"] == 4                       # stop 端点内部 status
+    client.get("/api/mcp/status")
+    assert calls["n"] == 5                       # stop 后失效重查
+
+
+def test_api_proxy_status_ttl_cache(client, monkeypatch):
+    """/api/proxy/status 短 TTL 缓存。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    calls = {"n": 0}
+
+    def fake_status():
+        calls["n"] += 1
+        return {"running": False, "port": 8002}
+
+    monkeypatch.setattr(dashboard.proxy_manager, "status", fake_status)
+    client.get("/api/proxy/status")
+    client.get("/api/proxy/status")
+    assert calls["n"] == 1                       # 命中缓存
+    dashboard._api_cache.clear()
+    client.get("/api/proxy/status")
+    assert calls["n"] == 2                       # 失效后重查
+
+
 def test_anomalies_endpoint(client, monkeypatch):
     monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
     monkeypatch.setattr(dashboard, "pool", dashboard.KeyPool())

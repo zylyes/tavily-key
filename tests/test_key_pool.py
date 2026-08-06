@@ -540,6 +540,43 @@ def test_detect_anomalies_high_error_rate(pool, monkeypatch):
     assert anomalies and "high_error_rate" in anomalies[0]["flags"]
 
 
+def test_detect_anomalies_ignores_client_errors(pool, monkeypatch):
+    """客户端请求错误（is_client_error=1，如 HTTP 400）不应触发高错误率。"""
+    pool.add_key(KEY1)
+    # 7 次客户端错误 + 3 次成功：若计入错误率 70% 会误报
+    for _ in range(7):
+        pool.record_request(MASK1, "search", 10, False, 0,
+                            "400 Bad Request: invalid search_depth", is_client_error=1)
+    for _ in range(3):
+        pool.record_request(MASK1, "search", 10, True, 1)
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"anomaly_thresholds": {"error_rate": 0.3}})
+    anomalies = pool.detect_anomalies()
+    assert not any("high_error_rate" in a["flags"] for a in anomalies)
+
+
+def test_detect_anomalies_high_error_rate_mixed(pool, monkeypatch):
+    """混合客户端/服务器错误：高错误率只按服务器错误计算（分子分母均排除客户端）。"""
+    pool.add_key(KEY1)
+    # 3 次客户端错误 + 4 次服务器错误（timeout）+ 3 次成功
+    # 服务器错误率 = 4 / (10 - 3) ≈ 57% > 0.3 → 触发
+    for _ in range(3):
+        pool.record_request(MASK1, "search", 10, False, 0,
+                            "400 Bad Request: invalid parameter", is_client_error=1)
+    for _ in range(4):
+        pool.record_request(MASK1, "search", 10, False, 0, "request timed out")
+    for _ in range(3):
+        pool.record_request(MASK1, "search", 10, True, 1)
+    monkeypatch.setattr(key_pool, "get_settings", lambda: {"anomaly_thresholds": {"error_rate": 0.3}})
+    anomalies = pool.detect_anomalies()
+    assert anomalies and "high_error_rate" in anomalies[0]["flags"]
+
+
+def test_classify_error_bad_request():
+    assert key_pool._classify_error("Client error '400 Bad Request' for url 'https://api.tavily.com/search'") == "bad_request"
+    assert key_pool._classify_error("Request validation failed: search_depth") == "bad_request"
+    assert key_pool._classify_error("boom") == "other"
+
+
 # ── request_log 保留策略 ──────────────────────────────────────
 def test_prune_request_log_removes_old(pool):
     """超期日志被清理，未超期日志保留。"""
@@ -625,3 +662,122 @@ def test_query_logs_filters(pool):
     assert len(rows) == 2
     rows, total = pool.query_logs(offset=2)
     assert len(rows) == 2
+
+
+# ── 重计算缓存（detect_anomalies / get_usage_trend TTL 缓存） ─
+def test_detect_anomalies_ttl_cache(pool, monkeypatch):
+    """异常识别结果短 TTL 缓存：TTL 内重复调用不重算，失效后重算。"""
+    calls = {"n": 0}
+
+    def fake_impl():
+        calls["n"] += 1
+        return [{"masked": "k", "flags": []}]
+
+    monkeypatch.setattr(pool, "_detect_anomalies_impl", fake_impl)
+    pool.detect_anomalies()
+    pool.detect_anomalies()
+    assert calls["n"] == 1              # TTL 内命中缓存
+    pool._anomalies_cache.clear()       # 失效
+    pool.detect_anomalies()
+    assert calls["n"] == 2
+
+
+def test_get_usage_trend_ttl_cache(pool, monkeypatch):
+    """用量趋势按天聚合缓存：按 days 分键，失效后重算。"""
+    calls = {"n": 0}
+
+    def fake_impl(days):
+        calls["n"] += 1
+        return {"days": days, "points": []}
+
+    monkeypatch.setattr(pool, "_get_usage_trend_impl", fake_impl)
+    pool.get_usage_trend(7)
+    pool.get_usage_trend(7)
+    assert calls["n"] == 1              # 同 days 命中缓存
+    pool.get_usage_trend(30)            # 不同 days → 不同缓存键
+    assert calls["n"] == 2
+    pool._invalidate_caches()
+    pool.get_usage_trend(7)
+    assert calls["n"] == 3
+
+
+def test_write_ops_invalidate_anomalies_cache(pool, monkeypatch):
+    """写操作（add/deactivate/sync）后异常识别缓存自动失效。"""
+    calls = {"n": 0}
+
+    def fake_impl():
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pool, "_detect_anomalies_impl", fake_impl)
+    pool.detect_anomalies()
+    assert calls["n"] == 1
+    pool.add_key(KEY1)
+    pool.detect_anomalies()
+    assert calls["n"] == 2              # add 后失效
+    pool.detect_anomalies()
+    pool.deactivate_key(MASK1, "t")
+    pool.detect_anomalies()
+    assert calls["n"] == 3              # add、deactivate 各失效一次
+
+
+def test_record_request_does_not_invalidate_every_call(pool, monkeypatch):
+    """record_request 高频触发，不应每次清缓存（靠 TTL 自然过期）。"""
+    calls = {"n": 0}
+
+    def fake_impl():
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pool, "_detect_anomalies_impl", fake_impl)
+    pool.add_key(KEY1)
+    pool.detect_anomalies()             # 计算并缓存
+    assert calls["n"] == 1
+    pool.record_request(MASK1, "search", 10, True, 0, "", "response")
+    pool.detect_anomalies()
+    assert calls["n"] == 1              # 仍在 TTL 内，未因 record 被清除
+
+
+# ── 跨进程失效同步（信号文件 mtime） ────────────────────────
+def test_remote_invalidate_signal_clears_cache(pool, monkeypatch, tmp_path):
+    """其他进程写操作广播信号后，本进程读取缓存前检测到并清空重计算缓存。"""
+    import cache as cache_mod
+
+    monkeypatch.setattr(cache_mod, "_signal_file", tmp_path / "sig")
+    calls = {"n": 0}
+
+    def fake_impl():
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pool, "_detect_anomalies_impl", fake_impl)
+    pool.detect_anomalies()
+    assert calls["n"] == 1              # 已缓存
+    cache_mod.emit_invalidate()         # 模拟其他进程写操作广播
+    pool.detect_anomalies()             # 检测到信号 → 清缓存重算
+    assert calls["n"] == 2
+    cache_mod.emit_invalidate()         # 再次广播
+    pool.detect_anomalies()
+    assert calls["n"] == 3              # 每次广播都触发重算（信号确实生效）
+
+
+def test_local_invalidate_does_not_clear_twice(pool, monkeypatch, tmp_path):
+    """本进程写操作：_invalidate_caches 清缓存并同步记录信号，避免下次误清。"""
+    import cache as cache_mod
+
+    monkeypatch.setattr(cache_mod, "_signal_file", tmp_path / "sig")
+    calls = {"n": 0}
+
+    def fake_impl():
+        calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(pool, "_detect_anomalies_impl", fake_impl)
+    pool.add_key(KEY1)                  # 写操作：_invalidate_caches 内部已清缓存 + 记录信号
+    pool.detect_anomalies()
+    assert calls["n"] == 1
+    pool.detect_anomalies()             # 本进程信号已记录 → 不再因自身广播误清
+    assert calls["n"] == 1              # 命中缓存
+    pool.deactivate_key(MASK1, "t")     # 又一次写操作广播
+    pool.detect_anomalies()
+    assert calls["n"] == 2

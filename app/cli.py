@@ -151,6 +151,27 @@ def cmd_audit(args):
             print(f"      - {reason}")
 
 
+def cmd_proxy(args):
+    """展示搜索代理状态 / 地址 / 密钥（启停走面板，此处仅展示）。"""
+    from proxy_manager import status as proxy_status
+    from settings import get_settings, proxy_urls
+
+    cfg = get_settings()
+    st = proxy_status()
+    if st["running"]:
+        print(f"运行状态 : 运行中 (PID {st['pid']})")
+    else:
+        print("运行状态 : 已停止")
+    print(f"监听     : {st['host']}:{st['port']}")
+    print(f"API 地址 : {proxy_urls(cfg).get('local')}")
+    token = (cfg.get("proxy_token") or "").strip()
+    print(f"代理密钥 : {token or '（未设置，对外开放）'}")
+    print(f"随软件启动: {'是' if cfg.get('proxy_auto_start') else '否'}")
+    print()
+    print("对接方式：把 API 地址填入客户端「API 地址」、代理密钥填入「API 密钥」")
+    print("（如 Cherry Studio 网络搜索 → Tavily 提供商，填后点「检测」验证）。")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="tavily-pool", description="Tavily API Key Pool Manager")
     sub = parser.add_subparsers(dest="cmd")
@@ -185,6 +206,8 @@ def main():
 
     sub.add_parser("audit", help="List anomalous keys (local records + official usage)")
 
+    sub.add_parser("proxy", help="Show search proxy status/URL/key (Tavily-compatible REST)")
+
     args = parser.parse_args()
     if args.cmd is None:
         parser.print_help()
@@ -201,6 +224,7 @@ def main():
         "health": cmd_health,
         "usage": cmd_usage,
         "audit": cmd_audit,
+        "proxy": cmd_proxy,
     }
     cmds[args.cmd](args)
 

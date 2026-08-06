@@ -5,6 +5,51 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-08-06
+
+### Added
+
+- **网络搜索代理（Tavily 兼容 REST 服务）**：把 Key 池暴露为官方 Tavily API 形态，
+  供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接——
+  - 新模块 `app/tavily_proxy.py`：实现 `POST /search`、`POST /extract`、`POST /crawl`、
+    `POST /map`、`GET /usage` 全部官方端点，内部走 Key 池轮询/限流/异常切换
+    （复用 `mcp_server._run_with_retry`），额度与日志自动落账；四个转发端点均强制
+    `include_usage=True` 保证本地积分记录；错误按类别映射为 Tavily 风格
+    `{"detail":{"error":...}}`（auth→401、quota→432、rate→429、池空→503）。
+  - 新模块 `app/proxy_manager.py`：独立子进程管理（`--proxy` 角色），默认监听
+    `0.0.0.0:8002`，日志 `data/proxy_server.log`，安全停止只清理自己拉起的进程。
+  - 新配置项：`proxy_auto_start`（随软件自启）、`proxy_host`（默认 `0.0.0.0`）、
+    `proxy_port`（默认 8002）、`proxy_token`（独立代理密钥，**留空则不鉴权=开放**）。
+  - 面板新增「**搜索代理**」页签（第 7 个）：运行状态/启停、API 地址三形式
+    （局域网 IP / 主机名 / 本机，各带复制）、API 密钥（复制 + 「生成随机密钥」，
+    对应 `POST /api/proxy/token/generate`）、随软件启动/监听地址/端口/密钥设置；
+    `proxy_token` 为空时提示对外开放风险。
+  - 新 API：`GET /api/proxy/status`、`POST /api/proxy/start`、`POST /api/proxy/stop`、
+    `POST /api/proxy/token/generate`。
+  - CLI 新增 `proxy` 子命令（展示状态/地址/密钥）；`Tavily.spec` 打包 `tavily_proxy`。
+  - 对接方式：客户端（如 Cherry Studio 网络搜索 → Tavily 提供商）「API 地址」填
+    `http://<主机>:8002`、「API 密钥」填 `proxy_token`，点「检测」即验证连通。
+- **通用 TTL 缓存基础设施**：新增 `app/cache.py`（`TTLCache` + `ttl_cached` 装饰器，单调时钟、线程安全、跨进程失效信号 `data/cache_invalidate.sig`）；KeyPool 重计算类接口（异常识别、用量趋势）与 Dashboard API 端点（`/api/logs`、MCP/代理状态）接入短 TTL 缓存，写操作自动失效，`cache_ttls` 配置可调（0 = 关闭）。
+- **Research 任务看板持久化**：终态任务摘要落盘 `data/research_tasks_cache.json`（7 天 TTL、写盘节流、原子替换、启动恢复），重启后不再重调官方 API；查询改线程池并发 + 单次 10s 超时。
+
+### Changed
+
+- **高错误率识别忽略客户端请求错误**：`high_error_rate` 判定只统计服务器/Key 侧错误
+  （401/403/429/432/433/5xx/超时/网络等），排除客户端请求错误（HTTP 400/参数校验失败，
+  SDK 抛 `BadRequestError`），避免客户端参数错误虚增错误率导致误报；`request_log` 新增
+  `is_client_error` 列（记录失败时按异常类型判定），错误率分子分母均排除客户端错误。
+  - `_classify_error` 新增 `bad_request` 类别；代理层把 400 类错误正确映射为 HTTP 400
+    （此前落到 500）。
+
+### Fixed
+
+- **搜索代理密钥不生效**：代理为独立子进程，`settings.get_settings()` 是进程内缓存，
+  启动后不感知 `config.json` 的变更（如面板生成/修改 `proxy_token`），导致设置了密钥
+  仍不鉴权。修复：鉴权前按 TTL（1s）调用 `settings.reload()` 刷新缓存，密钥/限流等
+  配置修改后**无需重启代理进程**即生效；新增回归测试
+  `test_token_change_picked_up_without_restart`。
+- **SVG 图表悬停明细不显示**：统计页图表 `<title>` 移入 rect 元素内，修复悬停 tooltip 失效。
+
 ## [0.4.0] - 2026-08-05
 
 ### Added
@@ -129,6 +174,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.5.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.5.0
 [0.4.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.4.0
 [0.3.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.2
 [0.3.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.3.1

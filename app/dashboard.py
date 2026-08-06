@@ -20,8 +20,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import autostart
 import mcp_manager
+import proxy_manager
+from cache import TTLCache
 from key_pool import KeyPool
-from settings import get_settings, save as save_settings, public_url, mcp_url, validate_patch
+from settings import (
+    get_settings, save as save_settings, public_url, mcp_url, validate_patch, cache_ttls,
+)
 from tray import TrayIcon
 
 
@@ -39,6 +43,15 @@ async def lifespan(app: FastAPI):
                 pass
 
         threading.Thread(target=_safe_start_mcp, daemon=True).start()
+    # 启动：开启「随软件启动搜索代理」时自动启动（后台线程，避免阻塞 uvicorn 就绪）
+    if get_settings().get("proxy_auto_start"):
+        def _safe_start_proxy():
+            try:
+                proxy_manager.start()
+            except Exception:
+                pass
+
+        threading.Thread(target=_safe_start_proxy, daemon=True).start()
     # 异常通知后台循环（Webhook / 托盘气泡，去重节流见 notify.check_and_notify）
     notify_stop = threading.Event()
     notify_thread = threading.Thread(
@@ -47,9 +60,13 @@ async def lifespan(app: FastAPI):
     notify_thread.start()
     yield
     notify_stop.set()
-    # 关闭：停止由本软件管理的 MCP 服务
+    # 关闭：停止由本软件管理的 MCP 服务与搜索代理
     try:
         mcp_manager.stop()
+    except Exception:
+        pass
+    try:
+        proxy_manager.stop()
     except Exception:
         pass
 
@@ -75,6 +92,18 @@ def _anomaly_notify_loop(stop_event: threading.Event) -> None:
 
 app = FastAPI(title="Tavily Key Pool Dashboard", lifespan=lifespan)
 pool = KeyPool()
+
+# API 端点短 TTL 缓存（TTL 见 settings.cache_ttls）：吸收前端高频轮询与重复调用。
+# 写操作端点（keys / health / usage-sync / mcp / proxy / settings）会显式失效。
+_api_cache = TTLCache(default_ttl=1.0, maxsize=512)
+
+
+def _service_ttl() -> float:
+    return float(cache_ttls().get("service_status", 1.0))
+
+
+def _logs_ttl() -> float:
+    return float(cache_ttls().get("logs", 1.0))
 
 
 def _resource_dir() -> Path:
@@ -170,24 +199,28 @@ def api_stats():
 def api_keys_add(payload: dict = Body(...)):
     keys = payload.get("keys", [])
     added = pool.add_keys_batch(keys)
+    _api_cache.invalidate("logs:")
     return {"ok": True, "added": added}
 
 
 @app.post("/api/keys/remove")
 def api_keys_remove(payload: dict = Body(...)):
     pool.remove_key(payload["masked"])
+    _api_cache.invalidate("logs:")
     return {"ok": True}
 
 
 @app.post("/api/keys/deactivate")
 def api_keys_deactivate(payload: dict = Body(...)):
     pool.deactivate_key(payload["masked"], payload.get("reason", "manual"))
+    _api_cache.invalidate("logs:")
     return {"ok": True}
 
 
 @app.post("/api/keys/activate")
 def api_keys_activate(payload: dict = Body(...)):
     pool.activate_key(payload["masked"])
+    _api_cache.invalidate("logs:")
     return {"ok": True}
 
 
@@ -239,13 +272,20 @@ def api_research_tasks(limit: int = 50):
 @app.get("/api/logs")
 def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
              limit: int = 200, offset: int = 0):
-    """筛选请求日志（endpoint/key/状态/时间范围），分页返回。"""
+    """筛选请求日志（endpoint/key/状态/时间范围），分页返回（短 TTL 缓存）。"""
+    # 字符串缓存键：与 _api_cache.invalidate("logs:") 的前缀失效匹配
+    cache_key = f"logs:{endpoint}|{key}|{status}|{days}|{limit}|{offset}"
+    hit = _api_cache.get(cache_key)
+    if hit is not None:
+        return hit
     since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
     rows, total = pool.query_logs(
         endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
         since=since, limit=max(1, min(int(limit), 1000)), offset=max(0, int(offset)),
     )
-    return {"ok": True, "logs": rows, "total": total, "limit": int(limit), "offset": max(0, int(offset))}
+    resp = {"ok": True, "logs": rows, "total": total, "limit": int(limit), "offset": max(0, int(offset))}
+    _api_cache.set(cache_key, resp, _logs_ttl())
+    return resp
 
 
 @app.get("/api/logs/export.csv")
@@ -315,6 +355,8 @@ def api_settings_set(payload: dict = Body(...)):
     if "autostart" in allowed:
         autostart.set_enabled(allowed["autostart"])  # 同步写入注册表
     s = save_settings(allowed)
+    # 配置可能影响服务地址/端口/令牌：清空全部 API 缓存
+    _api_cache.clear()
     return {"ok": True, "settings": s, "public_url": public_url(s), "mcp_url": mcp_url(s)}
 
 
@@ -334,12 +376,19 @@ def api_autostart_set(payload: dict = Body(...)):
 # ── MCP 服务管理（面板开关 / 状态 / 地址）───────────────────────
 @app.get("/api/mcp/status")
 def api_mcp_status():
-    return {"ok": True, **mcp_manager.status()}
+    """MCP 服务运行状态（短 TTL 缓存，吸收 5s 轮询与重复调用）。"""
+    hit = _api_cache.get("mcp:status")
+    if hit is not None:
+        return hit
+    resp = {"ok": True, **mcp_manager.status()}
+    _api_cache.set("mcp:status", resp, _service_ttl())
+    return resp
 
 
 @app.post("/api/mcp/start")
 def api_mcp_start():
     result = mcp_manager.start()
+    _api_cache.invalidate("mcp:")
     result["status"] = mcp_manager.status()
     return result
 
@@ -347,8 +396,51 @@ def api_mcp_start():
 @app.post("/api/mcp/stop")
 def api_mcp_stop():
     result = mcp_manager.stop()
+    _api_cache.invalidate("mcp:")
     result["status"] = mcp_manager.status()
     return result
+
+
+# ── 搜索代理服务管理（面板开关 / 状态 / 地址）───────────────────
+@app.get("/api/proxy/status")
+def api_proxy_status():
+    """搜索代理运行状态 + 可用地址 + 代理密钥（短 TTL 缓存，供面板展示/复制）。"""
+    hit = _api_cache.get("proxy:status")
+    if hit is not None:
+        return hit
+    resp = {
+        "ok": True,
+        **proxy_manager.status(),
+        "token": (get_settings().get("proxy_token") or "").strip(),
+    }
+    _api_cache.set("proxy:status", resp, _service_ttl())
+    return resp
+
+
+@app.post("/api/proxy/start")
+def api_proxy_start():
+    result = proxy_manager.start()
+    _api_cache.invalidate("proxy:")
+    result["status"] = proxy_manager.status()
+    return result
+
+
+@app.post("/api/proxy/stop")
+def api_proxy_stop():
+    result = proxy_manager.stop()
+    _api_cache.invalidate("proxy:")
+    result["status"] = proxy_manager.status()
+    return result
+
+
+@app.post("/api/proxy/token/generate")
+def api_proxy_token_generate():
+    """生成随机代理密钥并保存（面板「生成随机密钥」按钮调用）。"""
+    import secrets
+
+    token = secrets.token_urlsafe(24)
+    save_settings({"proxy_token": token})
+    return {"ok": True, "token": token}
 
 
 def _run_server_thread(host: str, port: int):
@@ -894,6 +986,13 @@ if __name__ == "__main__":
     if "--mcp" in sys.argv:
         import mcp_server
         mcp_server.main()
+        sys.exit(0)
+
+    # ── 搜索代理角色：Tavily.exe --proxy（或 python dashboard.py --proxy）──
+    # 由 proxy_manager 作为子进程拉起，仅运行 Tavily 兼容搜索代理服务。
+    if "--proxy" in sys.argv:
+        import tavily_proxy
+        tavily_proxy.main()
         sys.exit(0)
 
     # ── 纯服务模式：Tavily.exe --server（或 python dashboard.py --server）──

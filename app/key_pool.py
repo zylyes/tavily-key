@@ -13,7 +13,8 @@ from typing import Optional
 
 from security import encrypt_text, is_ciphertext, decrypt_text
 from logging_setup import get_logger
-from settings import get_settings
+from settings import get_settings, cache_ttls
+from cache import TTLCache, emit_invalidate, signal_mtime
 from paths import runtime_dir
 
 _log = get_logger("key_pool")
@@ -129,6 +130,12 @@ class KeyPool:
         self._buckets: dict[str, _TokenBucket] = {}
         self._bucket_lock = threading.Lock()
         self._usage_cache: dict[str, tuple[float, dict]] = {}
+        # 重计算缓存（TTL 见 settings.cache_ttls）：异常识别与按天聚合结果
+        # 基于近 24h 数据，秒级变化无意义，短 TTL 缓存避免每次轮询重复计算。
+        self._anomalies_cache = TTLCache(default_ttl=5.0, maxsize=16)
+        self._trend_cache = TTLCache(default_ttl=30.0, maxsize=32)
+        # 跨进程失效信号：本进程最后见过的信号文件 mtime（其他进程写操作后广播）
+        self._sig_mtime = 0.0
         self._log_inserts = 0
         self._init_db()
 
@@ -196,6 +203,8 @@ class KeyPool:
             # 积分来源标记：response（接口响应含 usage）/ unknown（接口不返回
             # usage，如 Research，官方 API 无此字段）/ none（失败请求）
             "usage_source": "TEXT DEFAULT ''",
+            # 是否为客户端请求错误（HTTP 400/参数校验失败）：高错误率识别时忽略
+            "is_client_error": "INTEGER DEFAULT 0",
         })
         # masked 唯一索引：加密后 key 主键不可靠，作为重复检测的兜底约束。
         # 历史数据若存在重复 masked（理论不会），容忍创建失败。
@@ -209,6 +218,30 @@ class KeyPool:
         conn.close()
 
     # ── Key CRUD ────────────────────────────────────────────────
+    def _invalidate_caches(self) -> None:
+        """写操作后统一失效重计算缓存（异常识别 / 用量趋势）。
+
+        record_request 不在此列：它高频触发，靠 TTL 自然过期，避免每次请求清缓存。
+        同时广播跨进程失效信号：其他进程（MCP/proxy 子进程）的 KeyPool 缓存
+        检测到后同步失效，保证展示一致性。
+        """
+        self._anomalies_cache.clear()
+        self._trend_cache.clear()
+        emit_invalidate()
+        # 本进程刚广播，直接记录最新 mtime，避免下次读取时误清一次
+        self._sig_mtime = signal_mtime()
+
+    def _check_remote_invalidate(self) -> None:
+        """检测其他进程的失效信号：信号比本进程见过的更新则清空自身缓存。
+
+        读取重计算缓存前调用（一次 stat，µs 级开销）。
+        """
+        m = signal_mtime()
+        if m > self._sig_mtime:
+            self._sig_mtime = m
+            self._anomalies_cache.clear()
+            self._trend_cache.clear()
+
     def add_key(self, key: str) -> ApiKey:
         key = key.strip()
         masked = _mask(key)
@@ -226,6 +259,7 @@ class KeyPool:
             (encrypt_text(key), masked, now),
         )
         conn.commit()
+        self._invalidate_caches()
         return self.get_key(masked)
 
     def add_keys_batch(self, keys: list[str]) -> int:
@@ -249,6 +283,8 @@ class KeyPool:
             )
             added += 1
         conn.commit()
+        if added:
+            self._invalidate_caches()
         return added
 
     def remove_key(self, masked_or_key: str):
@@ -258,6 +294,7 @@ class KeyPool:
         else:
             conn.execute("DELETE FROM api_keys WHERE key = ?", (masked_or_key,))
         conn.commit()
+        self._invalidate_caches()
 
     def deactivate_key(self, masked: str, reason: str = ""):
         conn = self._get_conn()
@@ -266,6 +303,7 @@ class KeyPool:
             (reason, masked),
         )
         conn.commit()
+        self._invalidate_caches()
 
     def activate_key(self, masked: str):
         conn = self._get_conn()
@@ -274,6 +312,7 @@ class KeyPool:
             (masked,),
         )
         conn.commit()
+        self._invalidate_caches()
 
     def mark_exhausted(self, masked: str, reason: str = ""):
         """标记 key 额度耗尽（432/433）：移出轮询，但保留可恢复（月度重置后自动恢复）。"""
@@ -283,6 +322,7 @@ class KeyPool:
             (reason[:500] or "exhausted", masked),
         )
         conn.commit()
+        self._invalidate_caches()
 
     def mark_recovered(self, masked: str):
         """清除额度耗尽标记（新计费周期 usage 归零时调用）。"""
@@ -292,6 +332,7 @@ class KeyPool:
             (masked,),
         )
         conn.commit()
+        self._invalidate_caches()
 
     def _decrypt_or_migrate(self, stored: str, masked: str) -> str:
         """解密存储的 key；若为旧明文（无加密前缀），就地加密迁移后返回明文。"""
@@ -446,8 +487,12 @@ class KeyPool:
     # ── Usage recording ────────────────────────────────────────
     def record_request(self, masked: str, endpoint: str, latency_ms: float, success: bool,
                        credits: int = 0, error_msg: str = "", request_id: str = "",
-                       usage_source: str = ""):
-        """记录一次请求。usage_source：response/unknown/none（见 request_log 表注释）。"""
+                       usage_source: str = "", is_client_error: int = 0):
+        """记录一次请求。usage_source：response/unknown/none（见 request_log 表注释）。
+
+        is_client_error：1 表示该失败由客户端请求错误（HTTP 400/参数校验）导致，
+        与 Key/服务器健康无关，高错误率识别时忽略（不改变 error_count 累计）。
+        """
         now = time.time()
         conn = self._get_conn()
         conn.execute(
@@ -473,8 +518,8 @@ class KeyPool:
                     "UPDATE api_keys SET is_active=0 WHERE masked=?", (masked,)
                 )
         conn.execute(
-            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], now),
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, is_client_error, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], 1 if is_client_error else 0, now),
         )
         conn.commit()
         # 日志保留：周期性清理超期记录，避免 request_log 无界增长
@@ -571,6 +616,7 @@ class KeyPool:
                     k2 = self.get_key(r["masked"])
                     if k2 is not None and k2.error_count >= 2:
                         self.deactivate_key(r["masked"], f"health-check consecutive: {r['error'][:200]}")
+        self._invalidate_caches()
         return results
 
     def check_health_all(self) -> list[dict]:
@@ -658,6 +704,7 @@ class KeyPool:
         with ThreadPoolExecutor(max_workers=min(8, len(keys))) as ex:
             for r in ex.map(_sync, keys):
                 results.append(r)
+        self._invalidate_caches()
         return results
 
     def sync_usage_one(self, masked: str) -> dict | None:
@@ -698,19 +745,29 @@ class KeyPool:
         return float(row["c"] or 0)
 
     def _recent_error_rate(self, masked: str) -> tuple[float, str]:
-        """近 24h 错误率与最主要的错误类别。"""
+        """近 24h 错误率（仅服务器错误）与最主要的错误类别。
+
+        客户端请求错误（HTTP 400/参数校验失败，is_client_error=1）与 Key/服务器
+        健康无关，分子分母均排除，避免客户端参数错误虚增错误率导致误报。
+        """
         conn = self._get_conn()
         since = time.time() - 86400
         rows = conn.execute(
-            "SELECT success, COUNT(*) AS cnt FROM request_log WHERE key_masked=? AND created_at > ? GROUP BY success",
+            "SELECT success, is_client_error, COUNT(*) AS cnt FROM request_log "
+            "WHERE key_masked=? AND created_at > ? GROUP BY success, is_client_error",
             (masked, since),
         ).fetchall()
         total = sum(r["cnt"] for r in rows)
         if total == 0:
             return 0.0, ""
-        fails = sum(r["cnt"] for r in rows if not r["success"])
+        server_fails = sum(r["cnt"] for r in rows if not r["success"] and not r["is_client_error"])
+        client_fails = sum(r["cnt"] for r in rows if not r["success"] and r["is_client_error"])
+        server_reqs = total - client_fails  # 排除客户端错误请求后，真正发给服务器的请求数
+        if server_reqs <= 0:
+            return 0.0, ""
         err_rows = conn.execute(
-            "SELECT error_msg FROM request_log WHERE key_masked=? AND created_at > ? AND success=0",
+            "SELECT error_msg FROM request_log WHERE key_masked=? AND created_at > ? "
+            "AND success=0 AND is_client_error=0",
             (masked, since),
         ).fetchall()
         types: dict[str, int] = {}
@@ -718,7 +775,7 @@ class KeyPool:
             cat = _classify_error(r["error_msg"])
             types[cat] = types.get(cat, 0) + 1
         top = max(types, key=types.get) if types else "other"
-        return (fails / total), top
+        return (server_fails / server_reqs), top
 
     def _avg_latency(self, masked: str) -> float:
         conn = self._get_conn()
@@ -729,7 +786,7 @@ class KeyPool:
         return float(row["avg"] or 0)
 
     def detect_anomalies(self) -> list[dict]:
-        """结合本地调用记录与官方用量，识别异常 key。
+        """识别异常 key（结果短 TTL 缓存）。
 
         规则（阈值见 config.anomaly_thresholds）：
         - exhausted        : is_exhausted（官方 usage >= limit，已触发 432）
@@ -738,7 +795,23 @@ class KeyPool:
         - high_error_rate  : 近 24h 错误率 > error_rate
         - stale            : active 但近 stale_days 天无本地调用
         - slow             : 近 24h 平均延迟 > 池内均值 * slow_ratio
+
+        TTL：settings.cache_ttls.anomalies（默认 5s，0=关闭）。写操作后自动
+        失效；需要强制刷新可传 skip_cache=True。
         """
+        self._check_remote_invalidate()
+        ttl = float(cache_ttls().get("anomalies", 5.0))
+        if ttl > 0:
+            hit = self._anomalies_cache.get("anomalies")
+            if hit is not None:
+                return hit
+        result = self._detect_anomalies_impl()
+        if ttl > 0:
+            self._anomalies_cache.set("anomalies", result, ttl)
+        return result
+
+    def _detect_anomalies_impl(self) -> list[dict]:
+        """异常识别实现（无缓存），见 detect_anomalies。"""
         thresholds = get_settings().get("anomaly_thresholds") or {}
         error_rate_th = float(thresholds.get("error_rate", 0.3))
         leak_diff = float(thresholds.get("leak_diff_credits", 50))
@@ -839,7 +912,27 @@ class KeyPool:
         return [dict(r) for r in rows]
 
     def get_usage_trend(self, days: int = 7) -> dict:
-        """按天聚合 request_log 用量（本地时区）：每日请求数/成功/失败/积分/按 endpoint 拆分。"""
+        """按天聚合 request_log 用量（结果短 TTL 缓存）。
+
+        每日请求数/成功/失败/积分/按 endpoint 拆分。日志是追加写、按天聚合
+        结果秒级变化无意义，TTL：settings.cache_ttls.trend（默认 30s，0=关闭），
+        传 skip_cache=True 可强制刷新。
+        """
+        days = max(1, min(int(days), 90))
+        self._check_remote_invalidate()
+        ttl = float(cache_ttls().get("trend", 30.0))
+        key = ("trend", days)
+        if ttl > 0:
+            hit = self._trend_cache.get(key)
+            if hit is not None:
+                return hit
+        result = self._get_usage_trend_impl(days)
+        if ttl > 0:
+            self._trend_cache.set(key, result, ttl)
+        return result
+
+    def _get_usage_trend_impl(self, days: int = 7) -> dict:
+        """按天聚合实现（无缓存），见 get_usage_trend。"""
         days = max(1, min(int(days), 90))
         since = time.time() - days * 86400
         conn = self._get_conn()
@@ -914,7 +1007,7 @@ def _mask(key: str) -> str:
 
 
 def _classify_error(err: str) -> str:
-    """把错误分类：auth(认证)/quota(额度耗尽)/rate(限流)/other(临时错误)。"""
+    """把错误分类：auth(认证)/quota(额度耗尽)/rate(限流)/bad_request(客户端参数错误)/other(临时错误)。"""
     e = (err or "").lower()
     if any(s in e for s in (
         "432", "433", "plan limit", "paygo", "usage limit",
@@ -930,6 +1023,13 @@ def _classify_error(err: str) -> str:
         "429", "rate limit", "too many requests", "blocked due to excessive",
     )):
         return "rate"
+    # 客户端请求错误（HTTP 400/参数校验）：与 Key 健康无关，高错误率识别忽略
+    if any(s in e for s in (
+        "400", "bad request", "request validation failed",
+        "missing required parameter", "invalid parameter",
+        "research_stream_required", "unsupported parameter",
+    )):
+        return "bad_request"
     return "other"
 
 

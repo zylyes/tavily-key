@@ -9,6 +9,7 @@
 - **Key 异常识别**：自动识别额度耗尽/疑似泄露/高错误率等 6 类异常，Webhook / 托盘气泡通知
 - **Web 控制台**：Key 列表、请求日志（筛选/导出）、统计、Research 任务看板、健康检查、部署设置
 - **MCP 服务一体化管理**：面板内置 MCP 服务开关/设置（sse / streamable-http / stdio），局域网 IP / 主机名 / 本机三种地址展示与复制
+- **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/usage` 官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
 - **Research 增强**：异步任务（wait / status）、流式输出、结构化输出（output_schema）、报告长度与来源数控制
 - **访问鉴权**：可设置访问令牌，保护公网部署下的 `/api/*` 接口
 - **两套部署形态**：同一代码库，通过 `data/config.json` 切换
@@ -83,7 +84,7 @@ scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard
 (cd app && uvicorn dashboard:app --host 0.0.0.0 --port 8000)
 ```
 
-界面显示：key 列表、请求日志、**统计**、**Research 任务**、MCP 服务、**设置**。
+界面显示：key 列表、请求日志、**统计**、**Research 任务**、MCP 服务、**搜索代理**、**设置**。
 
 ## MCP 服务管理（供 AI Agent 调用）
 
@@ -112,6 +113,25 @@ scripts\run_dashboard.bat             # 或 deploy\windows-local\start_dashboard
 
 > stdio 模式由 AI 客户端直接拉起进程（本机直连），无法由面板启停；如需给 AI 客户端配置本机 stdio 直连，将 MCP 命令设为 `Tavily.exe --mcp` 且 `mcp_transport` 设为 `"stdio"`。
 
+## 搜索代理（Tavily 兼容 REST 服务）
+
+把 Key 池暴露为官方 Tavily API 形态（`POST /search`、`POST /extract`、`POST /crawl`、`POST /map`、`GET /usage`），供 Cherry Studio 等 AI 客户端通过「自定义 API 地址」直接对接；内部走 Key 池轮询/限流/异常切换，额度与日志自动落账。
+
+**启动方式**：
+
+- 面板「**搜索代理**」页签一键启停（或开启「随软件启动」）；默认监听 `0.0.0.0:8002`
+- 命令行：`python app/dashboard.py --proxy`（打包版 `Tavily.exe --proxy`）
+
+**对接步骤**（以 Cherry Studio 网络搜索 → Tavily 提供商为例）：
+
+1. 面板「搜索代理」页复制 API 地址（局域网 IP / 主机名 / 本机三形式），填入客户端「API 地址」（如 `http://<主机>:8002`）
+2. 复制代理密钥填入「API 密钥」（密钥为空时对外开放，面板会提示风险）
+3. 点「检测」验证连通即可
+
+**鉴权与错误映射**：客户端带 `Authorization: Bearer <proxy_token>`（或 body `api_key` 字段）；错误按类别映射为 Tavily 风格 `{"detail":{"error":...}}`——auth→401、quota→432、rate→429、参数错误→400、池空→503。
+
+> ⚠️ **安全提示**：`proxy_token` 留空时搜索代理不鉴权，任何可达设备都可消耗 Key 池额度；公网/局域网共享部署必须设置强密钥。
+
 ## 设置（域名绑定 / 部署模式 / 鉴权 / MCP）
 
 Web 控制台右上角「**设置**」标签页可配置：
@@ -134,6 +154,15 @@ Web 控制台右上角「**设置**」标签页可配置：
 | 端口 | MCP 服务端口（默认 8001） |
 | 项目/会话归属 ID | 可选，转发 `X-Project-ID` / `X-Human-Id` 头，便于 Tavily 侧按项目归类用量与会话分析 |
 
+「**搜索代理**」标签页可配置：
+
+| 配置项 | 说明 |
+| --- | --- |
+| 随软件启动 | 开启后软件启动自动拉起搜索代理，关闭软件自动停止 |
+| 监听地址 | `0.0.0.0`（局域网） / `127.0.0.1`（仅本机） |
+| 端口 | 代理服务端口（默认 8002） |
+| 代理密钥 | `proxy_token`，客户端 Bearer 鉴权；**留空则不鉴权（对外开放，面板会提示风险）** |
+
 等价地可手动编辑 `data/config.json`：
 
 ```json
@@ -152,7 +181,11 @@ Web 控制台右上角「**设置**」标签页可配置：
   "log_retention_days": 90,
   "notify_webhook": "",
   "notify_tray": true,
-  "notify_interval_minutes": 5
+  "notify_interval_minutes": 5,
+  "proxy_auto_start": false,
+  "proxy_host": "0.0.0.0",
+  "proxy_port": 8002,
+  "proxy_token": ""
 }
 ```
 
@@ -175,6 +208,7 @@ python app/cli.py list --active           # 仅活跃 key
 python app/cli.py stats                   # 用量统计
 python app/cli.py usage --sync            # 同步/查看官方用量
 python app/cli.py audit                   # 列出异常 key
+python app/cli.py proxy                   # 搜索代理状态/地址/密钥
 python app/cli.py health                  # 健康检查，自动停用失效 key
 python app/cli.py recent -n 20            # 最近 20 条请求日志
 python app/cli.py activate tvly-xxx****yyy  # 启用 key
@@ -187,7 +221,7 @@ python app/cli.py remove tvly-xxx****yyy      # 删除 key
 SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 
 - `api_keys` — key 列表、用量、状态（含官方套餐/用量同步、耗尽标记、异常计数）
-- `request_log` — 请求日志（含 request_id、积分来源 usage_source）
+- `request_log` — 请求日志（含 request_id、积分来源 usage_source、客户端错误标记 is_client_error）
 
 删除该文件不影响功能，下次启动自动重建空库。
 
@@ -203,6 +237,9 @@ SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 | `data/config.json` | 部署 + MCP 设置（mode/domain/host/port/auth_token/mcp_*），首次启动自动生成 |
 | `app/settings.py` | 配置读写模块（含局域网地址推导） |
 | `app/notify.py` | 异常通知（Webhook / Windows 托盘气泡，去重节流） |
+| `app/cache.py` | 通用 TTL 缓存基础设施（KeyPool/Dashboard 接口缓存，跨进程失效） |
+| `app/tavily_proxy.py` | 搜索代理本体（Tavily 兼容 REST 服务） |
+| `app/proxy_manager.py` | 搜索代理子进程管理（面板启停、端口检测） |
 | `app/mcp_manager.py` | MCP 服务子进程管理（面板启停、端口检测） |
 | `app/mcp_server.py` | MCP 服务本体（sse / streamable-http / stdio） |
 | `deploy/linux-server/` | Linux Server 版部署包（systemd + Nginx） |

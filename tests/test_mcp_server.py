@@ -1,6 +1,7 @@
 """MCP 服务器测试：Bearer 鉴权中间件、工具调用（mock client）、research 流式回退。"""
 import asyncio
 import json
+import threading
 
 import pytest
 from starlette.applications import Starlette
@@ -37,6 +38,21 @@ def test_bearer_auth_requires_token():
     assert r.status_code == 200
     r = client.get("/", headers={"Authorization": "Bearer wrong"})
     assert r.status_code == 401
+
+
+def test_is_client_error():
+    from tavily import BadRequestError
+
+    # SDK 对 HTTP 400 抛 BadRequestError → 客户端错误
+    assert mcp_server._is_client_error(BadRequestError("invalid search_depth")) is True
+    # 消息兜底：含 400 Bad Request / bad request
+    assert mcp_server._is_client_error(Exception("400 Bad Request for url")) is True
+    assert mcp_server._is_client_error(Exception("Bad request: missing parameter")) is True
+    # 服务器侧错误不计为客户端错误
+    assert mcp_server._is_client_error(TimeoutError("request timed out")) is False
+    assert mcp_server._is_client_error(Exception("Internal Server Error")) is False
+    assert mcp_server._is_client_error(Exception("This request exceeds your plan's set usage limit")) is False
+    assert mcp_server._is_client_error(Exception("Unauthorized: invalid api key")) is False
 
 
 def test_bearer_auth_disabled_when_no_token():
@@ -657,12 +673,16 @@ def test_client_for_forwards_project_id(monkeypatch):
 
 
 # ── P2-3：Research 任务看板（缓存与查询上限） ────────────────
-def test_list_research_tasks_cache_and_cap(monkeypatch):
+def test_list_research_tasks_cache_and_cap(tmp_path, monkeypatch):
     """看板：查询带 TTL 缓存（终态不重复查询）与查询上限（超限标 unknown 不触达 API）。"""
+    # 隔离落盘路径：避免查询出的终态任务写入真实 data/research_tasks_cache.json
+    monkeypatch.setattr(mcp_server, "_RESEARCH_TASKS_CACHE_PATH", tmp_path / "rtc.json")
     state = {"queries": 0}
+    state_lock = threading.Lock()
 
-    def fake_query(request_id, pinned=""):
-        state["queries"] += 1
+    def fake_query(request_id, pinned="", timeout=None):
+        with state_lock:
+            state["queries"] += 1
         return {"status": "completed", "content": "done"}, pinned
 
     mcp_server._research_keys.clear()
@@ -687,6 +707,73 @@ def test_list_research_tasks_cache_and_cap(monkeypatch):
     assert 0 < state["queries"] <= mcp_server._RESEARCH_TASK_QUERY_CAP
     assert any(t["status"] == "unknown" for t in tasks)
 
+    mcp_server._research_keys.clear()
+    mcp_server._research_task_cache.clear()
+
+
+def test_research_tasks_cache_persist(tmp_path, monkeypatch):
+    """终态任务摘要落盘：进行中任务不固化；落盘后可加载恢复。"""
+    cache_path = tmp_path / "research_tasks_cache.json"
+    monkeypatch.setattr(mcp_server, "_RESEARCH_TASKS_CACHE_PATH", cache_path)
+    mcp_server._research_task_cache.clear()
+    mcp_server._research_task_cache["rid-done"] = (
+        mcp_server.time.time(), {"status": "completed", "content": "报告摘要"}, None)
+    mcp_server._research_task_cache["rid-running"] = (
+        mcp_server.time.time(), {"status": "running", "content": "..."}, None)
+    mcp_server._save_research_tasks_cache()
+    assert cache_path.exists()
+    data = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert "rid-done" in data
+    assert "rid-running" not in data          # 进行中任务不落盘
+    assert data["rid-done"]["content"] == "报告摘要"
+
+    # 清空内存后从落盘恢复
+    mcp_server._research_task_cache.clear()
+    mcp_server._load_research_tasks_cache()
+    assert "rid-done" in mcp_server._research_task_cache
+    entry = mcp_server._research_task_cache["rid-done"]
+    assert entry[1]["status"] == "completed"
+    assert entry[2] == mcp_server._RESEARCH_TASK_PERSIST_TTL
+    mcp_server._research_task_cache.clear()
+
+
+def test_research_tasks_cache_skips_stale_and_running(tmp_path, monkeypatch):
+    """落盘加载：过期终态与进行中任务均不加载。"""
+    cache_path = tmp_path / "research_tasks_cache.json"
+    monkeypatch.setattr(mcp_server, "_RESEARCH_TASKS_CACHE_PATH", cache_path)
+    stale_ts = mcp_server.time.time() - mcp_server._RESEARCH_TASK_PERSIST_TTL - 10
+    data = {
+        "rid-stale": {"status": "completed", "content": "x", "ts": stale_ts},
+        "rid-running": {"status": "running", "content": "y", "ts": mcp_server.time.time()},
+    }
+    cache_path.write_text(json.dumps(data), encoding="utf-8")
+    mcp_server._research_task_cache.clear()
+    mcp_server._load_research_tasks_cache()
+    assert "rid-stale" not in mcp_server._research_task_cache   # 已过期
+    assert "rid-running" not in mcp_server._research_task_cache  # 进行中不固化
+    mcp_server._research_task_cache.clear()
+
+
+def test_research_tasks_loaded_cache_hits_without_query(tmp_path, monkeypatch):
+    """落盘恢复的任务在看板中直接命中，不重新调官方 API。"""
+    cache_path = tmp_path / "research_tasks_cache.json"
+    monkeypatch.setattr(mcp_server, "_RESEARCH_TASKS_CACHE_PATH", cache_path)
+    data = {"rid-done": {"status": "completed", "content": "report", "ts": mcp_server.time.time()}}
+    cache_path.write_text(json.dumps(data), encoding="utf-8")
+    mcp_server._research_keys.clear()
+    mcp_server._research_keys["rid-done"] = "tvly-1***"
+    mcp_server._research_task_cache.clear()
+    mcp_server._load_research_tasks_cache()
+
+    def boom(*a, **k):
+        raise AssertionError("不应重新查询官方 API")
+
+    monkeypatch.setattr(mcp_server, "_query_research_status", boom)
+    tasks = mcp_server.list_research_tasks(limit=10)
+    assert len(tasks) == 1
+    assert tasks[0]["request_id"] == "rid-done"
+    assert tasks[0]["status"] == "completed"
+    assert tasks[0]["cached"] is True
     mcp_server._research_keys.clear()
     mcp_server._research_task_cache.clear()
 
