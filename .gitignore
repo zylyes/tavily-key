@@ -4,7 +4,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 
-# ---- 构建产物（PyInstaller / build_win.bat 自动生成，统一在 out/ 下）----
+# ---- 构建产物（PyInstaller / build_win.bat 自动生成）----
+# build/ 存放 PyInstaller 中间产物，dist/ 存放最终分发目录与发布存档（v0.8.0 整改后布局）
+build/
+dist/
 out/
 *.spec
 # Tavily.spec 是 Windows 构建所需，随仓库发布，需取消忽略
