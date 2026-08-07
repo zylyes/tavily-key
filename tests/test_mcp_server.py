@@ -380,7 +380,7 @@ def test_research_key_persists_across_reload(monkeypatch, tmp_path):
     # 模拟重启：清空内存后重新从磁盘加载
     mcp_server._research_keys.clear()
     mcp_server._load_research_keys()
-    assert mcp_server._research_keys.get("rid-persist") == "tvly-persist***"
+    assert (mcp_server._research_keys.get("rid-persist") or {}).get("masked") == "tvly-persist***"
 
     mcp_server._research_keys.clear()
 
@@ -416,7 +416,7 @@ def test_research_key_save_is_debounced(monkeypatch, tmp_path):
     mcp_server._flush_research_keys()
     assert len(fake.data) == 1
     data = _json.loads(fake.data[0])
-    assert data.get("rid-1") == "tvly-1***" and data.get("rid-2") == "tvly-2***"
+    assert data["rid-1"]["masked"] == "tvly-1***" and data["rid-2"]["masked"] == "tvly-2***"
     mcp_server._research_keys.clear()
 
 
@@ -1013,5 +1013,89 @@ def test_load_research_keys_bom_compatible(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_server, "_RESEARCH_KEYS_PATH", fake_path)
     mcp_server._research_keys.clear()
     mcp_server._load_research_keys()
-    assert mcp_server._research_keys.get("rid-bom") == "tvly-bom***"
+    assert (mcp_server._research_keys.get("rid-bom") or {}).get("masked") == "tvly-bom***"
+    mcp_server._research_keys.clear()
+
+
+def test_load_research_keys_legacy_string_value(tmp_path, monkeypatch):
+    """旧格式（request_id→masked 字符串）文件归一为 {"masked", "params": {}}。"""
+    fake_path = tmp_path / "research_keys_legacy.json"
+    fake_path.write_text('{"rid-old": "tvly-old***"}', encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "_RESEARCH_KEYS_PATH", fake_path)
+    mcp_server._research_keys.clear()
+    mcp_server._load_research_keys()
+    entry = mcp_server._research_keys.get("rid-old")
+    assert entry is not None and entry["masked"] == "tvly-old***"
+    assert entry["params"] == {}
+    mcp_server._research_keys.clear()
+
+
+def test_save_research_key_saves_params(tmp_path, monkeypatch):
+    """_save_research_key 保存 masked + 提交参数（供失败任务重试）。"""
+    monkeypatch.setattr(mcp_server, "_RESEARCH_KEYS_PATH", tmp_path / "rk.json")
+    mcp_server._research_keys.clear()
+    mcp_server._save_research_key("rid-p", "tvly-***", params={"input": "调研AI", "model": "pro"})
+    entry = mcp_server._research_keys.get("rid-p")
+    assert entry["masked"] == "tvly-***"
+    assert entry["params"]["model"] == "pro"
+    assert entry["params"]["input"] == "调研AI"
+    mcp_server._research_keys.clear()
+
+
+# ── Research 任务重试（用原参数重新提交）─────────────────────
+def test_retry_research_task_ok(monkeypatch):
+    """用保存的参数重试成功，返回新 request_id（wait=false 提交）。"""
+    captured: dict = {}
+
+    def fake_impl(**kw):
+        captured.update(kw)
+        return json.dumps({"request_id": "new-rid-1", "status": "submitted"}, ensure_ascii=False)
+
+    monkeypatch.setattr(mcp_server, "_research_impl", fake_impl)
+    mcp_server._research_keys.clear()
+    mcp_server._research_keys["old-rid"] = {
+        "masked": "tvly-***",
+        "params": {"input": "调研AI", "model": "mini", "citation_format": "apa"},
+    }
+    r = mcp_server.retry_research_task("old-rid")
+    assert r["ok"] is True and r["request_id"] == "new-rid-1"
+    assert captured.get("input") == "调研AI"
+    assert captured.get("model") == "mini"
+    assert captured.get("citation_format") == "apa"
+    assert captured.get("wait") is False  # 重试不阻塞，客户端可轮询新任务
+    mcp_server._research_keys.clear()
+
+
+def test_retry_research_task_missing_params():
+    """无提交参数的任务（旧格式/空 params）无法重试，返回清晰错误。"""
+    mcp_server._research_keys.clear()
+    mcp_server._research_keys["old-rid"] = {"masked": "tvly-***", "params": {}}
+    r = mcp_server.retry_research_task("old-rid")
+    assert r["ok"] is False
+    assert "input" in r.get("error", "")
+    mcp_server._research_keys.clear()
+
+
+def test_retry_research_task_unknown():
+    """未知任务 ID 返回错误。"""
+    mcp_server._research_keys.clear()
+    r = mcp_server.retry_research_task("nope")
+    assert r["ok"] is False
+    mcp_server._research_keys.clear()
+
+
+def test_retry_research_task_impl_error(monkeypatch):
+    """重试提交异常时返回 ok=False + 错误信息（不冒泡）。"""
+    def fake_impl(**kw):
+        raise RuntimeError("quota exhausted")
+
+    monkeypatch.setattr(mcp_server, "_research_impl", fake_impl)
+    mcp_server._research_keys.clear()
+    mcp_server._research_keys["old-rid"] = {
+        "masked": "tvly-***",
+        "params": {"input": "调研AI"},
+    }
+    r = mcp_server.retry_research_task("old-rid")
+    assert r["ok"] is False
+    assert "quota" in r.get("error", "")
     mcp_server._research_keys.clear()

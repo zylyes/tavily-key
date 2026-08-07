@@ -5,6 +5,22 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.11.0] - 2026-08-08
+
+### Added
+
+- **用量耗尽预测**：Key 列表用量列显示「约 N 天后耗尽」——按近 7 天本地日均
+  消耗（`request_log` 成功请求积分）与剩余额度估算；7 天内耗尽标黄提示，悬停
+  显示剩余积分与日均消耗（新增 `GET /api/usage/eta` + `KeyPool.exhaustion_eta`，
+  30s 轮询）。
+- **Research 任务一键重试**：任务看板失败 / 错误任务新增「重试」按钮，用提交时
+  保存的原参数（input / model / 高级参数）重新提交（`POST /api/research/retry` +
+  `retry_research_task`，返回新 request_id）；`research_keys` 映射扩展保存提交
+  参数（兼容旧格式），MCP 与搜索代理提交均记录。
+- **面板内置 wiki 文档**：新增「文档」视图（左侧目录树 + 右侧 Markdown 渲染，
+  复用 `MdView`）——后端 `GET /api/docs/tree` / `GET /api/docs`（路径严格限制在
+  `docs/wiki` 内防穿越，实时读盘免重启），侧边导航新增「文档」入口。
+
 ## [0.10.0] - 2026-08-08
 
 ### Added

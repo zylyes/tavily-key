@@ -28,41 +28,53 @@ mcp = FastMCP("Tavily Web Search", instructions="Use this server to search the w
 
 pool = KeyPool()
 
-# request_id → 提交 research 时使用的 masked key。Tavily research 任务按 key
-# 隔离，tavily_research_status 若用轮询到的其他 key 查询会返回 404，因此
-# 记录映射，status 查询时优先使用同一 key。
+# request_id → 提交 research 时使用的 masked key 与提交参数。Tavily research 任务
+# 按 key 隔离，tavily_research_status 若用轮询到的其他 key 查询会返回 404，因此
+# 记录映射，status 查询时优先使用同一 key。值结构 {"masked": str, "params": dict}
+# （params 保存提交参数，供面板「重试失败任务」复用）。
 # 映射持久化到 data/research_keys.json：服务器重启后仍可查询未完成任务。
-_research_keys: dict[str, str] = {}
+_research_keys: dict[str, dict] = {}
 _research_keys_lock = threading.Lock()
 _RESEARCH_KEYS_PATH = runtime_dir() / "research_keys.json"
 
 
 def _load_research_keys() -> None:
-    """从磁盘加载 request_id→masked 映射（服务器重启后异步任务仍可查询）。
+    """从磁盘加载 request_id→提交信息映射（服务器重启后异步任务仍可查询）。
 
     utf-8-sig：兼容带 BOM 的 UTF-8（某些编辑器/工具会写 BOM，若按纯 utf-8
     解析 json 会抛异常导致整份映射静默回退为空，任务看板/status 将找不到 key）。
+    兼容旧格式：历史文件值为纯 masked 字符串 → 归一为 {"masked", "params": {}}。
     """
     global _research_keys
     try:
         if _RESEARCH_KEYS_PATH.exists():
             data = json.loads(_RESEARCH_KEYS_PATH.read_text(encoding="utf-8-sig"))
             if isinstance(data, dict):
-                _research_keys = {str(k): str(v) for k, v in data.items()}
+                loaded: dict[str, dict] = {}
+                for k, v in data.items():
+                    k = str(k)
+                    if isinstance(v, dict) and "masked" in v:
+                        loaded[k] = {
+                            "masked": str(v["masked"]),
+                            "params": v.get("params") or {},
+                        }
+                    else:
+                        # 旧格式：request_id → masked 字符串
+                        loaded[k] = {"masked": str(v), "params": {}}
+                _research_keys = loaded
     except Exception:  # noqa: BLE001
         _research_keys = {}
 
 
-def _save_research_key(request_id: str, masked: str) -> None:
-    """记录 request_id→masked 映射（内存立即生效，磁盘延迟合并写）。
+def _save_research_key(request_id: str, masked: str, params: dict | None = None) -> None:
+    """记录 request_id→提交信息映射（含提交参数，供看板重试）。
 
-    上限 1000 条防无界增长。写盘不再每次同步全量落盘（research 提交高频时
-    浪费 IO），改为延迟合并写：调度一个后台线程，1s 窗口内的多次修改合并为
-    一次写盘；服务器重启最多丢失最近 ~1s 的映射（重新提交即可），可接受。
+    内存立即生效，磁盘延迟合并写。值结构 {"masked", "params"}：params 保存
+    research 提交参数（input/model/高级参数），失败任务可一键复用原参数重试。
     """
     global _research_keys
     with _research_keys_lock:
-        _research_keys[request_id] = masked
+        _research_keys[request_id] = {"masked": masked, "params": params or {}}
         if len(_research_keys) > 1000:
             dropped = len(_research_keys) - 1000
             _research_keys = dict(list(_research_keys.items())[-1000:])
@@ -806,7 +818,19 @@ def _research_impl(input: str, model: str, citation_format: str,
             request_id = resp.get("request_id") if isinstance(resp, dict) else None
             if not request_id:
                 raise RuntimeError(f"Unexpected research response: {resp}")
-            _save_research_key(request_id, masked)
+            # 保存提交参数：供面板「重试失败任务」复用原参数重新提交
+            _save_research_key(request_id, masked, params={
+                "input": input,
+                "model": model,
+                "citation_format": citation_format,
+                "include_domains": include_domains,
+                "exclude_domains": exclude_domains,
+                "output_length": ol,
+                "output_schema": output_schema,
+                "max_sources": max_sources,
+                "max_subsources": max_subsources,
+                "poll_interval": poll_interval,
+            })
             break
         except Exception as e:  # noqa: BLE001
             err = str(e)
@@ -933,7 +957,8 @@ async def tavily_research_status(request_id: str) -> str:
         masked = ""
         try:
             # research 任务按 key 隔离：优先用提交时的同一 key 查询，避免 404
-            pinned = _research_keys.get(request_id) or ""
+            entry = _research_keys.get(request_id) or {}
+            pinned = entry.get("masked", "") if isinstance(entry, dict) else str(entry)
             resp, masked = _query_research_status(request_id, pinned)
             _record(masked, "research-status", t0, True, _usage_credits(resp)[0],
                     request_id=request_id, usage_source="unknown")
@@ -1116,7 +1141,8 @@ def list_research_tasks(limit: int = 50) -> list[dict]:
     now = time.time()
     tasks: list[dict] = []
     pending: list[tuple[str, str]] = []
-    for request_id, masked in reversed(items):
+    for request_id, entry in reversed(items):
+        masked = entry.get("masked", "") if isinstance(entry, dict) else str(entry)
         cached = _research_task_cache.get(request_id)
         if cached is not None:
             ts = cached[0]
@@ -1169,6 +1195,48 @@ def list_research_tasks(limit: int = 50) -> list[dict]:
     if need_save:
         _maybe_save_research_tasks_cache()
     return tasks
+
+
+def retry_research_task(request_id: str) -> dict:
+    """用原任务参数重新提交 research（供面板「重试失败任务」）。
+
+    从 research_keys 映射读取提交时保存的参数（input/model/高级参数），重新
+    走 _research_impl 提交（wait=false 立即返回新 request_id，不阻塞）；原任务
+    参数缺失（旧格式映射）时返回错误。返回 {ok, request_id, task} 或 {ok: False, error}。
+    """
+    with _research_keys_lock:
+        entry = _research_keys.get(request_id)
+    if not entry:
+        return {"ok": False, "error": f"未找到任务 {request_id} 的提交记录"}
+    if not isinstance(entry, dict):
+        return {"ok": False, "error": "该任务为旧格式记录，无提交参数，无法重试"}
+    params = entry.get("params") or {}
+    input_text = params.get("input")
+    if not input_text:
+        return {"ok": False, "error": "任务缺少 input 参数，无法重试"}
+    try:
+        out = _research_impl(
+            input=input_text,
+            model=params.get("model") or "auto",
+            citation_format=params.get("citation_format") or "numbered",
+            include_domains=params.get("include_domains"),
+            exclude_domains=params.get("exclude_domains"),
+            wait=False,
+            timeout=None,
+            poll_interval=float(params.get("poll_interval") or 2.0),
+            output_length=params.get("output_length") or "standard",
+            output_schema=params.get("output_schema"),
+            max_sources=params.get("max_sources"),
+            max_subsources=params.get("max_subsources"),
+        )
+        data = json.loads(out)
+        new_rid = data.get("request_id")
+        if not new_rid:
+            return {"ok": False, "error": data.get("error") or "重试提交失败"}
+        return {"ok": True, "request_id": new_rid, "task": data}
+    except Exception as e:  # noqa: BLE001
+        _log.warning("research 重试失败 %s: %s", request_id, str(e)[:300])
+        return {"ok": False, "error": str(e)[:300]}
 
 
 @mcp.tool()

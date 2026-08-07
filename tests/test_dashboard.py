@@ -386,6 +386,51 @@ def test_usage_sync_interval(monkeypatch):
     assert dashboard._usage_sync_interval() == 6 * 3600
 
 
+def test_research_retry_endpoint(client, monkeypatch):
+    """/api/research/retry 透传 request_id 并返回重试结果。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    captured: dict = {}
+
+    def fake_retry(rid):
+        captured["rid"] = rid
+        return {"ok": True, "request_id": "new-1", "task": {}}
+
+    monkeypatch.setattr("mcp_server.retry_research_task", fake_retry)
+    r = client.post("/api/research/retry", json={"request_id": "old-1"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["request_id"] == "new-1"
+    assert captured["rid"] == "old-1"
+
+
+def test_research_retry_missing_id(client, monkeypatch):
+    """缺 request_id 时返回业务错误（HTTP 200 + ok=False）。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    r = client.post("/api/research/retry", json={})
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "request_id" in r.json().get("error", "")
+
+
+def test_docs_endpoints(client, monkeypatch):
+    """文档目录树与内容读取端点；路径穿越返回 404。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    r = client.get("/api/docs/tree")
+    assert r.status_code == 200
+    tree = r.json()["tree"]
+    assert isinstance(tree, list)
+    # 取第一篇文档验证内容
+    if tree:
+        first = tree[0]["docs"][0]["path"]
+        r2 = client.get(f"/api/docs?path={first}")
+        assert r2.status_code == 200
+        doc = r2.json()["doc"]
+        assert doc["path"] == first and doc["content"]
+    # 路径穿越 → 404
+    r3 = client.get("/api/docs?path=../../README.md")
+    assert r3.status_code == 404
+
+
 def test_audit_export_zip(client, monkeypatch):
     """审计导出 zip：含全量请求日志 CSV + Key 池状态 + 汇总（无密钥明文）。"""
     import io

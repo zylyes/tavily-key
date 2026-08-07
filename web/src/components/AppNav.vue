@@ -27,6 +27,7 @@ const ITEMS: NavItem[] = [
   { path: '/mcp', label: 'MCP 服务', icon: 'server' },
   { path: '/proxy', label: '搜索代理', icon: 'globe' },
   { path: '/tasks', label: 'Research 任务', icon: 'beaker' },
+  { path: '/docs', label: '文档', icon: 'book' },
   { path: '/settings', label: '设置', icon: 'settings' },
 ]
 

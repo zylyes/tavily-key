@@ -302,7 +302,7 @@ def test_research_submit_ok_and_pins_key(proxy_env, monkeypatch, tmp_path):
     assert last["max_sources"] == 5
     assert "unknown_field" not in last
     # request_id→key 映射已写入（内存 + 落盘）
-    assert mcp_server._research_keys.get("rid-r") == "tvly-***"
+    assert (mcp_server._research_keys.get("rid-r") or {}).get("masked") == "tvly-***"
     mcp_server._research_keys.clear()
 
 

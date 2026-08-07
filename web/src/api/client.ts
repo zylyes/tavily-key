@@ -442,6 +442,16 @@ export const getUsageTrend = (days = 7, source = '', project = '') =>
     `/api/usage/trend?days=${encodeURIComponent(days)}&source=${encodeURIComponent(source)}`
       + `&project=${encodeURIComponent(project)}`)
 
+/** GET /api/usage/eta?days= —— 按近 N 天日均消耗估算各 active key 额度耗尽时间 */
+export interface UsageEtaItem {
+  masked: string
+  remaining: number
+  daily_avg: number
+  eta_days: number | null
+}
+export const getUsageEta = (days = 7) =>
+  request<{ ok: true; eta: UsageEtaItem[] }>(`/api/usage/eta?days=${encodeURIComponent(days)}`)
+
 /** GET /api/projects —— 请求日志中出现过的项目 ID（面板筛选下拉） */
 export const getProjects = () =>
   request<{ ok: true; projects: string[] }>('/api/projects')
@@ -459,6 +469,11 @@ export const syncUsageOne = (masked: string) =>
 /** GET /api/research/tasks?limit=（1-200，默认 50） */
 export const getResearchTasks = (limit = 50) =>
   request<{ ok: true; tasks: ResearchTask[] }>(`/api/research/tasks?limit=${encodeURIComponent(limit)}`)
+
+/** POST /api/research/retry —— 用原任务参数重试失败任务，返回新提交的 request_id */
+export const retryResearchTask = (requestId: string) =>
+  request<{ ok: true; request_id: string; task: unknown }>(
+    '/api/research/retry', jsonInit('POST', { request_id: requestId }))
 
 // ── 日志 ───────────────────────────────────────────────────
 function logsQueryString(params: LogsQuery): string {
@@ -497,6 +512,28 @@ export const clearLogs = (params: LogsQuery = {}) =>
 /** GET /api/audit/export.zip —— 全量请求审计包（zip：请求日志 + 池状态 + 汇总） */
 export const exportAuditZip = () =>
   requestBlob('/api/audit/export.zip')
+
+/** GET /api/docs/tree —— wiki 文档目录树（分类 → 文档列表） */
+export interface DocItem {
+  name: string
+  path: string
+  title: string
+}
+export interface DocCategory {
+  category: string
+  docs: DocItem[]
+}
+export const getDocsTree = () =>
+  request<{ ok: true; tree: DocCategory[] }>('/api/docs/tree')
+
+/** GET /api/docs?path= —— 读取 wiki 文档 markdown 原文 + 标题 */
+export interface WikiDoc {
+  path: string
+  title: string
+  content: string
+}
+export const getDoc = (path: string) =>
+  request<{ ok: true; doc: WikiDoc }>(`/api/docs?path=${encodeURIComponent(path)}`)
 
 // ── 设置 ───────────────────────────────────────────────────
 /** GET /api/settings */

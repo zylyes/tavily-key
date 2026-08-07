@@ -314,7 +314,17 @@ async def proxy_research(request: Request):
     def _pin(masked, resp):
         rid = resp.get("request_id") if isinstance(resp, dict) else None
         if rid:
-            mcp_server._save_research_key(str(rid), masked)
+            mcp_server._save_research_key(str(rid), masked, params={
+                "input": inp,
+                "model": kwargs.get("model") or "auto",
+                "citation_format": kwargs.get("citation_format") or "numbered",
+                "include_domains": kwargs.get("include_domains"),
+                "exclude_domains": kwargs.get("exclude_domains"),
+                "output_length": kwargs.get("output_length") or "standard",
+                "output_schema": kwargs.get("output_schema"),
+                "max_sources": kwargs.get("max_sources"),
+                "max_subsources": kwargs.get("max_subsources"),
+            })
 
     return await anyio.to_thread.run_sync(_call, "research", _do, _pin)
 
@@ -344,7 +354,8 @@ async def proxy_research_status(request_id: str):
     共享），找不到/已失效才回退轮询取 key。
     """
     _refresh_research_keys()
-    pinned = mcp_server._research_keys.get(request_id) or ""
+    _rk_entry = mcp_server._research_keys.get(request_id) or {}
+    pinned = _rk_entry.get("masked", "") if isinstance(_rk_entry, dict) else str(_rk_entry)
     masked = ""
     t0 = time.time()
     try:

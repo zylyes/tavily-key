@@ -30,14 +30,37 @@ import {
   deactivateKey,
   healthCheckOne,
   syncUsageOne,
+  getUsageEta,
 } from '@/api/client'
-import type { ApiKeyInfo, Anomaly, HealthResult, UsageSyncResult } from '@/api/client'
+import type { ApiKeyInfo, Anomaly, HealthResult, UsageSyncResult, UsageEtaItem } from '@/api/client'
 import { fmtNum, fmtTs, fmtLatency } from '@/utils/format'
 import { parseKeysText, runParallel, errMsg, anomalyLabel } from './parts/keys/utils'
 import type { BulkItemResult } from './parts/keys/utils'
 
 const toast = useToast()
 const { data, loading, error, refresh } = usePolling(getStats, { interval: 5000 })
+
+// 用量耗尽预测：按近 7 天本地日均消耗估算各 key 的预计耗尽天数（30s 轮询）
+const { data: etaResp } = usePolling(getUsageEta, { interval: 30000 })
+const etaMap = computed<Record<string, UsageEtaItem>>(() => {
+  const m: Record<string, UsageEtaItem> = {}
+  for (const e of etaResp.value?.eta ?? []) m[e.masked] = e
+  return m
+})
+
+function etaOf(k: ApiKeyInfo): UsageEtaItem | undefined {
+  return etaMap.value[k.masked]
+}
+function etaDays(k: ApiKeyInfo): number | null {
+  return etaOf(k)?.eta_days ?? null
+}
+function etaText(k: ApiKeyInfo): string {
+  const e = etaOf(k)
+  if (!e || e.daily_avg <= 0 || e.eta_days == null) return ''
+  if (e.eta_days <= 0) return '已耗尽'
+  if (e.eta_days <= 1) return `约 ${Math.round(e.eta_days)} 天内耗尽`
+  return `约 ${Math.ceil(e.eta_days)} 天后耗尽`
+}
 
 // ── 派生数据 ─────────────────────────────────────────────────
 const keys = computed<ApiKeyInfo[]>(() => data.value?.keys ?? [])
@@ -584,6 +607,12 @@ const showAnomalies = ref(false)
                     height="5px"
                   />
                   <span v-else class="quota-unsynced">未同步</span>
+                  <span
+                    v-if="etaText(k)"
+                    class="quota-eta"
+                    :class="{ 'eta-warn': etaDays(k) != null && etaDays(k)! <= 7 }"
+                    :title="etaOf(k) ? `剩余 ${etaOf(k)!.remaining} 积分 · 日均消耗 ${etaOf(k)!.daily_avg}（按近 7 天本地日志估算）` : ''"
+                  >{{ etaText(k) }}</span>
                 </td>
                 <td class="num u-num">{{ fmtNum(k.request_count) }}</td>
                 <td class="num u-num" :class="{ 'err-n': k.error_count > 0 }">{{ fmtNum(k.error_count) }}</td>
@@ -780,7 +809,7 @@ const showAnomalies = ref(false)
 }
 
 .col-check { width: 34px; }
-.col-quota { min-width: 150px; }
+.col-quota { min-width: 170px; }
 /* 操作列：固定列宽 = 4 个等宽按钮(26px) + 3 个 gap(2px) + 两侧 padding(12px)，
    标题与按钮组均居中对齐 */
 .col-ops { width: 134px; }
@@ -789,6 +818,16 @@ const showAnomalies = ref(false)
 .key-masked { font-size: 11.5px; letter-spacing: 0.01em; }
 .status-cell { gap: 5px; flex-wrap: wrap; }
 .quota-unsynced { font-size: 11px; color: var(--warn); }
+/* 用量耗尽预测：按近 7 天日均消耗估算（剩余额度/日均）；7 天内耗尽标黄提示 */
+.quota-eta {
+  display: block;
+  margin-top: 3px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.quota-eta.eta-warn { color: var(--warn); }
 .cell-ts { font-size: 11px; white-space: nowrap; }
 .err-n { color: var(--danger); }
 .ops { display: flex; justify-content: center; gap: 2px; }

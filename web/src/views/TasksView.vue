@@ -9,10 +9,12 @@ import GIcon from '@/components/GIcon.vue'
 import Skeleton from '@/components/Skeleton.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import { usePolling } from '@/composables/usePolling'
-import { getResearchTasks, type ResearchTask } from '@/api/client'
+import { useToast } from '@/composables/useToast'
+import { getResearchTasks, retryResearchTask, type ResearchTask } from '@/api/client'
 import TaskDetailModal from './parts/tasks/TaskDetailModal.vue'
 import { isTaskDone, taskDetailPreview, taskStatusLabel, taskStatusType } from './parts/tasks/taskMeta'
 
+const toast = useToast()
 const { data, loading, refreshing, error, refresh } = usePolling(
   () => getResearchTasks(50),
   { interval: 10000 },
@@ -25,6 +27,26 @@ function onManualRefresh(): void {
 
 const tasks = computed(() => data.value?.tasks ?? [])
 const doneCount = computed(() => tasks.value.filter((t) => isTaskDone(t.status)).length)
+
+/** 可一键重试的状态：失败 / 错误（取消是用户主动行为，不重试） */
+function isRetryable(t: ResearchTask): boolean {
+  return t.status === 'failed' || t.status === 'error'
+}
+
+const retrying = ref<string | null>(null)
+async function onRetry(t: ResearchTask): Promise<void> {
+  if (retrying.value) return
+  retrying.value = t.request_id
+  try {
+    const r = await retryResearchTask(t.request_id)
+    toast.success(`已重新提交：${r.request_id}`)
+    void refresh({ force: true })
+  } catch (e) {
+    toast.error('重试失败：' + (e instanceof Error ? e.message : String(e)))
+  } finally {
+    retrying.value = null
+  }
+}
 
 const detailOpen = ref(false)
 const selected = ref<ResearchTask | null>(null)
@@ -72,6 +94,7 @@ function openDetail(t: ResearchTask): void {
             <th style="width: 22%">Key</th>
             <th style="width: 15%">状态</th>
             <th>详情</th>
+            <th style="width: 70px">操作</th>
           </tr>
         </thead>
         <tbody>
@@ -89,6 +112,18 @@ function openDetail(t: ResearchTask): void {
               <GBadge v-if="t.cached" type="neutral" class="tasks-cached">缓存</GBadge>
             </td>
             <td class="u-ellipsis u-muted">{{ taskDetailPreview(t) }}</td>
+            <td class="tasks-ops">
+              <GButton
+                v-if="isRetryable(t)"
+                text
+                size="sm"
+                :busy="retrying === t.request_id"
+                title="用原参数重新提交"
+                @click.stop="onRetry(t)"
+              >
+                <GIcon name="refresh" :size="13" />重试
+              </GButton>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -134,4 +169,8 @@ function openDetail(t: ResearchTask): void {
 
 .tasks-id { font-size: 11px; color: var(--text-3); }
 .tasks-cached { margin-left: 6px; }
+
+/* 操作列：重试按钮（阻止行点击冒泡已在模板 .stop 处理） */
+.tasks-ops { text-align: right; white-space: nowrap; }
+.tasks-ops :deep(.g-btn) { color: var(--accent-text); }
 </style>
