@@ -69,7 +69,7 @@ def proxy_env(monkeypatch):
     """默认环境：空 token（不鉴权）+ 假转发（_run_with_retry 直接调假 client）。"""
     holder = {"client": _FakeClient()}
 
-    def _fake_retry(endpoint, fn, on_success=None, source=None):
+    def _fake_retry(endpoint, fn, on_success=None, source=None, **kwargs):
         resp = fn(holder["client"])
         if on_success is not None:
             on_success("tvly-***", resp)
@@ -118,7 +118,7 @@ def test_token_change_picked_up_without_restart(monkeypatch):
     """回归：面板设置密钥后代理无需重启，鉴权即时生效（settings 缓存热刷新）。"""
     monkeypatch.setattr(
         tavily_proxy, "_run_with_retry",
-        lambda ep, fn, on_success=None, source=None: json.dumps({"results": []}, ensure_ascii=False),
+        lambda ep, fn, on_success=None, source=None, **kwargs: json.dumps({"results": []}, ensure_ascii=False),
     )
     state = {"token": ""}
     monkeypatch.setattr(tavily_proxy, "_fresh_settings", lambda: {"proxy_token": state["token"]})
@@ -177,7 +177,7 @@ def test_search_type_normalization(proxy_env):
 def _set_retry_error(monkeypatch, payload: dict):
     monkeypatch.setattr(
         tavily_proxy, "_run_with_retry",
-        lambda ep, fn, on_success=None, source=None: json.dumps(payload, ensure_ascii=False),
+        lambda ep, fn, on_success=None, source=None, **kwargs: json.dumps(payload, ensure_ascii=False),
     )
 
 
@@ -294,6 +294,17 @@ def test_research_auth_required(proxy_env, monkeypatch):
     assert c.post("/research", json={"input": "q"}).status_code == 401
     r = c.post("/research", json={"input": "q"}, headers={"Authorization": f"Bearer {TOKEN}"})
     assert r.status_code == 200
+
+
+def test_research_files_passthrough(proxy_env):
+    """官方 files 附件（base64）参数经代理透传（仅 REST，MCP 侧不加）。"""
+    files = [
+        {"name": "q1-report.md", "data": "aGVsbG8gd29ybGQ=", "type": "base64"},
+    ]
+    r = _client().post("/research", json={"input": "q", "files": files})
+    assert r.status_code == 200
+    last = proxy_env["client"].last
+    assert last["files"] == files
 
 
 def test_research_status_pinned_key(proxy_env, monkeypatch, tmp_path):

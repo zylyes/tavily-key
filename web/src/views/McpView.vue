@@ -112,6 +112,32 @@ const tokenNote = computed(() => {
     : '未设置访问密钥，MCP 服务对外开放，任何能访问该地址的设备都可能消耗 Key 池额度。'
 })
 
+/* ── 客户端接入配置（一键复制到 Claude Code / Cursor）────── */
+const clientConfigJson = computed(() => {
+  const s = status.value
+  if (!s || !s.running || !s.network) return ''
+  const url = s.urls?.local || s.url || ''
+  if (!url) return ''
+  const full = token.value || s.token || ''
+  const t = (s.transport || '').toLowerCase()
+  const type = t === 'streamable-http' ? 'http' : 'sse'
+  const server: Record<string, unknown> = { type, url }
+  if (full) server.headers = { Authorization: `Bearer ${full}` }
+  return JSON.stringify({ mcpServers: { tavily: server } }, null, 2)
+})
+
+const claudeCodeCmd = computed(() => {
+  const s = status.value
+  if (!s || !s.running || !s.network) return ''
+  const url = s.urls?.local || s.url || ''
+  if (!url) return ''
+  const t = (s.transport || '').toLowerCase()
+  const transportArg = t === 'streamable-http' ? 'http' : 'sse'
+  const full = token.value || s.token || ''
+  const header = full ? ` --header "Authorization: Bearer ${full}"` : ''
+  return `claude mcp add --transport ${transportArg} tavily "${url}"${header}`
+})
+
 // 状态卡只展示脱敏 token；复制时优先取设置表单中的完整值（与旧版行为一致）
 function onCopyToken(): void {
   const s = status.value
@@ -286,6 +312,7 @@ async function onSave(): Promise<void> {
           <span v-if="status.network" class="meta-chip" title="传输方式">{{ transportLabel }}</span>
           <span v-if="status.network" class="meta-chip u-mono" title="监听地址">{{ status.host }}:{{ status.port }}</span>
           <span v-if="status.auto_start" class="meta-chip" title="随软件启动">自启动</span>
+          <span v-if="status.auto_restarts" class="meta-chip" title="看门狗自动重启次数">自动重启 ×{{ status.auto_restarts }}</span>
         </div>
 
         <template v-if="status.running && status.network">
@@ -330,6 +357,32 @@ async function onSave(): Promise<void> {
         </template>
 
         <p v-if="actionError" class="action-error">{{ actionError }}</p>
+      </GlassCard>
+
+      <!-- ── 客户端接入配置 ── -->
+      <GlassCard
+        v-if="status.running && status.network"
+        title="客户端接入配置"
+        desc="把配置粘贴到 Claude Code / Cursor 的 MCP 配置即可接入（地址取本机地址；客户端在其他设备时改用局域网 IP / 主机名地址）"
+      >
+        <div class="cfg-block">
+          <div class="cfg-head">
+            <span class="cfg-label">Claude Code（命令行）</span>
+            <GButton size="sm" @click="copyText(claudeCodeCmd, '命令已复制')">
+              <GIcon name="copy" :size="13" />复制
+            </GButton>
+          </div>
+          <pre class="cfg-pre">{{ claudeCodeCmd || '—' }}</pre>
+        </div>
+        <div class="cfg-block">
+          <div class="cfg-head">
+            <span class="cfg-label">mcp.json（Claude Code / Cursor / 通用）</span>
+            <GButton size="sm" @click="copyText(clientConfigJson, '配置已复制')">
+              <GIcon name="copy" :size="13" />复制
+            </GButton>
+          </div>
+          <pre class="cfg-pre">{{ clientConfigJson || '—' }}</pre>
+        </div>
       </GlassCard>
 
       <!-- ── 设置卡 ── -->
@@ -519,6 +572,35 @@ async function onSave(): Promise<void> {
   background: var(--danger-soft);
   border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
   border-radius: var(--r-sm);
+}
+
+/* ── 客户端接入配置 ── */
+.cfg-block { margin-bottom: 14px; }
+.cfg-block:last-child { margin-bottom: 0; }
+.cfg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.cfg-label {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-2);
+}
+.cfg-pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--input-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-sm);
+  color: var(--text);
 }
 
 /* ── 设置表单 ── */

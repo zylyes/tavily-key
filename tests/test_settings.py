@@ -165,3 +165,46 @@ def test_mcp_urls_custom_host():
     u = mcp_urls(cfg)
     assert u["ip"] == "http://192.168.1.10:8001/sse"
     assert "hostname_local" not in u
+
+
+def test_log_rotation_fields():
+    """日志轮转字段：log_max_bytes（大整数范围）/ log_backup_count 校验。"""
+    assert validate_patch({"log_max_bytes": 10 * 1024 * 1024})["log_max_bytes"] == 10 * 1024 * 1024
+    assert validate_patch({"log_backup_count": 5})["log_backup_count"] == 5
+    assert validate_patch({"log_backup_count": 0})["log_backup_count"] == 0
+    with pytest.raises(ValueError):
+        validate_patch({"log_max_bytes": 600 * 1024 * 1024})  # 超 512MB 上限
+    with pytest.raises(ValueError):
+        validate_patch({"log_max_bytes": "abc"})
+    with pytest.raises(ValueError):
+        validate_patch({"log_backup_count": -1})
+
+
+def test_auto_backup_fields():
+    """定时自动备份字段：开关/间隔/保留份数校验。"""
+    assert validate_patch({"auto_backup_enabled": 1})["auto_backup_enabled"] is True
+    assert validate_patch({"auto_backup_enabled": "yes"})["auto_backup_enabled"] is True
+    assert validate_patch({"auto_backup_interval_days": "3"})["auto_backup_interval_days"] == 3
+    assert validate_patch({"auto_backup_keep": 10})["auto_backup_keep"] == 10
+    with pytest.raises(ValueError):
+        validate_patch({"auto_backup_interval_days": -1})
+    with pytest.raises(ValueError):
+        validate_patch({"auto_backup_keep": "abc"})
+
+
+def test_update_check_fields():
+    """GitHub 更新检查字段：开关/间隔小时/单位枚举校验。"""
+    assert validate_patch({"update_check_enabled": 1})["update_check_enabled"] is True
+    assert validate_patch({"update_check_enabled": 0})["update_check_enabled"] is False
+    assert validate_patch({"update_check_interval_hours": "24"})["update_check_interval_hours"] == 24
+    assert validate_patch({"update_check_interval_hours": 0})["update_check_interval_hours"] == 0
+    for u in ("hour", "day", "week", "month"):
+        assert validate_patch({"update_check_interval_unit": u})["update_check_interval_unit"] == u
+    with pytest.raises(ValueError):
+        validate_patch({"update_check_interval_unit": "minute"})
+    with pytest.raises(ValueError):
+        validate_patch({"update_check_interval_hours": -1})
+    with pytest.raises(ValueError):
+        validate_patch({"update_check_interval_hours": "abc"})
+    # 自动更新已移除：auto_update_enabled 不再被接受
+    assert validate_patch({"auto_update_enabled": True}) == {}

@@ -187,6 +187,42 @@ def test_tavily_search_auto_parameters(monkeypatch):
     assert captured.get("auto_parameters") is True
 
 
+def test_tavily_search_safe_search(monkeypatch):
+    """safe_search 参数透传（与代理 /search 对齐，双入口行为一致）。"""
+    captured = {}
+
+    class _C:
+        def search(self, **kw):
+            captured.update(kw)
+            return {"query": kw["query"], "results": []}
+
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    asyncio.run(mcp_server.tavily_search("q", safe_search=True))
+    assert captured.get("safe_search") is True
+    asyncio.run(mcp_server.tavily_search("q", safe_search=False))
+    assert captured.get("safe_search") is False
+
+
+def test_extract_timeout_default_by_depth(monkeypatch):
+    """Extract 默认超时按 extract_depth：basic 10s / advanced 30s（显式传参优先）。"""
+    captured = {}
+
+    class _C:
+        def extract(self, **kw):
+            captured.update(kw)
+            return {"results": []}
+
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    asyncio.run(mcp_server.tavily_extract(["https://a.com"], extract_depth="basic"))
+    assert captured.get("timeout") == 10.0
+    asyncio.run(mcp_server.tavily_extract(["https://a.com"], extract_depth="advanced"))
+    assert captured.get("timeout") == 30.0
+    asyncio.run(mcp_server.tavily_extract(["https://a.com"], extract_depth="advanced", timeout=45))
+    assert captured.get("timeout") == 45.0
+
+
 def test_run_with_retry_switches_key_on_quota(monkeypatch):
     state = {"calls": 0}
 
@@ -308,6 +344,27 @@ def test_tavily_research_status_uses_same_key(monkeypatch):
     assert out["status"] == "completed"
     assert used["key"] == "tvly-pinned-raw"  # 用了提交时的 key，而非轮询 key
     mcp_server._research_keys.clear()
+
+
+def test_logging_rotation(tmp_path, monkeypatch):
+    """日志文件超限自动轮转（RotatingFileHandler），长驻进程日志不再无限膨胀。"""
+    import logging
+    import logging_setup
+
+    monkeypatch.setattr(logging_setup, "_root", None)
+    monkeypatch.setattr("logging_setup.runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(logging_setup, "_rotation_config", lambda: (1024, 2))
+    logger = logging_setup.setup("test-rotation", "rot.log", logging.INFO)
+    for i in range(300):
+        logger.info("padding line %d %s", i, "x" * 60)
+    for h in logger.handlers:
+        h.close()
+    names = [p.name for p in tmp_path.iterdir()]
+    assert "rot.log" in names
+    assert any(n.startswith("rot.log.") for n in names)  # 已产生轮转备份
+    # 主文件大小受控：不会把全部 ~24KB 写入单一文件（已轮转分流到备份）
+    main_size = (tmp_path / "rot.log").stat().st_size
+    assert main_size <= 1024 * 2
 
 
 def test_research_key_persists_across_reload(monkeypatch, tmp_path):
@@ -478,6 +535,8 @@ def test_research_impl_stream_timeout_no_fallback(monkeypatch):
 
     monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_Slow(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    # 固定默认超时为 1.0：避免下限保护把传入的 1.0 提升到 300，干扰超时场景模拟
+    monkeypatch.setattr(mcp_server, "_default_research_timeout", lambda model: 1.0)
     fake = {"now": 1000.0}
 
     def _t():
@@ -489,6 +548,37 @@ def test_research_impl_stream_timeout_no_fallback(monkeypatch):
     assert out["status"] == "timeout"
     assert out["content"] == "Hello "
     assert state["polled"] is False  # 未回退提交+轮询
+
+
+def test_research_impl_raises_small_timeout_to_model_default(monkeypatch):
+    """下限保护：客户端显式传入的 timeout 低于模型默认值时自动提升，并在返回 JSON 注明。"""
+    captured = {}
+
+    class _C:
+        def research(self, **kwargs):
+            captured["stream_timeout"] = kwargs.get("timeout")
+            return {"status": "completed", "content": "report"}
+
+        def get_research(self, request_id):
+            return {"status": "completed", "content": "x"}
+
+    monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    # 显式传 120s（低于 mini 默认 300s）→ 应提升到 300，并在响应中注明
+    out = json.loads(mcp_server._research_impl("q", "mini", "numbered", None, None, True, 120, 2.0))
+    assert out["status"] == "completed"
+    assert out["timeout_raised"]["requested"] == 120.0
+    assert out["timeout_raised"]["applied"] == 300.0
+    # 流式 idle 读超时段应使用提升后的 300s（而非客户端传入的 120s）
+    assert captured["stream_timeout"][1] == 300.0
+    # 显式传 500s（高于默认）→ 不提升，无 timeout_raised 字段
+    out2 = json.loads(mcp_server._research_impl("q", "mini", "numbered", None, None, True, 500, 2.0))
+    assert "timeout_raised" not in out2
+    assert captured["stream_timeout"][1] == 300.0  # idle 段仍受 _STREAM_IDLE_TIMEOUT 300s 上限约束
+
+    # 不传 timeout（None）→ 默认 300，无 timeout_raised
+    out3 = json.loads(mcp_server._research_impl("q", "mini", "numbered", None, None, True, None, 2.0))
+    assert "timeout_raised" not in out3
 
 
 # ── P0-2：尊重 429 retry-after ─────────────────────────────────

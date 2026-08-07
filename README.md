@@ -12,6 +12,7 @@
 - **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/research`（含 `GET /research/{id}`）官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
 - **Research 增强**：异步任务（wait / status）、流式输出、结构化输出（output_schema）、报告长度与来源数控制
 - **数据备份与恢复**：CLI 与面板一键备份/恢复 `data/`（配置、Key 池、加密密钥、research 缓存），恢复前自动保留 `.pre-restore` 副本，绝不静默覆盖
+- **GitHub 更新检查与自动更新**：从 GitHub 获取最新 release 并与本地版本对比，面板「设置 → 关于与更新」一键检查（结果 toast 提示）/ 后台按周期自动检查（发现新版本托盘 + Webhook 通知）/ CLI `update-check`；**打包版（Tavily.exe）支持一键自动更新**——下载打包产物 → 校验 → 备份旧版 → 替换并重启，data/ 运行数据不丢失；自动检查开关与间隔可配置
 - **按端点分组限流**：`endpoint_rpm` 按接口独立限流（research 创建任务独立 18 RPM），未配置接口回退 `rate_limit_rpm`
 - **访问鉴权**：可设置访问令牌，保护公网部署下的 `/api/*` 接口
 - **两套部署形态**：同一代码库，通过 `data/config.json` 切换

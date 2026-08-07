@@ -9,6 +9,7 @@
 - [通用调用方式](#通用调用方式)
 - [Key 管理命令](#key-管理命令)
 - [统计与健康命令](#统计与健康命令)
+- [更新检查命令](#更新检查命令)
 - [批量导入 Key](#批量导入-key)
 - [退出码与错误处理](#退出码与错误处理)
 - [相关页面](#相关页面)
@@ -31,6 +32,7 @@ graph TD
     CLI --> STATS["stats — 用量统计"]
     CLI --> RECENT["recent — 最近请求日志"]
     CLI --> HEALTH["health — 健康检查"]
+    CLI --> UPDATE["update-check — 检查 GitHub 更新"]
     ADD --> BATCH["--from-file 批量导入"]
     HEALTH --> AUTO["自动停用失效 Key"]
 ```
@@ -45,6 +47,7 @@ graph TD
 | 统计与健康 | `stats` | 用量统计（JSON） | — |
 | 统计与健康 | `recent` | 最近请求日志 | `-n` |
 | 统计与健康 | `health` | 健康检查 | — |
+| 更新检查 | `update-check` | 检查 GitHub 最新版本 | `-f` / `--notes` |
 
 ## 通用调用方式
 
@@ -185,6 +188,30 @@ flowchart LR
     E --> G["汇总: X alive, Y dead"]
     F --> G
 ```
+
+## 更新检查命令
+
+### update-check — 检查 GitHub 更新
+
+```bash
+python app/cli.py update-check             # 检查（结果带缓存）
+python app/cli.py update-check --force     # 强制刷新网络
+python app/cli.py update-check --notes     # 同时打印最新版本 release notes
+```
+
+从 GitHub `releases/latest` 获取最新版本，与本地版本（`app/version.py`）语义化对比：
+
+```text
+当前版本 : 0.9.4
+最新版本 : 0.9.4
+发布时间 : 2026-08-07 12:00
+状态     : ✅ 已是最新版本
+地址     : https://github.com/zylyes/tavily-key/releases/tag/v0.9.4
+```
+
+- `-f, --force`：绕过进程内缓存，强制重新请求 GitHub API。
+- `--notes`：附带输出最新版本更新说明（前 2000 字符）。
+- 仓库配置来自 `data/config.json` 的 `update_repo`（默认 `zylyes/tavily-key`，留空禁用）；自动检查由 `update_check_enabled`（开关）与 `update_check_interval_hours`（间隔，0 关闭）控制，CLI 手动检查不受开关影响。网络失败时输出失败原因并退出 0（不抛异常）。
 
 ## 批量导入 Key
 

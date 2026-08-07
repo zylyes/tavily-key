@@ -112,6 +112,66 @@ def backup_to(target: str | Path | None = None) -> Path:
     return dest
 
 
+def last_backup_time(backup_dir: Path | None = None) -> float:
+    """data/backups/ 下最新备份 zip 的 mtime；目录不存在或无备份返回 0。"""
+    d = backup_dir or (runtime_dir() / "backups")
+    if not d.is_dir():
+        return 0.0
+    zips = [p for p in d.iterdir() if p.suffix.lower() == ".zip"]
+    if not zips:
+        return 0.0
+    return max(p.stat().st_mtime for p in zips)
+
+
+def prune_backups(keep: int, backup_dir: Path | None = None) -> int:
+    """删除超出保留份数的旧备份，返回删除数量。keep <= 0 表示不清理。"""
+    d = backup_dir or (runtime_dir() / "backups")
+    if keep <= 0 or not d.is_dir():
+        return 0
+    zips = sorted(
+        (p for p in d.iterdir() if p.suffix.lower() == ".zip"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    removed = 0
+    for p in zips[:-keep]:
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:  # noqa: BLE001
+            pass
+    if removed:
+        _log.info("自动备份清理旧备份 %d 份（保留 %d 份）", removed, keep)
+    return removed
+
+
+def auto_backup(enabled: bool | None = None, interval_days: int | None = None,
+                keep: int | None = None, backup_dir: Path | None = None) -> Path | None:
+    """定时自动备份：开启且距上次备份 >= interval_days 时备份到 data/backups/
+    并清理旧备份，返回新 zip 路径；未开启/未到间隔返回 None。
+
+    - enabled/interval_days/keep 缺省读 config.json（auto_backup_enabled /
+      auto_backup_interval_days / auto_backup_keep）。
+    - 失败（备份不完整/磁盘错误）抛异常，由调用方记录日志，不影响服务运行。
+    """
+    from settings import get_settings
+
+    cfg = get_settings()
+    if enabled is None:
+        enabled = bool(cfg.get("auto_backup_enabled", False))
+    if not enabled:
+        return None
+    interval_days = int(interval_days if interval_days is not None
+                       else cfg.get("auto_backup_interval_days", 1))
+    keep = int(keep if keep is not None else cfg.get("auto_backup_keep", 7))
+    d = backup_dir or (runtime_dir() / "backups")
+    if time.time() - last_backup_time(d) < max(interval_days, 1) * 86400:
+        return None
+    d.mkdir(parents=True, exist_ok=True)
+    dest = backup_to(d)
+    prune_backups(keep, d)
+    return dest
+
+
 def restore_from(zip_path: str | Path) -> int:
     """从备份 zip 恢复 data/ 文件，返回恢复的文件数。
 

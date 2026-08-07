@@ -181,10 +181,13 @@ def _get_client(endpoint: str = "search") -> tuple[TavilyClient, str]:
 def _record(masked: str, endpoint: str, start: float, success: bool,
             credits: int = 0, error_msg: str = "", request_id: str = "",
             usage_source: str = "", is_client_error: bool = False,
-            source: str = "mcp"):
+            source: str = "mcp", project_id: str | None = None):
+    if project_id is None:
+        # MCP 请求默认归属 mcp_project_id 配置值（代理等非 MCP 来源显式传空）
+        project_id = (get_settings_fresh().get("mcp_project_id") or "")
     latency = (time.time() - start) * 1000
     pool.record_request(masked, endpoint, latency, success, credits, error_msg, request_id, usage_source,
-                        1 if is_client_error else 0, source)
+                        1 if is_client_error else 0, source, project_id)
 
 
 def _is_client_error(e: Exception) -> bool:
@@ -286,7 +289,7 @@ def _tool_kwargs(func, kwargs: dict) -> dict:
 
 
 def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | None = None,
-                    source: str = "mcp") -> str:
+                    source: str = "mcp", project_id: str | None = None) -> str:
     """执行工具调用并序列化返回。
 
     - 记录成功/失败（含 request_id）。
@@ -296,7 +299,10 @@ def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | 
     - on_success：成功后回调 (masked, resp)（代理提交 research 时用于固定
       request_id→key 映射——research 任务按 key 隔离，状态查询须用同一 key）。
     - source：请求来源标记（mcp 默认 / proxy），写入 request_log 便于筛选。
+    - project_id：项目归属；None 时读 mcp_project_id 配置（代理显式传空）。
     """
+    if project_id is None:
+        project_id = (get_settings_fresh().get("mcp_project_id") or "")
     last_err = ""
     for attempt in range(3):
         try:
@@ -312,7 +318,7 @@ def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | 
                 _record(masked, endpoint, t0, True, credits,
                         request_id=_usage_request_id(resp),
                         usage_source="response" if has_usage else "unknown",
-                        source=source)
+                        source=source, project_id=project_id)
                 if on_success is not None:
                     try:
                         on_success(masked, resp)
@@ -323,7 +329,7 @@ def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | 
                 err = str(e)
                 _log.warning("%s 失败 masked=%s: %s", endpoint, masked, err[:300])
                 _record(masked, endpoint, t0, False, 0, err, usage_source="none",
-                        is_client_error=_is_client_error(e), source=source)
+                        is_client_error=_is_client_error(e), source=source, project_id=project_id)
                 cat = _classify_error(err)
                 last_err = err
                 ra = _retry_after(e)
@@ -365,6 +371,7 @@ async def tavily_search(
     exact_match: bool = False,
     include_favicon: bool = False,
     auto_parameters: bool = False,
+    safe_search: bool = False,
     include_usage: bool = True,
 ) -> str:
     """Search the web. Returns LLM-optimized results with content, scores, and URLs.
@@ -388,6 +395,7 @@ async def tavily_search(
         exact_match: Only return results with exact quoted phrases.
         include_favicon: Include favicon URLs.
         auto_parameters: Let Tavily auto-tune parameters based on query intent.
+        safe_search: Enable safe search to filter explicit content.
         include_usage: Include credit usage in response (default True for tracking).
     """
     kwargs: dict[str, Any] = {
@@ -403,6 +411,7 @@ async def tavily_search(
         "include_favicon": include_favicon,
         "exact_match": exact_match,
         "auto_parameters": auto_parameters,
+        "safe_search": safe_search,
         "include_usage": include_usage,
     }
     # 官方行为（与官方 tavily-mcp 一致）：start_date/end_date 与 time_range
@@ -448,7 +457,7 @@ async def tavily_extract(
     include_usage: bool = True,
     query: str = "",
     chunks_per_source: int = 3,
-    timeout: float = 30.0,
+    timeout: float | None = None,
 ) -> str:
     """Extract clean content from one or more URLs. Handles JavaScript-rendered pages.
 
@@ -461,7 +470,8 @@ async def tavily_extract(
         include_usage: Include credit usage (default True).
         query: User intent for reranking content chunks.
         chunks_per_source: Max chunks per source, 1-5. Requires query.
-        timeout: Max seconds per URL, 1-60.
+        timeout: Max seconds per URL, 1-60. Default follows extract_depth
+            (basic 10s / advanced 30s), matching the official API.
     """
     kwargs: dict[str, Any] = {
         "urls": urls,
@@ -477,6 +487,10 @@ async def tavily_extract(
     if timeout:
         kwargs["timeout"] = timeout
     kwargs = _tool_kwargs(tavily_extract, kwargs)
+    # 官方默认超时按 extract_depth：basic 10s / advanced 30s
+    # （用户显式传参 / mcp_default_parameters 注入优先）
+    if "timeout" not in kwargs:
+        kwargs["timeout"] = 10.0 if (extract_depth or "").strip().lower() != "advanced" else 30.0
 
     def _do(client: TavilyClient):
         return client.extract(**kwargs)
@@ -671,10 +685,32 @@ def _research_impl(input: str, model: str, citation_format: str,
     if max_subsources is not None:
         kwargs["max_subsources"] = max_subsources
 
-    # 总时长默认按 model 对齐官方：mini/auto 300s、pro 900s（可显式覆盖）。
-    if not timeout:
-        timeout = _default_research_timeout(model)
-    timeout = max(float(timeout), 1.0)
+    # 总时长默认按 model 对齐官方：mini/auto 300s、pro 900s。
+    # 下限保护：research 官方生成报告通常需 1-5 分钟，客户端常显式传过小的
+    # timeout（如 Cherry Studio 等默认 120s），会过早掐断流式/轮询导致频繁
+    # 「超时失败」→ 显式 timeout 低于模型默认值时自动提升，并在返回 JSON 中
+    # 注明（timeout_raised），客户端可感知实际生效值。
+    default_timeout = _default_research_timeout(model)
+    timeout_raised: float | None = None
+    if timeout:
+        timeout = max(float(timeout), 1.0)
+        if timeout < default_timeout:
+            timeout_raised = timeout
+            timeout = default_timeout
+    else:
+        timeout = default_timeout
+
+    def _dump(payload: dict) -> str:
+        """序列化 research 结果：若发生 timeout 下限提升则附加说明字段。"""
+        if timeout_raised is not None:
+            payload = dict(payload)
+            payload["timeout_raised"] = {
+                "requested": round(timeout_raised, 1),
+                "applied": default_timeout,
+                "note": (f"客户端传入 timeout={timeout_raised:.0f}s 低于模型默认 "
+                         f"{default_timeout:.0f}s，已自动提升避免 research 生成中被过早掐断"),
+            }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     # 取可用 key（池空时返回友好错误，避免异常冒泡导致会话不稳定）。
     # research「创建任务」走独立 20 RPM 限流桶（官方按 key 独立），提交与流式
@@ -699,9 +735,9 @@ def _research_impl(input: str, model: str, citation_format: str,
                 # 回退重新提交会造成重复任务、双倍消耗）
                 _record(masked, "research", t0, False, 0,
                         last.get("error") or status, usage_source="unknown")
-                return json.dumps(last, ensure_ascii=False, indent=2)
+                return _dump(last)
             _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
-            return json.dumps(last, ensure_ascii=False, indent=2)
+            return _dump(last)
 
     # ── 提交任务（quota/auth 错误自动切换其他 key 重试）──────────
     request_id = None
@@ -751,7 +787,7 @@ def _research_impl(input: str, model: str, citation_format: str,
                             last.get("error") or last.get("status"), usage_source="none")
                 else:
                     _record(masked, "research", t0, True, _usage_credits(last)[0], usage_source="unknown")
-                return json.dumps(last, ensure_ascii=False, indent=2)
+                return _dump(last)
             _log.warning("research 提交失败 masked=%s: %s", masked, err[:300])
             _record(masked, "research", t0, False, 0, err, usage_source="none",
                     is_client_error=_is_client_error(e))
@@ -762,8 +798,7 @@ def _research_impl(input: str, model: str, citation_format: str,
     # ── wait=False：提交即返回，供客户端用 tavily_research_status 轮询 ──
     if not wait:
         _record(masked, "research", t0, True, 0, request_id=request_id, usage_source="unknown")
-        return json.dumps({"request_id": request_id, "status": "submitted", "key_used": masked},
-                          ensure_ascii=False)
+        return _dump({"request_id": request_id, "status": "submitted", "key_used": masked})
 
     # ── wait=True：轮询直到完成 ─────────────────────────────────
     try:
@@ -776,7 +811,7 @@ def _research_impl(input: str, model: str, citation_format: str,
             if status in ("completed", "failed", "error", "cancelled"):
                 break
         _record(masked, "research", t0, True, _usage_credits(last)[0], request_id=request_id, usage_source="unknown")
-        return json.dumps(last, ensure_ascii=False, indent=2)
+        return _dump(last)
     except Exception as e:  # noqa: BLE001
         _log.warning("research 轮询失败 masked=%s: %s", masked, str(e)[:300])
         _record(masked, "research", t0, False, 0, str(e), request_id=request_id, usage_source="none",
@@ -813,7 +848,11 @@ async def tavily_research(
         include_domains: Soft preference for source domains (max 20).
         exclude_domains: Hard blocklist of domains to exclude (max 20).
         wait: If True, poll until the task completes; if False, return request_id immediately.
-        timeout: Max seconds to wait for the report (default mini/auto 300, pro 900).
+        timeout: Max seconds to wait for the report. Default follows model (mini/auto 300,
+            pro 900). Values below the model default are raised to it automatically
+            (research generation typically takes 1-5 min, so client-side 120s defaults
+            would cut it off prematurely); the effective value is reported back in the
+            `timeout_raised` field of the response.
         poll_interval: Seconds between status polls.
         output_length: Report length — `short`, `standard`, or `long`.
         output_schema: JSON Schema dict for structured output — research returns a
@@ -1182,7 +1221,11 @@ def _research_stream(client: TavilyClient, input: str, model: str, citation_form
     if timed_out:
         content = _structured_content(parts, structured, output_schema)
         return {"status": "timeout", "content": content,
-                "error": f"research stream exceeded {timeout:.0f}s deadline"}
+                "error": (f"research stream exceeded {timeout:.0f}s deadline —— "
+                          "Tavily 官方 research 生成报告通常需 1-5 分钟（mini 5min / pro 15min），"
+                          "超过总时长 deadline 会被中断并只返回部分内容。建议调大 timeout "
+                          "（默认 mini/auto 300s / pro 900s），或改用 wait=false + "
+                          "tavily_research_status 异步查询，避免长时间阻塞当前调用。")}
     content = _structured_content(parts, structured, output_schema)
     return {"status": "completed", "content": content}
 

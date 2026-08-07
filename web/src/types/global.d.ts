@@ -17,6 +17,8 @@ interface PyWebviewApi {
   resize(direction: string): void
   start_drag(): void
   save_backup_as(filename?: string): Promise<SaveBackupAsResult>
+  /** 用系统默认浏览器打开外部链接（后端 _WindowApi.open_external） */
+  open_external(url: string): Promise<{ ok: boolean; error?: string }>
 }
 
 /* File System Access API（Chrome/Edge 支持，TS DOM lib 未内置）——

@@ -5,6 +5,144 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.4] - 2026-08-07
+
+### Changed
+
+- **移除自动更新**：不再自动下载安装/重启。发现新版本一律**仅通知**（托盘 / Webhook
+  通知附带更新公告摘要，release notes 前 120 字），由用户在面板手动点击
+  「立即更新」→ 下载 → 确认后「重启应用」；手动下载/应用/重启流程保留。
+- **「当前版本 + 检查更新」融合行**：合并为一栏——左侧显示当前版本号与
+  **版本类型徽章**（正式版 / Beta 版，按版本号是否含 pre-release 后缀判断，
+  `check_update` 返回 `version_type`），右侧为「检查更新」按钮（发现新版本时
+  追加「前往 GitHub / 立即更新」）。
+- **「关于与更新」卡片布局**：检查间隔 → 自动检查更新 → 当前版本+检查更新
+  （融合）→ 更新公告（发现新版本时展示 release notes）→ 下载进度。
+- `updater.handle_auto_update` 简化为纯通知（按版本去重）；`notify_if_update_available`
+  删除；`start_download` 移除 `auto` 参数与下载后自动应用逻辑。
+- 设置字段 `auto_update_enabled` 已移除（validate_patch 不再接受）。
+
+### Added
+
+- **更新公告**：手动更新完成后，新版本首次启动弹出「更新完成公告」（版本号 +
+  本次更新说明）；公告写入 `data/last-update.json`，经 `GET /api/update/announcement`
+  一次性读取（读取后清除），仅展示一次。
+- **版本类型标识**：`check_update` 返回 `version_type`（`stable`/`beta`），面板
+  当前版本旁以徽章标识正式版 / Beta 版。
+
+## [0.9.3] - 2026-08-07
+
+### Added
+
+- **检查间隔单位选择**：面板「关于与更新 → 检查间隔」支持以 小时/日/星期/月 为单位
+  配置自动检查间隔——单位用下拉选择器切换（切换时数值按单位自动换算，如 24 小时 ↔
+  1 日），数值仍可自由输入；保存时换算为小时写入 `update_check_interval_hours`
+  （月按 30 天计），并记录展示单位 `update_check_interval_unit`（hour/day/week/month，
+  仅 UI 展示，`_STR_FIELDS` + 枚举校验，生效值始终以 hours 为准）；加载时按记录单位
+  换算回显示值（无法整除时回退小时展示）。
+- **自动更新（仅打包版 Tavily.exe）**：从 GitHub release 下载打包产物并自动安装重启，全流程：
+  - `check_update` 返回 release 打包产物信息（`asset_name`/`asset_url`/`asset_size`，
+    匹配 `Tavily-*-win64.zip`）与 `can_auto_update`（是否打包版）；
+  - 面板「关于与更新」卡片发现新版本且为打包版时显示「立即更新」——确认弹窗 →
+    后台下载（`POST /api/update/download` + 轮询 `GET /api/update/status` 进度条）→
+    校验大小与 zip 完整性并解压 → 「重启应用」（`POST /api/update/apply`）；
+  - 应用更新：生成 `data/apply_update.bat` 重启脚本（结束当前实例 → 备份旧版到
+    `backup-old/` → 复制新版 `Tavily.exe` 与 `_internal/` → 启动新版本），**data/
+    运行数据（config/密钥/Key 池/日志）不替换不丢失**；MCP / 搜索代理随重启恢复；
+  - 新版本启动时自动清理旧版备份与过期临时更新目录（`updater.cleanup_after_update`，
+    dashboard lifespan 调用）；脚本输出写 `data/update_apply.log` 便于排查，启动失败自动回退旧版。
+- **实现**：`app/updater.py` 新增 `_asset_info`/`can_auto_update`/`start_download`/
+  `get_download_status`/`download_update`/`apply_update`/`cleanup_after_update`；
+  `dashboard.py` 新增 `POST /api/update/download`、`GET /api/update/status`、
+  `POST /api/update/apply` 三个端点；前端设置页新增更新流程（确认弹窗 + 下载进度条）。
+  ⚠️ 源码运行（非打包版）只保留「前往 GitHub 查看」，不显示「立即更新」。
+  前端改动需 `cd web && npm run build`，打包版需重新 build 后本功能才生效。
+
+## [0.9.2] - 2026-08-07
+
+### Added
+
+- **GitHub 更新检查**：从 GitHub 获取最新 release 并与本地版本对比，三个入口：
+  - 面板设置页「关于与更新」卡片——当前版本、`检查更新`按钮（点击后结果以
+    toast 提示消息展示，发现新版本时额外显示 `前往 GitHub 查看`，桌面版经系统
+    浏览器打开）；自动检查开关与检查间隔可配置；
+  - 后台自动检查：按 `update_check_interval_hours`（默认 24h）周期查询，发现
+    新版本时托盘气泡 + Webhook 通知（按版本去重，同一版本只提醒一次）；
+  - CLI `tavily-pool update-check [--force] [--notes]`。
+- **实现**：新增 `app/updater.py`（GitHub API `releases/latest`，urllib 短超时、
+  语义化版本比较、进程内 TTL 缓存避免打爆 GitHub API 限流、失败优雅降级）；
+  版本号集中到 `app/version.py`（`__version__`）；`dashboard.py` 新增
+  `GET /api/update/check?force=` 端点与后台检查线程、`_WindowApi.open_external`
+  桥接；`settings.py` 新增 `update_check_enabled`（`_BOOL_FIELDS`，自动检查开关）/
+  `update_repo`（`_STR_FIELDS`，仓库，留空=禁用）`/update_check_interval_hours`
+  （`_INT_FIELDS`）。⚠️ 打包版需重新 build（前端改动需 `cd web && npm run build`）。
+
+## [0.9.1] - 2026-08-07
+
+### Fixed
+
+- **Research `timeout` 下限保护**：客户端显式传入的 `timeout` 若低于模型默认值
+  （mini/auto 300s、pro 900s），自动提升到默认值，避免 research 生成报告过程中
+  （官方通常需 1-5 分钟）被过早掐断导致频繁「research stream exceeded XXs
+  deadline」超时失败。提升发生在响应中注明（`timeout_raised: {requested, applied, note}`），
+  客户端可感知实际生效值；超时错误信息同步补充中文说明（建议调大 timeout 或改用
+  `wait=false` + `tavily_research_status` 异步查询）。显式传值不低于默认时不提升，
+  行为不变。
+
+## [0.9.0] - 2026-08-07
+
+### Added
+
+- **日志轮转**：`logging_setup` 改 `RotatingFileHandler`（按大小轮转），
+  MCP/代理/面板长驻进程日志不再无限膨胀；新增配置 `log_max_bytes`
+  （默认 5MB，0=不轮转）/ `log_backup_count`（默认 3），启动时读取生效。
+- **MCP Search `safe_search` 参数**：`tavily_search` 补齐该参数，与搜索代理
+  `/search` 对齐（双入口行为一致）。
+- **Extract timeout 对齐官方**：`tavily_extract` 的 `timeout` 默认改按
+  `extract_depth` 动态（basic 10s / advanced 30s），显式传参优先。
+- **代理 `/research` 支持官方 `files` 附件**（base64，≤5 文件、80k 词）：
+  REST JSON body 传 `{"files":[{"name","data","type":"base64"}]}` 透传；
+  MCP `tavily_research` 工具侧维持不加（传文件体验差，原决定保留）。
+- **用量按项目（X-Project-ID）拆分**：
+  - `request_log` 新增 `project_id` 列（自动迁移），MCP 请求落
+    `mcp_project_id` 配置值（代理请求为空，不归属 MCP 项目）；
+  - `get_usage_trend` / `query_logs` 支持按 `project` 筛选；`/api/usage/trend`、
+    `/api/logs`、`/api/logs/export.csv` 新增 `project` 参数，CSV 新增
+    `project_id` 列；
+  - 新端点 `GET /api/projects`（日志中出现过的项目 ID）；
+  - 面板统计页与请求日志页新增「项目」筛选下拉；CLI `audit` 增加按项目统计。
+- **客户端接入配置一键复制**：MCP 页新增「客户端接入配置」卡——Claude Code
+  命令行 + `mcp.json`（Claude Code / Cursor / 通用，自动带当前地址与 Bearer
+  密钥）；搜索代理页新增 Cherry Studio「Tavily 提供商」填法，均一键复制。
+- **服务子进程看门狗（崩溃自愈）**：期望运行（随软件自启 / 面板手动启动）
+  的 MCP / 搜索代理异常退出后自动重启；连续 3 次失败进入 5 分钟退避，
+  避免端口被占/配置错误时死循环拉起；重启成功/失败经托盘气泡 + Webhook
+  通知；状态卡展示「自动重启 ×N」（`mcp_manager`/`proxy_manager` 新增
+  `auto_restarts` 字段，手动停止后不再反复拉起）。
+- **定时自动备份**（默认关闭）：新增配置 `auto_backup_enabled` /
+  `auto_backup_interval_days`（默认 1 天）/ `auto_backup_keep`（默认 7 份）；
+  后台每小时检查，到点自动备份到 `data/backups/` 并清理超份旧备份
+  （`backup.last_backup_time` / `auto_backup` / `prune_backups`）；面板设置页
+  「数据备份与恢复」卡新增配置区。
+- **用量趋势扩展**：统计页支持「近 90 天」窗口 + 「导出 CSV」按钮
+  （当前筛选下趋势数据，含按项目/来源的文件名后缀）。
+- **托盘快捷菜单**：右键菜单新增「切换 MCP 服务」「切换搜索代理」
+  「立即同步用量」（`TrayIcon` 支持自定义菜单项，回调后台线程执行）。
+- **请求审计导出**：新端点 `GET /api/audit/export.zip`——全量请求日志 CSV
+  + Key 池状态 JSON + 汇总 JSON（按来源/接口/项目），不含 `.tavily-secret.key`
+  与任何密钥明文；面板设置页「数据备份与恢复」卡新增「导出审计包」按钮。
+
+### Changed
+
+- `/api/logs`、`/api/logs/export.csv`、`/api/usage/trend` 新增 `project` 筛选
+  参数；请求日志 CSV 新增 `project_id` 列。
+- `mcp_manager.status()` / `proxy_manager.status()` 新增 `auto_restarts` 字段
+  （会话内看门狗自动重启次数）。
+
+### Fixed
+
+- 无重大缺陷修复（本版本为功能与运维增强）。
+
 ## [0.8.0] - 2026-08-06
 
 ### Added
@@ -270,6 +408,11 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.9.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.4
+[0.9.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.3
+[0.9.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.2
+[0.9.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.1
+[0.9.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.0
 [0.8.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.8.0
 [0.7.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.7.0
 [0.6.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.6.0

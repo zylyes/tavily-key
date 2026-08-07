@@ -15,15 +15,22 @@ import Skeleton from '@/components/Skeleton.vue'
 import { useToast } from '@/composables/useToast'
 import {
   ApiError,
+  applyUpdate,
   backupData,
+  checkUpdate,
+  exportAuditZip,
   getAutostart,
   getSettings,
+  getUpdateStatus,
   restoreData,
   saveBlob,
   saveSettings,
   setAutostart,
+  startUpdateDownload,
   type Settings,
   type SettingsPatch,
+  type UpdateDownloadStatus,
+  type UpdateInfo,
 } from '@/api/client'
 import SettingRow from './parts/settings/SettingRow.vue'
 import { saveBackupAs } from '@/utils/webview'
@@ -128,6 +135,14 @@ function applySettings(s: Settings): void {
   startToTray.value = !!s.start_to_tray
   closeToTray.value = !!s.close_to_tray
   minimizeToTray.value = !!s.minimize_to_tray
+  autoBackupEnabled.value = !!s.auto_backup_enabled
+  autoBackupInterval.value = String(s.auto_backup_interval_days ?? 1)
+  autoBackupKeep.value = String(s.auto_backup_keep ?? 7)
+  updateEnabled.value = !!s.update_check_enabled
+  applyUpdateInterval(
+    Number(s.update_check_interval_hours ?? 24),
+    String(s.update_check_interval_unit ?? 'hour'),
+  )
   deploySnap.value = { ...deploy }
 }
 
@@ -165,6 +180,22 @@ async function saveDeploy(): Promise<void> {
 // ── 数据备份与恢复 ──────────────────────────────────────────
 const backupBusy = ref(false)
 
+// ── 审计导出（全量请求日志审计包 zip）───────────────────────
+const auditBusy = ref(false)
+
+async function doAuditExport(): Promise<void> {
+  if (auditBusy.value) return
+  auditBusy.value = true
+  try {
+    const { blob, filename } = await exportAuditZip()
+    saveBlob(blob, filename)
+    toast.success('审计包已导出')
+  } catch (e) {
+    toast.error(`审计导出失败：${errMsg(e)}`)
+  } finally {
+    auditBusy.value = false
+  }
+}
 async function doBackup(): Promise<void> {
   if (backupBusy.value) return
   backupBusy.value = true
@@ -230,6 +261,44 @@ async function doRestore(): Promise<void> {
   }
 }
 
+// ── 定时自动备份（默认关闭）──────────────────────────────────
+const autoBackupEnabled = ref(false)
+const autoBackupInterval = ref('1')
+const autoBackupKeep = ref('7')
+const autoBackupSaving = ref(false)
+
+async function onAutoBackupToggle(v: boolean): Promise<void> {
+  autoBackupEnabled.value = v
+  await saveAutoBackup()
+}
+
+async function saveAutoBackup(): Promise<void> {
+  if (autoBackupSaving.value) return
+  const interval = parseInt(autoBackupInterval.value.trim(), 10)
+  const keep = parseInt(autoBackupKeep.value.trim(), 10)
+  if (!interval || interval < 1 || interval > 365) {
+    toast.error('备份间隔需为 1–365 天的整数')
+    return
+  }
+  if (!keep || keep < 1 || keep > 100) {
+    toast.error('保留份数需为 1–100 的整数')
+    return
+  }
+  autoBackupSaving.value = true
+  try {
+    await saveSettings({
+      auto_backup_enabled: autoBackupEnabled.value,
+      auto_backup_interval_days: interval,
+      auto_backup_keep: keep,
+    })
+    toast.success('自动备份设置已保存')
+  } catch (e) {
+    toast.error(`自动备份设置保存失败：${errMsg(e)}`)
+  } finally {
+    autoBackupSaving.value = false
+  }
+}
+
 // ── 初始加载 ────────────────────────────────────────────────
 onMounted(async () => {
   try {
@@ -238,12 +307,229 @@ onMounted(async () => {
     applySettings(s.settings)
     publicUrl.value = s.public_url
     if (a) autostart.value = a.enabled
+    // 静默加载最近一次更新检查结果（有缓存则展示，无缓存不触发网络请求）
+    checkUpdate(false)
+      .then((r) => { update.value = r.update })
+      .catch(() => { /* 静默：检查失败不打扰设置页 */ })
   } catch (e) {
     toast.error(`设置加载失败：${errMsg(e)}`)
   } finally {
     loading.value = false
   }
 })
+
+// ── GitHub 更新检查 ──────────────────────────────────────────
+const update = ref<UpdateInfo | null>(null)
+const updateBusy = ref(false)
+const updateEnabled = ref(true)
+const updateInterval = ref('24')
+const updateIntervalUnit = ref<'hour' | 'day' | 'week' | 'month'>('hour')
+const updateCfgSaving = ref(false)
+
+/** 版本类型（beta/正式版）：后端 version_type 优先，回退本地判断（含 - 或 beta/alpha/rc/pre 后缀） */
+const versionType = computed<'stable' | 'beta'>(() => {
+  const vt = update.value?.version_type
+  if (vt === 'beta' || vt === 'stable') return vt
+  const v = update.value?.current_version ?? ''
+  return /[-+](beta|alpha|rc|pre|dev)/i.test(v) || v.includes('-') ? 'beta' : 'stable'
+})
+const versionTypeLabel = computed(() => (versionType.value === 'beta' ? 'Beta 版' : '正式版'))
+
+/** 单位 → 小时换算（月按 30 天计） */
+const UNIT_HOURS: Record<string, number> = { hour: 1, day: 24, week: 168, month: 720 }
+/** 检查间隔上限：无论什么单位最多一年（365 天 = 8760 小时） */
+const MAX_YEAR_HOURS = 365 * 24
+const UNIT_OPTIONS: Array<{ label: string; value: string }> = [
+  { label: '小时', value: 'hour' },
+  { label: '日', value: 'day' },
+  { label: '星期', value: 'week' },
+  { label: '月', value: 'month' },
+]
+
+/** 把后端小时数按单位换算为面板展示值（无法整除时回退小时单位展示；0=旧版关闭值回退默认 24） */
+function applyUpdateInterval(hours: number, unit: string): void {
+  const safe = hours > 0 ? hours : 24
+  const u = (UNIT_HOURS[unit] ? unit : 'hour') as 'hour' | 'day' | 'week' | 'month'
+  const m = UNIT_HOURS[u]
+  const v = safe / m
+  if (!Number.isInteger(v)) {
+    updateIntervalUnit.value = 'hour'
+    updateInterval.value = String(safe)
+  } else {
+    updateIntervalUnit.value = u
+    updateInterval.value = String(v)
+  }
+}
+
+/** 当前输入按单位换算成小时；非法输入返回 -1 */
+function updateHoursValue(): number {
+  const v = parseFloat(updateInterval.value.trim())
+  if (Number.isNaN(v) || v < 0) return -1
+  return v * (UNIT_HOURS[updateIntervalUnit.value] ?? 1)
+}
+
+/** 切换单位：按原单位换算后保持间隔不变（数值自动换算） */
+function onUnitChange(u: string | number): void {
+  const next = String(u) as 'hour' | 'day' | 'week' | 'month'
+  if (!UNIT_HOURS[next] || next === updateIntervalUnit.value) return
+  const v = parseFloat(updateInterval.value.trim())
+  if (!Number.isNaN(v) && v >= 0) {
+    const hours = v * (UNIT_HOURS[updateIntervalUnit.value] ?? 1)
+    const r = hours / UNIT_HOURS[next]
+    updateInterval.value = String(Math.round(r * 100) / 100)
+  }
+  updateIntervalUnit.value = next
+}
+
+async function doCheckUpdate(force = false): Promise<void> {
+  if (updateBusy.value) return
+  updateBusy.value = true
+  try {
+    const r = await checkUpdate(force)
+    update.value = r.update
+    if (r.update.disabled) {
+      toast.info('更新检查已禁用（GitHub 仓库未配置）')
+    } else if (!r.update.ok) {
+      toast.error(`更新检查失败：${r.update.error || '网络错误'}`)
+    } else if (r.update.update_available) {
+      toast.success(`发现新版本 ${r.update.latest_version}（当前 ${r.update.current_version}）`)
+    } else {
+      toast.success(`已是最新版本 ${r.update.current_version}`)
+    }
+  } catch (e) {
+    toast.error(`更新检查失败：${errMsg(e)}`)
+  } finally {
+    updateBusy.value = false
+  }
+}
+
+/** 打开 GitHub 链接：桌面版经 pywebview 桥接用系统浏览器打开，浏览器模式 window.open */
+function openRelease(url: string): void {
+  if (!url) return
+  if (window.pywebview?.api?.open_external) {
+    window.pywebview.api.open_external(url)
+  } else {
+    window.open(url, '_blank', 'noopener')
+  }
+}
+
+/** 自动检查开关（update_check_enabled） */
+async function onUpdateEnabledChange(v: boolean): Promise<void> {
+  updateEnabled.value = v
+  await saveUpdateCfg()
+}
+
+async function saveUpdateCfg(): Promise<void> {
+  if (updateCfgSaving.value) return
+  const hours = updateHoursValue()
+  // 自动检查由 update_check_enabled 开关控制，间隔不再支持 0；上限为最多一年（8760 小时）
+  if (hours < 1 || !Number.isInteger(hours) || hours > MAX_YEAR_HOURS) {
+    toast.error('检查间隔需为 1 小时～1 年（8760 小时）的整数，如 1 小时、1 天、1 星期、1 月')
+    return
+  }
+  updateCfgSaving.value = true
+  try {
+    await saveSettings({
+      update_check_enabled: updateEnabled.value,
+      update_check_interval_hours: hours,
+      update_check_interval_unit: updateIntervalUnit.value,
+    })
+    toast.success('更新检查设置已保存')
+  } catch (e) {
+    toast.error(`更新检查设置保存失败：${errMsg(e)}`)
+  } finally {
+    updateCfgSaving.value = false
+  }
+}
+
+// ── 自动更新流程（下载 → 确认 → 重启，仅打包版）──────────────
+const updateFlow = ref<'idle' | 'confirming' | 'downloading' | 'ready' | 'applying'>('idle')
+const updateDl = ref<UpdateDownloadStatus | null>(null)
+const updateModalOpen = ref(false)
+let updatePollTimer: number | undefined
+
+/** 点击「立即更新」：弹出确认框 */
+function askUpdate(): void {
+  updateModalOpen.value = true
+}
+
+/** 确认后开始后台下载，并轮询进度 */
+async function confirmDownload(): Promise<void> {
+  updateModalOpen.value = false
+  updateFlow.value = 'downloading'
+  updateDl.value = null
+  try {
+    const r = await startUpdateDownload()
+    if (!r.ok) {
+      toast.error(`开始下载失败：${r.error || '未知错误'}`)
+      updateFlow.value = 'idle'
+      return
+    }
+    pollUpdateStatus()
+  } catch (e) {
+    toast.error(`开始下载失败：${errMsg(e)}`)
+    updateFlow.value = 'idle'
+  }
+}
+
+function pollUpdateStatus(): void {
+  window.clearInterval(updatePollTimer)
+  updatePollTimer = window.setInterval(async () => {
+    try {
+      const r = await getUpdateStatus()
+      updateDl.value = r.status
+      if (r.status.state === 'done') {
+        window.clearInterval(updatePollTimer)
+        updateFlow.value = 'ready'
+        toast.success(`新版 ${r.status.version} 已下载完成，可重启应用`)
+      } else if (r.status.state === 'error') {
+        window.clearInterval(updatePollTimer)
+        updateFlow.value = 'idle'
+        toast.error(`下载失败：${r.status.error || '未知错误'}`)
+      }
+    } catch {
+      /* 轮询失败忽略，等待下一次 */
+    }
+  }, 800)
+}
+
+/** 应用更新并重启应用（调用后当前进程将被结束） */
+async function doApplyUpdate(): Promise<void> {
+  if (updateFlow.value !== 'ready') return
+  updateFlow.value = 'applying'
+  try {
+    const r = await applyUpdate()
+    if (!r.ok) {
+      toast.error(`应用更新失败：${r.error || '未知错误'}`)
+      updateFlow.value = 'ready'
+      return
+    }
+    toast.info('正在重启应用，请稍候…', 6000)
+    // 进程即将被结束，页面将断开
+  } catch (e) {
+    toast.error(`应用更新失败：${errMsg(e)}`)
+    updateFlow.value = 'ready'
+  }
+}
+
+function fmtBytes(n: number): string {
+  if (!n) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+/** 下载进度百分比（总字节未知时返回 -1） */
+function updatePct(): number {
+  const s = updateDl.value
+  if (!s || !s.total) return -1
+  return Math.min(100, Math.round((s.received / s.total) * 100))
+}
 </script>
 
 <template>
@@ -350,6 +636,14 @@ onMounted(async () => {
             <GIcon name="download" :size="13" />下载备份
           </GButton>
         </SettingRow>
+        <SettingRow
+          label="审计导出"
+          hint="全量请求日志审计包（zip：请求日志 CSV + Key 池状态 + 汇总，不含密钥明文）"
+        >
+          <GButton size="sm" :busy="auditBusy" @click="doAuditExport">
+            <GIcon name="download" :size="13" />导出审计包
+          </GButton>
+        </SettingRow>
         <SettingRow label="恢复" hint="选择备份 zip，确认后覆盖当前数据（危险操作）">
           <input
             ref="restoreInput"
@@ -373,8 +667,161 @@ onMounted(async () => {
             恢复备份
           </GButton>
         </SettingRow>
+        <SettingRow
+          label="定时自动备份"
+          hint="默认关闭。开启后按间隔自动备份到 data/backups/，仅保留最近 N 份"
+        >
+          <GSwitch
+            :model-value="autoBackupEnabled"
+            :disabled="autoBackupSaving"
+            @change="onAutoBackupToggle"
+          />
+        </SettingRow>
+        <template v-if="autoBackupEnabled">
+          <SettingRow label="备份间隔（天）" hint="每隔多少天自动备份一次">
+            <GInput
+              v-model="autoBackupInterval"
+              type="number"
+              class="ctrl-num"
+              @change="saveAutoBackup"
+            />
+          </SettingRow>
+          <SettingRow label="保留份数" hint="超出后自动删除最旧备份">
+            <GInput
+              v-model="autoBackupKeep"
+              type="number"
+              class="ctrl-num"
+              @change="saveAutoBackup"
+            />
+          </SettingRow>
+        </template>
+      </GlassCard>
+
+      <!-- 关于与更新 -->
+      <GlassCard title="关于与更新" desc="从 GitHub 检查最新版本，获取功能与修复更新">
+        <!-- 1. 检查间隔（关闭自动检查时整行变灰、不可修改） -->
+        <SettingRow
+          :class="{ 'interval-disabled': !updateEnabled }"
+          label="检查间隔"
+          :hint="updateEnabled ? '每隔多久自动检查一次' : '自动检查更新已关闭，此设置不生效'"
+        >
+          <div class="interval-row">
+            <GInput
+              v-model="updateInterval"
+              type="number"
+              class="ctrl-num"
+              placeholder="24"
+              :disabled="updateCfgSaving || !updateEnabled"
+              @change="saveUpdateCfg"
+            />
+            <GSelect
+              :model-value="updateIntervalUnit"
+              :options="UNIT_OPTIONS"
+              size="sm"
+              :disabled="updateCfgSaving || !updateEnabled"
+              @change="onUnitChange"
+            />
+          </div>
+        </SettingRow>
+
+        <!-- 2. 自动检查更新 -->
+        <SettingRow label="自动检查更新" hint="开启后按间隔后台检查新版本，发现时通知">
+          <GSwitch
+            :model-value="updateEnabled"
+            :disabled="updateCfgSaving"
+            @change="onUpdateEnabledChange"
+          />
+        </SettingRow>
+
+        <!-- 3. 当前版本 + 检查更新（融合：左当前版本与类型，右检查更新按钮） -->
+        <div class="update-version-row">
+          <div class="update-version-info">
+            <span class="uv-label">当前版本</span>
+            <span class="u-mono update-version">{{ update?.current_version ?? '—' }}</span>
+            <span class="version-badge" :class="versionType === 'beta' ? 'is-beta' : ''">
+              {{ versionTypeLabel }}
+            </span>
+            <span v-if="update?.update_available" class="uv-new">
+              发现新版本 {{ update.latest_version }}
+            </span>
+          </div>
+          <div class="update-version-actions">
+            <GButton size="sm" variant="primary" :busy="updateBusy" @click="doCheckUpdate(true)">
+              <GIcon name="refresh" :size="13" />检查更新
+            </GButton>
+            <GButton
+              v-if="update?.update_available"
+              size="sm"
+              @click="openRelease(update.release_url)"
+            >
+              <GIcon name="external" :size="13" />前往 GitHub
+            </GButton>
+            <GButton
+              v-if="update?.update_available && update.can_auto_update"
+              size="sm"
+              variant="primary"
+              @click="askUpdate"
+            >
+              <GIcon name="download" :size="13" />立即更新
+            </GButton>
+          </div>
+        </div>
+
+        <!-- 发现新版本：更新公告（release notes） -->
+        <template v-if="update?.update_available">
+          <SettingRow label="更新公告" :hint="`${update.current_version} → ${update.latest_version}`">
+            <pre v-if="update.body" class="update-summary">{{ update.body }}</pre>
+            <span v-else class="u-dim">无更新说明，可前往 GitHub 查看发布页</span>
+          </SettingRow>
+        </template>
+
+        <!-- 下载进度 / 更新就绪 -->
+        <SettingRow
+          v-if="updateFlow === 'downloading' || updateFlow === 'ready'"
+          :label="updateFlow === 'ready' ? '更新就绪' : '下载中'"
+          :hint="updateFlow === 'ready'
+            ? `新版 ${updateDl?.version ?? ''} 已就绪，点击重启应用`
+            : `${fmtBytes(updateDl?.received ?? 0)} / ${fmtBytes(updateDl?.total ?? 0)}`"
+        >
+          <template v-if="updateFlow === 'downloading'">
+            <div class="update-progress">
+              <div
+                class="update-progress-fill"
+                :style="{ width: updatePct() >= 0 ? updatePct() + '%' : '8%' }"
+              />
+            </div>
+            <span class="u-mono u-dim update-pct">
+              {{ updatePct() >= 0 ? `${updatePct()}%` : fmtBytes(updateDl?.received ?? 0) }}
+            </span>
+          </template>
+          <GButton v-else-if="updateFlow === 'ready'" size="sm" variant="primary" @click="doApplyUpdate">
+            <GIcon name="refresh" :size="13" />重启应用
+          </GButton>
+        </SettingRow>
       </GlassCard>
     </div>
+
+    <!-- 立即更新确认 -->
+    <GModal v-model:open="updateModalOpen" title="立即更新" width="480px">
+      <div class="update-confirm">
+        <p>
+          发现新版本 <b class="u-mono">{{ update?.latest_version }}</b>（当前
+          {{ update?.current_version }}），将执行：
+        </p>
+        <ul>
+          <li>从 GitHub 下载新版打包（{{ fmtBytes(update?.asset_size ?? 0) }}）并校验</li>
+          <li>自动备份当前版本并替换程序文件</li>
+          <li>自动重启应用</li>
+        </ul>
+        <p class="u-dim">config.json、Key 池、加密密钥等 data/ 运行数据不会丢失；MCP / 搜索代理服务将随重启恢复。</p>
+      </div>
+      <template #footer>
+        <GButton size="sm" @click="updateModalOpen = false">取消</GButton>
+        <GButton size="sm" variant="primary" @click="confirmDownload">
+          <GIcon name="download" :size="13" />开始下载并更新
+        </GButton>
+      </template>
+    </GModal>
 
     <!-- 恢复强确认 -->
     <GModal v-model:open="restoreConfirm" title="恢复备份" width="480px">
@@ -402,6 +849,80 @@ onMounted(async () => {
 
 .ctrl-full { width: 100%; }
 
+/* ── 检查间隔：数值输入 + 单位滚动选择器 ── */
+.interval-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.interval-row .ctrl-num { width: 92px; }
+/* 单位选择器默认 min-width 120px 偏宽，缩窄避免下拉展开超出卡片 */
+.interval-row .g-select { width: 92px; min-width: 92px; }
+/* 单位下拉面板：选项更紧凑、面板更矮，避免高度溢出覆盖下方内容过多 */
+.interval-row :deep(.g-select-pop) {
+  max-height: 132px;
+  padding: 4px;
+}
+.interval-row :deep(.g-select-opt) {
+  padding: 5px 8px;
+  font-size: 11.5px;
+}
+/* 检查间隔输入框数字与单位文字居中 */
+.interval-row :deep(.g-input input) {
+  text-align: center;
+}
+.interval-row :deep(.g-select-label) {
+  flex: 1;
+  text-align: center;
+}
+/* 关闭自动检查更新时整行变灰（含 label/说明文字，穿透子组件） */
+:deep(.setting-row.interval-disabled) {
+  opacity: .55;
+  filter: grayscale(.4);
+}
+
+/* ── 当前版本 + 检查更新（融合行：左版本信息，右按钮）── */
+.update-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-top: 1px solid var(--glass-border);
+}
+.update-version-row:first-child { border-top: none; }
+.update-version-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.uv-label { font-size: 12.5px; font-weight: 550; }
+.update-version { font-size: 12.5px; color: var(--text-1); }
+.uv-new { font-size: 11px; color: var(--info); }
+.version-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  border-radius: 99px;
+  color: var(--success);
+  background: var(--success-soft);
+  border: 1px solid transparent;
+}
+.version-badge.is-beta {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+.update-version-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .deploy-actions {
   display: flex;
   align-items: center;
@@ -421,6 +942,50 @@ onMounted(async () => {
   padding-left: 18px;
   font-size: 12px;
   line-height: 1.8;
+  color: var(--text-2);
+}
+
+/* ── 自动更新：下载进度 / 确认弹窗 / 更新摘要 ── */
+.update-progress {
+  position: relative;
+  width: 180px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--bg-3);
+  overflow: hidden;
+}
+.update-progress-fill {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--info);
+  transition: width .3s ease;
+}
+.update-pct {
+  min-width: 52px;
+  font-size: 11px;
+  text-align: right;
+}
+.update-summary {
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.update-confirm p { font-size: 12.5px; margin: 4px 0; }
+.update-confirm ul {
+  margin: 8px 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.9;
   color: var(--text-2);
 }
 </style>

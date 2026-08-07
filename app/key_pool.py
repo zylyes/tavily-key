@@ -266,6 +266,8 @@ class KeyPool:
             "is_client_error": "INTEGER DEFAULT 0",
             # 请求来源：mcp（MCP 工具调用）/ proxy（搜索代理 REST）/ cli（命令行）
             "source": "TEXT DEFAULT ''",
+            # 项目归属：MCP 请求落 mcp_project_id 配置值，按项目拆分统计用量
+            "project_id": "TEXT DEFAULT ''",
         })
         # masked 唯一索引：加密后 key 主键不可靠，作为重复检测的兜底约束。
         # 历史数据若存在重复 masked（理论不会），容忍创建失败。
@@ -574,12 +576,14 @@ class KeyPool:
     def record_request(self, masked: str, endpoint: str, latency_ms: float, success: bool,
                        credits: int = 0, error_msg: str = "", request_id: str = "",
                        usage_source: str = "", is_client_error: int = 0,
-                       source: str = ""):
+                       source: str = "", project_id: str = ""):
         """记录一次请求。usage_source：response/unknown/none（见 request_log 表注释）。
 
         is_client_error：1 表示该失败由客户端请求错误（HTTP 400/参数校验）导致，
         与 Key/服务器健康无关，高错误率识别时忽略（不改变 error_count 累计）。
         source：请求来源标记（mcp / proxy / cli 等），便于日志筛选与统计。
+        project_id：项目归属（MCP 请求落 mcp_project_id 配置值；代理请求为空），
+        用于按项目拆分统计用量。
         """
         now = time.time()
         conn = self._get_conn()
@@ -606,8 +610,8 @@ class KeyPool:
                     "UPDATE api_keys SET is_active=0 WHERE masked=?", (masked,)
                 )
         conn.execute(
-            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, is_client_error, source, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], 1 if is_client_error else 0, source[:20], now),
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, error_msg, latency_ms, request_id, usage_source, is_client_error, source, project_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (masked, endpoint, credits, 1 if success else 0, error_msg[:500], latency_ms, request_id[:200], usage_source[:20], 1 if is_client_error else 0, source[:20], (project_id or "")[:50], now),
         )
         conn.commit()
         # 日志保留：周期性清理超期记录，避免 request_log 无界增长
@@ -999,31 +1003,34 @@ class KeyPool:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def get_usage_trend(self, days: int = 7, source: str = "") -> dict:
+    def get_usage_trend(self, days: int = 7, source: str = "", project: str = "") -> dict:
         """按天聚合 request_log 用量（结果短 TTL 缓存）。
 
         每日请求数/成功/失败/积分/按 endpoint 拆分。source 非空时只统计该来源
-        （mcp/proxy/cli，来自 request_log.source）。日志是追加写、按天聚合
+        （mcp/proxy/cli，来自 request_log.source）；project 非空时只统计该
+        项目（MCP 请求的 mcp_project_id 归属）。日志是追加写、按天聚合
         结果秒级变化无意义，TTL：settings.cache_ttls.trend（默认 30s，0=关闭）。
         """
         days = max(1, min(int(days), 90))
         source = (source or "").strip()
+        project = (project or "").strip()
         self._check_remote_invalidate()
         ttl = float(cache_ttls().get("trend", 30.0))
-        key = ("trend", days, source)
+        key = ("trend", days, source, project)
         if ttl > 0:
             hit = self._trend_cache.get(key)
             if hit is not None:
                 return hit
-        result = self._get_usage_trend_impl(days, source)
+        result = self._get_usage_trend_impl(days, source, project)
         if ttl > 0:
             self._trend_cache.set(key, result, ttl)
         return result
 
-    def _get_usage_trend_impl(self, days: int = 7, source: str = "") -> dict:
+    def _get_usage_trend_impl(self, days: int = 7, source: str = "", project: str = "") -> dict:
         """按天聚合实现（无缓存），见 get_usage_trend。"""
         days = max(1, min(int(days), 90))
         source = (source or "").strip()
+        project = (project or "").strip()
         since = time.time() - days * 86400
         conn = self._get_conn()
         sql = """
@@ -1039,6 +1046,9 @@ class KeyPool:
         if source:
             sql += " AND source = ?"
             params.append(source)
+        if project:
+            sql += " AND project_id = ?"
+            params.append(project)
         sql += " GROUP BY day, endpoint ORDER BY day"
         rows = conn.execute(sql, params).fetchall()
         day_map: dict[str, dict] = {}
@@ -1059,9 +1069,18 @@ class KeyPool:
             out.append({"date": day, **d})
         return {"days": days, "points": out}
 
+    def list_projects(self) -> list[str]:
+        """返回 request_log 中出现过的项目 ID（去重、非空、按名称排序），供面板筛选。"""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT DISTINCT project_id FROM request_log "
+            "WHERE project_id != '' ORDER BY project_id"
+        ).fetchall()
+        return [r["project_id"] for r in rows]
+
     def query_logs(self, endpoint: str = "", key_masked: str = "", status: str = "",
                    since: float = 0.0, until: float = 0.0, source: str = "",
-                   limit: int = 200, offset: int = 0) -> tuple[list[dict], int]:
+                   project_id: str = "", limit: int = 200, offset: int = 0) -> tuple[list[dict], int]:
         """按条件筛选请求日志（倒序），返回 (行, 总数)。status: '' | success | failed。"""
         where: list[str] = []
         params: list = []
@@ -1074,6 +1093,9 @@ class KeyPool:
         if source:
             where.append("source = ?")
             params.append(source)
+        if project_id:
+            where.append("project_id = ?")
+            params.append(project_id)
         if status == "success":
             where.append("success = 1")
         elif status == "failed":

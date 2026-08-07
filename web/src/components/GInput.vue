@@ -28,13 +28,19 @@ const emit = defineEmits<{
   (e: 'update:modelValue', v: string): void
   (e: 'enter'): void
   (e: 'clear'): void
+  (e: 'change'): void
 }>()
 
 function onInput(ev: Event): void {
   emit('update:modelValue', (ev.target as HTMLInputElement).value)
 }
-function onKeydown(ev: KeyboardEvent): void {
-  if (ev.key === 'Enter') emit('enter')
+function onKeydown(ev: Event): void {
+  const ke = ev as KeyboardEvent
+  if (ke.key === 'Enter') emit('enter')
+}
+/** 值提交（失焦 / 回车）时触发，供 @change 自动保存 */
+function onChange(): void {
+  emit('change')
 }
 function clear(): void {
   emit('update:modelValue', '')
@@ -55,6 +61,7 @@ function clear(): void {
       :autocomplete="autocomplete"
       @input="onInput"
       @keydown="onKeydown"
+      @change="onChange"
     />
     <button
       v-if="clearable && modelValue !== '' && !disabled"

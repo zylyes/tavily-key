@@ -2,13 +2,16 @@
 import { onMounted, ref } from 'vue'
 import AppHeader from '@/components/AppHeader.vue'
 import AppNav from '@/components/AppNav.vue'
+import GButton from '@/components/GButton.vue'
+import GModal from '@/components/GModal.vue'
 import GToast from '@/components/GToast.vue'
 import LoginModal from '@/components/LoginModal.vue'
 import ResizeHandles from '@/components/ResizeHandles.vue'
+import { getUpdateAnnouncement, type UpdateAnnouncement } from '@/api/client'
 import { initAuth } from '@/composables/useAuth'
 import { setupWebviewBridge } from '@/utils/webview'
 
-/* App.vue —— 应用壳：环境光背景 / Header / 导航轨 / 视图出口 / Toast / 登录模态 */
+/* App.vue —— 应用壳：环境光背景 / Header / 导航轨 / 视图出口 / Toast / 登录模态 / 更新公告 */
 
 // ── 导航折叠（持久化，键与旧版一致） ──
 const NAV_KEY = 'tavilyNavCollapsed'
@@ -24,9 +27,24 @@ function toggleNav(): void {
   } catch { /* 忽略 */ }
 }
 
+// ── 更新公告（自动更新/手动更新完成后，新版本首次启动展示本次更新说明）──
+const announcementOpen = ref(false)
+const announcement = ref<UpdateAnnouncement | null>(null)
+
+async function loadAnnouncement(): Promise<void> {
+  try {
+    const r = await getUpdateAnnouncement()
+    if (r.announcement) {
+      announcement.value = r.announcement
+      announcementOpen.value = true
+    }
+  } catch { /* 静默：公告读取失败不打扰 */ }
+}
+
 onMounted(() => {
   initAuth()
   setupWebviewBridge()
+  loadAnnouncement()
 })
 </script>
 
@@ -52,6 +70,20 @@ onMounted(() => {
   <ResizeHandles />
   <GToast />
   <LoginModal />
+
+  <!-- 更新公告：更新完成后首次启动展示 -->
+  <GModal v-model:open="announcementOpen" title="更新完成公告" width="520px">
+    <div class="announcement">
+      <p class="announcement-ver">
+        已更新到 <b class="u-mono">{{ announcement?.version || '新版本' }}</b>
+      </p>
+      <pre v-if="announcement?.body" class="announcement-body">{{ announcement.body }}</pre>
+      <p v-else class="u-dim">本次更新没有附带更新说明。</p>
+    </div>
+    <template #footer>
+      <GButton size="sm" variant="primary" @click="announcementOpen = false">知道了</GButton>
+    </template>
+  </GModal>
 </template>
 
 <style scoped>
@@ -127,4 +159,24 @@ onMounted(() => {
   transition: left var(--dur-2) var(--ease-out);
 }
 .app-main.nav-collapsed { left: var(--nav-w-collapsed); }
+</style>
+
+<!-- 更新公告（GModal Teleport 到 body，scoped 样式不生效，需全局） -->
+<style>
+.announcement-ver { font-size: 13px; margin: 0 0 8px; }
+.announcement-body {
+  max-height: 300px;
+  overflow: auto;
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-2);
+  background: var(--bg-2);
+  border: 1px solid var(--glass-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
 </style>

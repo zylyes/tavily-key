@@ -275,7 +275,7 @@ def test_usage_trend_endpoint(client, monkeypatch):
     monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
 
     class _Fake:
-        def get_usage_trend(self, days, source=""):
+        def get_usage_trend(self, days, source="", project=""):
             return {"days": days, "points": [{"date": "2026-08-05", "requests": 3, "success": 2, "failed": 1, "credits": 5, "endpoints": {"search": 3}}]}
 
     monkeypatch.setattr(dashboard, "pool", _Fake())
@@ -325,6 +325,24 @@ def test_logs_source_filter(client, monkeypatch):
     assert captured.get("source") == ""
 
 
+def test_logs_project_filter(client, monkeypatch):
+    """/api/logs 的 project 参数应透传到 query_logs（按项目筛选）。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    dashboard._api_cache.clear()  # 隔离模块级 logs 缓存，避免前序测试污染
+    captured: dict = {}
+
+    class _Fake:
+        def query_logs(self, **kw):
+            captured.update(kw)
+            return [], 0
+
+    monkeypatch.setattr(dashboard, "pool", _Fake())
+    client.get("/api/logs?project=proj-a")
+    assert captured.get("project_id") == "proj-a"
+    client.get("/api/logs")
+    assert captured.get("project_id") == ""
+
+
 def test_logs_export_csv(client, monkeypatch):
     monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
 
@@ -332,9 +350,47 @@ def test_logs_export_csv(client, monkeypatch):
         def query_logs(self, **kw):
             return [{"created_at": 1754400000, "key_masked": "tvly-***", "endpoint": "search", "success": 1,
                      "credits_consumed": 1, "latency_ms": 10.5, "request_id": "rid", "usage_source": "response",
-                     "source": "mcp", "error_msg": ""}], 1
+                     "source": "mcp", "project_id": "proj-a", "error_msg": ""}], 1
 
     monkeypatch.setattr(dashboard, "pool", _Fake())
+
+
+def test_audit_export_zip(client, monkeypatch):
+    """审计导出 zip：含全量请求日志 CSV + Key 池状态 + 汇总（无密钥明文）。"""
+    import io
+    import zipfile
+
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+
+    class _Fake:
+        def query_logs(self, **kw):
+            return [{"created_at": 1754400000, "key_masked": "tvly-***", "endpoint": "search", "success": 1,
+                     "credits_consumed": 1, "latency_ms": 10.5, "request_id": "rid", "usage_source": "response",
+                     "source": "mcp", "project_id": "proj-a", "is_client_error": 0, "error_msg": ""}], 1
+
+        def get_stats(self):
+            return {"keys": [], "total_keys": 0, "active_keys": 0, "total_requests": 0,
+                    "total_errors": 0, "total_credits": 0, "recent_24h": {}}
+
+        def get_aggregate(self):
+            return {"total_keys": 0, "active_keys": 0, "exhausted_count": 0, "total_limit": 0,
+                    "total_used": 0, "remaining": 0, "usage_pct": 0}
+
+        def detect_anomalies(self):
+            return []
+
+        def list_projects(self):
+            return ["proj-a"]
+
+    monkeypatch.setattr(dashboard, "pool", _Fake())
+    r = client.get("/api/audit/export.zip")
+    assert r.status_code == 200
+    assert "application/zip" in r.headers["content-type"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as zf:
+        names = set(zf.namelist())
+        assert {"request_log.csv", "pool_status.json", "summary.json"} <= names
+        assert b"search" in zf.read("request_log.csv")
+        assert b"proj-a" in zf.read("summary.json")
     r = client.get("/api/logs/export.csv")
     assert r.status_code == 200
     assert "text/csv" in r.headers["content-type"]

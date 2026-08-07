@@ -102,6 +102,21 @@ function onCopyToken(): void {
   void copyText(full, '代理密钥已复制')
 }
 
+/* ── 客户端接入配置（Cherry Studio 等 Tavily 提供商）──────── */
+const cherryConfig = computed(() => {
+  const s = status.value
+  if (!s || !s.running) return ''
+  const url = s.urls?.local || s.url || ''
+  if (!url) return ''
+  const full = formToken.value || s.token || ''
+  return [
+    '【Cherry Studio 网络搜索 → Tavily 提供商】',
+    `API 地址：${url}`,
+    `API 密钥：${full || '（未设置，可留空）'}`,
+    '填完后点击「检测」验证连通，即可在对话中使用网络搜索。',
+  ].join('\n')
+})
+
 // ── 生成新密钥 ───────────────────────────────────────────────
 const generating = ref(false)
 
@@ -221,6 +236,7 @@ async function onSave(): Promise<void> {
           <span class="meta-chip" title="传输方式">Tavily API</span>
           <span class="meta-chip u-mono" title="监听地址">{{ status.host }}:{{ status.port }}</span>
           <span v-if="status.auto_start" class="meta-chip" title="随软件启动">自启动</span>
+          <span v-if="status.auto_restarts" class="meta-chip" title="看门狗自动重启次数">自动重启 ×{{ status.auto_restarts }}</span>
         </div>
 
         <template v-if="status.running">
@@ -265,6 +281,23 @@ async function onSave(): Promise<void> {
         </template>
 
         <p v-if="actionError" class="action-error">{{ actionError }}</p>
+      </GlassCard>
+
+      <!-- ── 客户端接入配置 ── -->
+      <GlassCard
+        v-if="status.running"
+        title="客户端接入配置"
+        desc="Cherry Studio 等客户端对接方式（地址取本机地址；客户端在其他设备时改用局域网 IP / 主机名地址）"
+      >
+        <div class="cfg-block">
+          <div class="cfg-head">
+            <span class="cfg-label">Cherry Studio（网络搜索 → Tavily 提供商）</span>
+            <GButton size="sm" @click="copyText(cherryConfig, '配置已复制')">
+              <GIcon name="copy" :size="13" />复制
+            </GButton>
+          </div>
+          <pre class="cfg-pre">{{ cherryConfig || '—' }}</pre>
+        </div>
       </GlassCard>
 
       <!-- ── 设置卡 ── -->
@@ -423,6 +456,34 @@ async function onSave(): Promise<void> {
   background: var(--danger-soft);
   border: 1px solid color-mix(in srgb, var(--danger) 28%, transparent);
   border-radius: var(--r-sm);
+}
+
+/* ── 客户端接入配置 ── */
+.cfg-block { margin-bottom: 0; }
+.cfg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.cfg-label {
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--text-2);
+}
+.cfg-pre {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--input-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-sm);
+  color: var(--text);
 }
 
 /* ── 设置表单 ── */

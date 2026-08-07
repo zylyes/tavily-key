@@ -316,7 +316,7 @@ AI 驱动的深度研究工具：自动收集来源、交叉分析，并生成�
 | `include_domains` | list[str] | `None` | 来源域名的软性偏好（最多 20 个） |
 | `exclude_domains` | list[str] | `None` | 硬性屏蔽的域名（最多 20 个） |
 | `wait` | bool | `True` | `True`：等待报告完成并返回最终报告；`False`：提交后立即返回 `request_id`，配合 `tavily_research_status` 查询 |
-| `timeout` | float | 按 model | 等待报告的最大秒数（总时长 deadline）。缺省按 `model` 计算：`mini`/`auto` 300s、`pro` 900s（对齐官方 mini 5min / pro 15min），显式传入优先 |
+| `timeout` | float | 按 model | 等待报告的最大秒数（总时长 deadline）。缺省按 `model` 计算：`mini`/`auto` 300s、`pro` 900s（对齐官方 mini 5min / pro 15min）。**下限保护（v0.9.1）**：显式传入值若低于模型默认（如客户端默认 120s），自动提升到默认值——research 生成报告通常需 1-5 分钟，过小的 timeout 会在完成前被掐断；提升时响应附带 `timeout_raised: {requested, applied, note}` 字段注明实际生效值 |
 | `poll_interval` | float | `2.0` | 状态轮询间隔（秒） |
 | `output_length` | str | `"standard"` | 报告长度：`short` / `standard` / `long`（v0.4.1） |
 | `output_schema` | dict | `None` | JSON Schema 结构化输出：`content` 返回对象而非 Markdown，AI Agent 直接消费无需解析报告（v0.4.1）。流式 delta 为对象时直接返回；传非 dict 返回友好错误 |

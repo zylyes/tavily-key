@@ -130,3 +130,44 @@ def test_backup_removes_invalid_zip_on_post_validation(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="校验失败"):
         backup.backup_to(tmp_path / "out.zip")
     assert not (tmp_path / "out.zip").exists()
+
+
+# ── 定时自动备份 ──────────────────────────────────────────────
+def test_auto_backup_disabled_returns_none(data_dir, tmp_path):
+    """自动备份默认关闭：不触发，不生成备份。"""
+    assert backup.auto_backup(enabled=False, backup_dir=tmp_path / "bk") is None
+    assert not (tmp_path / "bk").exists()
+
+
+def test_auto_backup_triggers_when_due(data_dir, tmp_path):
+    """开启且距上次备份超过间隔：生成备份到 backups/ 目录；间隔内不重复。"""
+    d = tmp_path / "bk"
+    dest = backup.auto_backup(enabled=True, interval_days=1, keep=3, backup_dir=d)
+    assert dest is not None
+    assert dest.parent == d
+    assert dest.exists()
+    # 刚备份过：间隔内再次调用不重复生成
+    assert backup.auto_backup(enabled=True, interval_days=1, keep=3, backup_dir=d) is None
+    zips = list(d.glob("*.zip"))
+    assert len(zips) == 1
+
+
+def test_prune_backups_keeps_n(data_dir, tmp_path):
+    """超出保留份数时删除最旧备份，仅保留最近 N 份。"""
+    import os
+    import time as _t
+
+    d = tmp_path / "bk"
+    d.mkdir(parents=True, exist_ok=True)
+    base = _t.time() - 1000
+    for i in range(5):
+        p = d / f"tavily-backup-{i}.zip"
+        p.write_bytes(b"x")
+        os.utime(p, (base + i, base + i))
+    removed = backup.prune_backups(2, d)
+    assert removed == 3
+    remaining = sorted(p.name for p in d.glob("*.zip"))
+    assert remaining == ["tavily-backup-3.zip", "tavily-backup-4.zip"]
+    # keep <= 0：不清理
+    assert backup.prune_backups(0, d) == 0
+    assert len(list(d.glob("*.zip"))) == 2

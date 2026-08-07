@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import threading
+from typing import Callable
 
 if os.name == "nt":
     import ctypes
@@ -152,10 +153,16 @@ class TrayIcon:
         on_exit:   退出应用的回调（在托盘线程内执行）
     """
 
-    def __init__(self, icon_path, on_show=None, on_exit=None):
+    def __init__(self, icon_path, on_show=None, on_exit=None, items=None):
         self._icon_path = str(icon_path)
         self._on_show = on_show or (lambda: None)
         self._on_exit = on_exit or (lambda: None)
+        # 自定义菜单项：[(item_id, label, callback)]，item_id 从 1000 起（避开
+        # ID_SHOW/ID_EXIT）。回调在托盘线程内执行，长耗时操作请自行开线程。
+        self._items = list(items or [])
+        self._item_handlers: dict[int, Callable] = {}
+        for item_id, _label, cb in self._items:
+            self._item_handlers[int(item_id)] = cb
         self._thread: threading.Thread | None = None
         self._hwnd = 0
         self._nid = None
@@ -292,6 +299,8 @@ class TrayIcon:
                     self._safe(self._on_show)
                 elif cmd == ID_EXIT:
                     self._safe(self._on_exit)
+                elif cmd in self._item_handlers:
+                    self._safe(self._item_handlers[cmd])
             elif msg == WM_DESTROY:
                 _user32.PostQuitMessage(0)
                 return 0
@@ -303,6 +312,10 @@ class TrayIcon:
         try:
             hmenu = _user32.CreatePopupMenu()
             _user32.AppendMenuW(hmenu, MF_STRING, ID_SHOW, "显示主窗口")
+            if self._items:
+                _user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+                for item_id, label, _cb in self._items:
+                    _user32.AppendMenuW(hmenu, MF_STRING, item_id, label)
             _user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
             _user32.AppendMenuW(hmenu, MF_STRING, ID_EXIT, "退出")
             pt = wintypes.POINT()
@@ -316,6 +329,8 @@ class TrayIcon:
                 self._safe(self._on_show)
             elif cmd == ID_EXIT:
                 self._safe(self._on_exit)
+            elif cmd in self._item_handlers:
+                self._safe(self._item_handlers[cmd])
         except Exception:
             pass
 

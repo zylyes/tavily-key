@@ -24,6 +24,30 @@ _proc: subprocess.Popen | None = None
 # stop() 只允许清理这些 PID，避免误杀占用同一端口的第三方进程。
 _owned_pids: set[int] = set()
 
+# 期望运行状态：面板手动启动（start）/随软件自启置 True、手动停止（stop）置 False。
+# 看门狗据此判断「应运行但已退出」→ 自动重启；手动停止后不会反复拉起。
+_want = False
+# 会话内看门狗自动重启次数（进程内计数，软件重启清零；前端状态卡展示）
+_auto_restarts = 0
+
+
+def want_running() -> bool:
+    """是否期望搜索代理保持运行（面板手动启动 / 随软件自启置 True）。"""
+    with _lock:
+        return _want
+
+
+def auto_restarts() -> int:
+    """本次会话内看门狗自动重启次数。"""
+    with _lock:
+        return _auto_restarts
+
+
+def _bump_auto_restarts() -> None:
+    global _auto_restarts
+    with _lock:
+        _auto_restarts += 1
+
 
 LOG_PATH = runtime_dir() / "proxy_server.log"
 
@@ -125,13 +149,15 @@ def status() -> dict:
         "url": proxy_url(cfg),
         "urls": proxy_urls(cfg),
         "auto_start": bool(cfg.get("proxy_auto_start", False)),
+        "auto_restarts": _auto_restarts,
     }
 
 
 def start() -> dict:
     """启动搜索代理子进程。"""
-    global _proc
+    global _proc, _want
     with _lock:
+        _want = True
         cfg = get_settings()
         port = int(cfg.get("proxy_port", 8002))
         if is_port_open("127.0.0.1", port):
@@ -183,8 +209,9 @@ def start() -> dict:
 
 def stop() -> dict:
     """停止搜索代理子进程（杀掉监听端口的真实进程）。"""
-    global _proc
+    global _proc, _want
     with _lock:
+        _want = False
         proc = _proc
         _proc = None
     cfg = get_settings()

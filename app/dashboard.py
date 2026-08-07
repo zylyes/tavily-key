@@ -34,6 +34,13 @@ from tray import TrayIcon
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """服务生命周期：启动时按配置自动拉起 MCP 服务，关闭时清理。"""
+    # 启动：清理自动更新残留（旧版备份 backup-old / 过期临时更新目录 / pending 标记）
+    try:
+        from updater import cleanup_after_update
+
+        cleanup_after_update()
+    except Exception:  # noqa: BLE001
+        pass
     # 启动：开启「随软件启动 MCP 服务」且为网络模式时自动启动。
     # mcp_manager.start() 内部有 1.5s 子进程存活探测，若在 lifespan 里同步
     # 调用会阻塞 uvicorn 就绪，导致面板首次加载 fetch 失败；放后台线程执行。
@@ -60,8 +67,29 @@ async def lifespan(app: FastAPI):
         target=_anomaly_notify_loop, args=(notify_stop,), daemon=True, name="tavily-notify"
     )
     notify_thread.start()
+    # 服务子进程看门狗（异常退出自动重启，退避与告警见 _service_watchdog_loop）
+    watchdog_stop = threading.Event()
+    watchdog_thread = threading.Thread(
+        target=_service_watchdog_loop, args=(watchdog_stop,), daemon=True, name="tavily-watchdog"
+    )
+    watchdog_thread.start()
+    # 定时自动备份（默认关闭；开启后按间隔备份到 data/backups/）
+    autobackup_stop = threading.Event()
+    autobackup_thread = threading.Thread(
+        target=_auto_backup_loop, args=(autobackup_stop,), daemon=True, name="tavily-autobackup"
+    )
+    autobackup_thread.start()
+    # GitHub 更新检查（按 update_check_interval_hours 周期，发现新版本托盘/Webhook 通知）
+    updatecheck_stop = threading.Event()
+    updatecheck_thread = threading.Thread(
+        target=_update_check_loop, args=(updatecheck_stop,), daemon=True, name="tavily-updatecheck"
+    )
+    updatecheck_thread.start()
     yield
     notify_stop.set()
+    watchdog_stop.set()
+    autobackup_stop.set()
+    updatecheck_stop.set()
     # 关闭：停止由本软件管理的 MCP 服务与搜索代理
     try:
         mcp_manager.stop()
@@ -90,6 +118,131 @@ def _anomaly_notify_loop(stop_event: threading.Event) -> None:
             check_and_notify(pool, tray=_TRAY.get("icon"))
         except Exception:  # noqa: BLE001
             pass
+
+
+# ── 服务子进程看门狗（异常退出自动重启）───────────────────────
+# 期望运行（auto_start / 面板手动启动）的服务异常退出后自动重启；连续
+# _WATCHDOG_MAX_FAILS 次失败进入退避，避免端口被占/配置错误时死循环拉起；
+# 重启成功/失败均通过托盘气泡 + Webhook 通知（复用 notify.send_webhook）。
+_WATCHDOG_INTERVAL = 10.0    # 秒：看门狗检查周期
+_WATCHDOG_BACKOFF = 300.0    # 秒：连续失败后的退避时间
+_WATCHDOG_MAX_FAILS = 3      # 连续失败多少次进入退避
+
+
+def _service_watchdog_loop(stop_event: threading.Event) -> None:
+    """子进程看门狗：异常退出自动重启 + 连续失败退避 + 事件通知。"""
+    from logging_setup import get_logger
+    from notify import send_webhook
+
+    log = get_logger("watchdog")
+    fails: dict[str, int] = {}
+    backoff: dict[str, float] = {}
+
+    def _alert(title: str, message: str) -> None:
+        try:
+            tray = _TRAY.get("icon")
+            if tray is not None:
+                tray.notify(title, message)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            webhook = (get_settings().get("notify_webhook") or "").strip()
+            if webhook:
+                send_webhook(webhook, {
+                    "title": title, "message": message, "event": "service_watchdog",
+                })
+        except Exception:  # noqa: BLE001
+            pass
+
+    services = (
+        ("MCP 服务", mcp_manager),
+        ("搜索代理", proxy_manager),
+    )
+    while not stop_event.wait(_WATCHDOG_INTERVAL):
+        for label, mgr in services:
+            try:
+                if not mgr.want_running():
+                    continue
+                if mgr.status().get("running"):
+                    fails[label] = 0
+                    continue
+                if time.time() < backoff.get(label, 0.0):
+                    continue
+                r = mgr.start()
+                if r.get("ok"):
+                    mgr._bump_auto_restarts()
+                    fails[label] = 0
+                    log.info("看门狗：%s 异常退出已自动重启", label)
+                    _alert(f"{label} 已自动重启", "检测到服务进程异常退出，已自动拉起。")
+                else:
+                    fails[label] = fails.get(label, 0) + 1
+                    log.warning("看门狗：%s 重启失败: %s", label, str(r.get("error", ""))[:200])
+                    if fails[label] >= _WATCHDOG_MAX_FAILS:
+                        backoff[label] = time.time() + _WATCHDOG_BACKOFF
+                        fails[label] = 0
+                        _alert(f"{label} 自动重启失败",
+                               f"连续 {_WATCHDOG_MAX_FAILS} 次重启失败，进入 {int(_WATCHDOG_BACKOFF // 60)} 分钟退避。"
+                               f"原因：{str(r.get('error', ''))[:200]}")
+            except Exception as e:  # noqa: BLE001
+                log.warning("看门狗检查 %s 异常: %s", label, str(e)[:200])
+
+
+# ── 定时自动备份（默认关闭）───────────────────────────────────
+# 开启后按 auto_backup_interval_days 周期把 data/ 关键文件备份到
+# data/backups/，保留 auto_backup_keep 份；失败仅记日志不影响服务。
+_AUTOBACKUP_CHECK_INTERVAL = 3600.0   # 秒：每小时检查一次是否到点备份
+
+
+def _auto_backup_loop(stop_event: threading.Event) -> None:
+    """定时自动备份：默认关闭；开启后按配置间隔备份并清理旧备份。"""
+    from logging_setup import get_logger
+
+    log = get_logger("autobackup")
+    while not stop_event.wait(_AUTOBACKUP_CHECK_INTERVAL):
+        try:
+            from backup import auto_backup
+
+            dest = auto_backup()
+            if dest is not None:
+                log.info("自动备份完成: %s", dest)
+        except Exception as e:  # noqa: BLE001
+            log.warning("自动备份失败: %s", str(e)[:300])
+
+
+# ── GitHub 更新检查（后台自动检查 + 新版本通知）────────────────
+# 按 update_check_interval_hours 周期检查；发现新版本时托盘气泡 +
+# Webhook 通知（updater.handle_auto_update 按版本去重）。
+# 首次检查延迟 _UPDATE_FIRST_DELAY，避免启动时与网络请求高峰叠加。
+_UPDATE_FIRST_DELAY = 60.0       # 秒：启动后多久进行首次检查
+_UPDATE_MIN_INTERVAL = 300.0     # 秒：检查间隔下限（配置为 1h 时用 3600）
+
+
+def _update_check_loop(stop_event: threading.Event) -> None:
+    """后台自动检查更新：发现新版本推托盘/Webhook 通知。"""
+    from logging_setup import get_logger
+
+    log = get_logger("updater")
+    first = True
+    while not stop_event.wait(_UPDATE_FIRST_DELAY if first else _UPDATE_MIN_INTERVAL):
+        first = False
+        try:
+            if not bool(get_settings().get("update_check_enabled", True)):
+                continue  # 配置关闭自动检查
+            try:
+                hours = max(int(get_settings().get("update_check_interval_hours", 24) or 0), 0)
+            except (TypeError, ValueError):
+                hours = 24
+            if hours <= 0:
+                continue  # 配置关闭自动检查
+            # 发现新版本时仅通知（带更新摘要，不再自动下载安装）
+            from updater import handle_auto_update
+
+            handle_auto_update(
+                tray=_TRAY.get("icon"),
+                webhook=(get_settings().get("notify_webhook") or "").strip(),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("后台更新检查异常: %s", str(e)[:200])
 
 
 app = FastAPI(title="Tavily Key Pool Dashboard", lifespan=lifespan)
@@ -327,10 +480,16 @@ def api_usage_aggregate():
 
 
 @app.get("/api/usage/trend")
-def api_usage_trend(days: int = 7, source: str = ""):
-    """按天聚合用量趋势（本地时区），days 1-90；source 非空时只统计该来源。"""
+def api_usage_trend(days: int = 7, source: str = "", project: str = ""):
+    """按天聚合用量趋势（本地时区），days 1-90；source/project 非空时按来源/项目筛选。"""
     days = max(1, min(int(days), 90))
-    return {"ok": True, "trend": pool.get_usage_trend(days, source.strip())}
+    return {"ok": True, "trend": pool.get_usage_trend(days, source.strip(), project.strip())}
+
+
+@app.get("/api/projects")
+def api_projects():
+    """请求日志中出现过的项目 ID 列表（供面板项目筛选下拉）。"""
+    return {"ok": True, "projects": pool.list_projects()}
 
 
 @app.get("/api/research/tasks")
@@ -342,18 +501,18 @@ def api_research_tasks(limit: int = 50):
 
 @app.get("/api/logs")
 def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
-             source: str = "", limit: int = 200, offset: int = 0):
-    """筛选请求日志（endpoint/key/状态/来源/时间范围），分页返回（短 TTL 缓存）。"""
+             source: str = "", project: str = "", limit: int = 200, offset: int = 0):
+    """筛选请求日志（endpoint/key/状态/来源/项目/时间范围），分页返回（短 TTL 缓存）。"""
     # 字符串缓存键：与 _api_cache.invalidate("logs:") 的前缀失效匹配
-    cache_key = f"logs:{endpoint}|{key}|{status}|{source}|{days}|{limit}|{offset}"
+    cache_key = f"logs:{endpoint}|{key}|{status}|{source}|{project}|{days}|{limit}|{offset}"
     hit = _api_cache.get(cache_key)
     if hit is not None:
         return hit
     since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
     rows, total = pool.query_logs(
         endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
-        source=source.strip(), since=since, limit=max(1, min(int(limit), 1000)),
-        offset=max(0, int(offset)),
+        source=source.strip(), project_id=project.strip(), since=since,
+        limit=max(1, min(int(limit), 1000)), offset=max(0, int(offset)),
     )
     resp = {"ok": True, "logs": rows, "total": total, "limit": int(limit), "offset": max(0, int(offset))}
     _api_cache.set(cache_key, resp, _logs_ttl())
@@ -362,7 +521,7 @@ def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
 
 @app.get("/api/logs/export.csv")
 def api_logs_export(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
-                    source: str = ""):
+                    source: str = "", project: str = ""):
     """按当前筛选导出请求日志为 CSV。"""
     import csv
     import io
@@ -370,21 +529,82 @@ def api_logs_export(endpoint: str = "", key: str = "", status: str = "", days: i
     since = (time.time() - max(int(days), 0) * 86400) if days else 0.0
     rows, _ = pool.query_logs(
         endpoint=endpoint.strip(), key_masked=key.strip(), status=status.strip(),
-        source=source.strip(), since=since, limit=100000,
+        source=source.strip(), project_id=project.strip(), since=since, limit=100000,
     )
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["time", "key_masked", "endpoint", "success", "credits", "latency_ms", "request_id", "usage_source", "source", "error"])
+    w.writerow(["time", "key_masked", "endpoint", "success", "credits", "latency_ms", "request_id", "usage_source", "source", "project_id", "error"])
     for r in rows:
         w.writerow([
             time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"])),
             r["key_masked"], r["endpoint"], r["success"], r["credits_consumed"],
-            round(r["latency_ms"], 1), r["request_id"], r["usage_source"], r["source"], r["error_msg"],
+            round(r["latency_ms"], 1), r["request_id"], r["usage_source"], r["source"], r["project_id"], r["error_msg"],
         ])
     return Response(
         content=buf.getvalue(),
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=request_log.csv"},
+    )
+
+
+@app.get("/api/audit/export.zip")
+def api_audit_export():
+    """导出请求审计包（zip）：全量请求日志 CSV + Key 池状态 + 汇总 JSON。
+
+    供离线审计/对账使用：含 request_id / usage_source / 来源 / 项目归属 / 异常
+    标记等全部请求元数据，不含 .tavily-secret.key 与任何密钥明文。
+    """
+    import csv
+    import io
+    import json
+    import zipfile
+
+    rows, total = pool.query_logs(limit=100000)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([
+        "time", "key_masked", "endpoint", "success", "credits", "latency_ms",
+        "request_id", "usage_source", "source", "project_id", "is_client_error", "error",
+    ])
+    for r in rows:
+        w.writerow([
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["created_at"])),
+            r["key_masked"], r["endpoint"], r["success"], r["credits_consumed"],
+            round(r["latency_ms"], 1), r["request_id"], r["usage_source"],
+            r["source"], r["project_id"], r["is_client_error"], r["error_msg"],
+        ])
+    # Key 池状态与异常（不含密钥明文，仅 masked）
+    stats = pool.get_stats()
+    stats["aggregate"] = pool.get_aggregate()
+    stats["anomalies"] = pool.detect_anomalies()
+    # 汇总
+    ok = sum(1 for r in rows if r["success"])
+    by_source: dict[str, int] = {}
+    by_endpoint: dict[str, int] = {}
+    for r in rows:
+        s = r["source"] or "unknown"
+        by_source[s] = by_source.get(s, 0) + 1
+        by_endpoint[r["endpoint"]] = by_endpoint.get(r["endpoint"], 0) + 1
+    summary = {
+        "exported_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+        "log_entries": total,
+        "requests": total,
+        "success": ok,
+        "failed": total - ok,
+        "credits": sum(r["credits_consumed"] for r in rows if r["success"]),
+        "by_source": by_source,
+        "by_endpoint": by_endpoint,
+        "projects": pool.list_projects(),
+    }
+    z = io.BytesIO()
+    with zipfile.ZipFile(z, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("request_log.csv", buf.getvalue())
+        zf.writestr("pool_status.json", json.dumps(stats, ensure_ascii=False, indent=2, default=str))
+        zf.writestr("summary.json", json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+    return Response(
+        content=z.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=tavily-audit.zip"},
     )
 
 
@@ -444,6 +664,59 @@ def api_autostart_set(payload: dict = Body(...)):
     enabled = bool(payload.get("enabled"))
     autostart.set_enabled(enabled)
     return {"ok": True, "enabled": autostart.is_enabled()}
+
+
+# ── GitHub 更新检查 ───────────────────────────────────────────
+@app.get("/api/update/check")
+def api_update_check(force: int = 0):
+    """检查 GitHub 最新 release 并返回对比结果（force=1 强制刷新网络）。
+
+    结果带进程内 TTL 缓存（间隔 = update_check_interval_hours），前端
+    「检查更新」按钮可传 force=1 拿到即时结果。
+    """
+    from updater import check_update
+
+    return {"ok": True, "update": check_update(force=bool(force))}
+
+
+# ── 自动更新（下载 / 状态 / 应用，仅打包版）───────────────────
+@app.post("/api/update/download")
+def api_update_download():
+    """后台下载最新 release 打包产物（zip），进度经 /api/update/status 轮询。"""
+    from updater import start_download
+
+    ok, err = start_download()
+    return {"ok": ok, "error": err}
+
+
+@app.get("/api/update/status")
+def api_update_status():
+    """下载进度：idle/starting/downloading/done/error + 已接收/总字节数。"""
+    from updater import get_download_status
+
+    return {"ok": True, "status": get_download_status()}
+
+
+@app.post("/api/update/apply")
+def api_update_apply():
+    """应用已下载的更新：生成重启脚本 → 结束本进程 → 部署新版并启动。
+
+    调用成功后当前进程将被结束，前端提示「正在重启应用」。
+    """
+    from updater import apply_update
+
+    return apply_update()
+
+
+@app.get("/api/update/announcement")
+def api_update_announcement():
+    """读取本次更新公告（一次性：读取后清除），供新版本启动后展示更新说明。
+
+    返回 {ok, announcement: {version, body, applied_at} | null}。
+    """
+    from updater import read_announcement
+
+    return {"ok": True, "announcement": read_announcement()}
 
 
 # ── MCP 服务管理（面板开关 / 状态 / 地址）───────────────────────
@@ -797,6 +1070,24 @@ class _WindowApi:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "path": str(dest)}
 
+    def open_external(self, url: str):
+        """用系统默认浏览器打开外部链接（如 GitHub release 页面）。
+
+        仅校验 http(s) 协议防注入；WebView 内 window.open 默认会被拦截，
+        前端「前往 GitHub 查看」按钮经此桥接跳转。浏览器模式前端直接
+        window.open，不调用本方法。
+        """
+        import webbrowser
+
+        url = (url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return {"ok": False, "error": "仅支持 http/https 链接"}
+        try:
+            webbrowser.open(url)
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+
 
 def _work_area() -> tuple[int, int, int, int]:
     """主屏工作区（排除任务栏）: (left, top, width, height)。
@@ -921,6 +1212,46 @@ def _tray_exit() -> None:
             ctypes.windll.user32.PostMessageW(_HWND, 0x0010, 0, 0)  # WM_CLOSE
     except Exception:
         pass
+
+
+# ── 托盘快捷菜单（切换 MCP / 代理、立即同步用量）──────────────
+# 回调在托盘线程内执行，实际操作放后台线程，避免阻塞托盘消息循环。
+def _tray_toggle_mcp() -> None:
+    """托盘菜单：切换 MCP 服务启停。"""
+    def _run():
+        try:
+            st = mcp_manager.status()
+            if st.get("running"):
+                mcp_manager.stop()
+            else:
+                mcp_manager.start()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _tray_toggle_proxy() -> None:
+    """托盘菜单：切换搜索代理启停。"""
+    def _run():
+        try:
+            st = proxy_manager.status()
+            if st.get("running"):
+                proxy_manager.stop()
+            else:
+                proxy_manager.start()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+def _tray_sync_usage() -> None:
+    """托盘菜单：立即同步所有 active key 的官方用量。"""
+    def _run():
+        try:
+            pool.sync_usage()
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def _activate_window() -> bool:
@@ -1216,7 +1547,16 @@ def run_app() -> None:
             _harden_webview()
             # 系统托盘（与窗口/网页图标统一为应用图标）；
             # 「关闭/最小化/启动时进托盘」设置由 _WindowApi 与 shown 事件消费
-            tray_icon = TrayIcon(_window_icon_path(), on_show=_tray_show, on_exit=_tray_exit)
+            tray_icon = TrayIcon(
+                _window_icon_path(),
+                on_show=_tray_show,
+                on_exit=_tray_exit,
+                items=[
+                    (1001, "切换 MCP 服务", _tray_toggle_mcp),
+                    (1002, "切换搜索代理", _tray_toggle_proxy),
+                    (1003, "立即同步用量", _tray_sync_usage),
+                ],
+            )
             tray_icon.start()
             _TRAY["icon"] = tray_icon
             # 创建时即传入居中坐标（pywebview 支持 x/y，避免依赖 shown 事件时序）

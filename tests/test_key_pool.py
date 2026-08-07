@@ -729,7 +729,7 @@ def test_get_usage_trend_ttl_cache(pool, monkeypatch):
     """用量趋势按天聚合缓存：按 days 分键，失效后重算。"""
     calls = {"n": 0}
 
-    def fake_impl(days, source=""):
+    def fake_impl(days, source="", project=""):
         calls["n"] += 1
         return {"days": days, "points": []}
 
@@ -741,9 +741,30 @@ def test_get_usage_trend_ttl_cache(pool, monkeypatch):
     assert calls["n"] == 2
     pool.get_usage_trend(7, source="proxy")  # 不同 source → 不同缓存键
     assert calls["n"] == 3
+    pool.get_usage_trend(7, project="proj-a")  # 不同 project → 不同缓存键
+    assert calls["n"] == 4
     pool._invalidate_caches()
     pool.get_usage_trend(7)
-    assert calls["n"] == 4
+    assert calls["n"] == 5
+
+
+def test_usage_trend_filters_project(pool):
+    """用量趋势按项目（request_log.project_id）筛选，且不影响其他项目统计。"""
+    pool.record_request(MASK1, "search", 10, True, 1, project_id="proj-a", usage_source="response")
+    pool.record_request(MASK1, "search", 10, True, 2, project_id="proj-a", usage_source="response")
+    pool.record_request(MASK1, "search", 10, True, 1, project_id="proj-b", usage_source="response")
+    pool.record_request(MASK1, "search", 10, True, 1, project_id="", usage_source="response")
+    all_trend = pool.get_usage_trend(1)
+    a_trend = pool.get_usage_trend(1, project="proj-a")
+    b_trend = pool.get_usage_trend(1, project="proj-b")
+    all_day = all_trend["points"][-1]
+    a_day = a_trend["points"][-1]
+    b_day = b_trend["points"][-1]
+    assert all_day["requests"] == 4
+    assert a_day["requests"] == 2
+    assert a_day["credits"] == 3
+    assert b_day["requests"] == 1
+    pool._invalidate_caches()
 
 
 def test_reset_runtime_state_clears_inmemory(pool, monkeypatch):

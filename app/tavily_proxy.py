@@ -82,9 +82,13 @@ _CRAWL_FIELDS = ("url", "max_depth", "max_pages", "include_images", "include_raw
 _MAP_FIELDS = ("url", "search_depth", "max_depth", "max_urls", "include_subdomains")
 # Research 提交参数白名单（代理只做「提交 + 轮询」，不做 SSE 流式透传）。
 # input 必填参数单独处理（显式传参），不进白名单避免重复。
+# files：官方 base64 附件（≤5 文件、80k 词，.txt/.md/.json），REST JSON body
+# 传 {"files": [{"name", "data", "type": "base64"}]} 合理，代理透传；MCP 侧
+# 传文件体验差，tavily_research 工具不加该参数。
 _RESEARCH_FIELDS = (
     "model", "citation_format", "include_domains", "exclude_domains",
     "output_length", "output_schema", "max_sources", "max_subsources",
+    "files",
 )
 
 
@@ -155,7 +159,8 @@ def _call(endpoint: str, fn: Callable,
     source 固定为 proxy，请求日志可区分 MCP / 代理来源。
     """
     try:
-        raw = _run_with_retry(endpoint, fn, on_success, source="proxy")
+        # project_id 显式空：代理请求不归属 MCP 项目的 mcp_project_id 配置
+        raw = _run_with_retry(endpoint, fn, on_success, source="proxy", project_id="")
         data = json.loads(raw)
     except Exception as e:  # noqa: BLE001
         _log.warning("proxy %s 转发异常: %s", endpoint, str(e)[:200])
@@ -285,6 +290,7 @@ async def proxy_research(request: Request):
     """Tavily Research：提交任务，返回 request_id（客户端用 GET /research/{id} 轮询）。
 
     与官方 POST /research 一致返回异步任务（request_id），不做 SSE 流式透传。
+    支持官方 files 附件参数（base64，≤5 文件），透传给 API。
     提交成功后把 request_id→masked 映射写入 research_keys.json（跨进程共享），
     供 GET /research/{id} 用同一 key 查询（任务按 key 隔离，用其他 key 查 404）。
     """
@@ -348,12 +354,12 @@ async def proxy_research_status(request_id: str):
         if not isinstance(resp, dict):
             resp = {"status": resp}
         _record(masked, "research-status", t0, True, _usage_credits(resp)[0],
-                request_id=request_id, usage_source="unknown", source="proxy")
+                request_id=request_id, usage_source="unknown", source="proxy", project_id="")
         return JSONResponse(resp)
     except Exception as e:  # noqa: BLE001
         _log.warning("proxy /research/%s 失败 masked=%s: %s", request_id, masked, str(e)[:200])
         _record(masked, "research-status", t0, False, 0, str(e), request_id=request_id,
-                usage_source="none", source="proxy")
+                usage_source="none", source="proxy", project_id="")
         return _error(500, str(e)[:300])
 
 

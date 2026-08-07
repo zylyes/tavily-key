@@ -165,6 +165,15 @@ def cmd_audit(args):
             p = (t.get("points") or [])
             src[s] = (p[-1].get("requests", 0) if p else 0)
         print("  按来源: " + ", ".join(f"{k}={v}" for k, v in src.items()))
+        # 按项目拆分（request_log.project_id：MCP 请求的 mcp_project_id 归属）
+        proj: dict[str, int] = {}
+        rows, _ = pool.query_logs(limit=1000)
+        for r in rows:
+            p = (r.get("project_id") or "").strip()
+            if p:
+                proj[p] = proj.get(p, 0) + 1
+        if proj:
+            print("  按项目: " + ", ".join(f"{k}={v}" for k, v in sorted(proj.items())))
     except Exception:  # noqa: BLE001
         pass
     # Research 任务看板概览（仅统计，不逐个调官方接口）
@@ -222,6 +231,41 @@ def cmd_restore(args):
     print(f"已恢复 {n} 个文件。请重启服务使配置与 Key 生效。")
 
 
+def cmd_update(args):
+    """检查 GitHub 最新 release，与本地版本对比（--force 强制刷新网络）。"""
+    import datetime
+
+    from updater import check_update
+
+    result = check_update(force=args.force)
+    print(f"当前版本 : {result['current_version']}")
+    if result.get("disabled"):
+        print("更新检查 : 已禁用（settings.update_repo 未配置）")
+        return
+    if not result.get("ok"):
+        print(f"更新检查 : 失败 - {result.get('error', '')}")
+        return
+    latest = result.get("latest_version") or ""
+    print(f"最新版本 : {latest}")
+    published = result.get("published_at") or ""
+    if published:
+        try:
+            dt = datetime.datetime.fromisoformat(published.replace("Z", "+00:00"))
+            print(f"发布时间 : {dt.astimezone().strftime('%Y-%m-%d %H:%M')}")
+        except Exception:  # noqa: BLE001
+            pass
+    if result.get("update_available"):
+        print("状态     : ⬆ 发现新版本，可前往 GitHub 查看更新")
+    else:
+        print("状态     : ✅ 已是最新版本")
+    if result.get("release_url"):
+        print(f"地址     : {result['release_url']}")
+    body = result.get("body") or ""
+    if body and args.notes:
+        print("\n更新说明：")
+        print(body[:2000])
+
+
 def main():
     parser = argparse.ArgumentParser(prog="tavily-pool", description="Tavily API Key Pool Manager")
     sub = parser.add_subparsers(dest="cmd")
@@ -265,6 +309,12 @@ def main():
     p_restore = sub.add_parser("restore", help="Restore data directory from a backup zip")
     p_restore.add_argument("zip", help="Backup zip file path")
 
+    p_update = sub.add_parser("update-check", help="Check for updates on GitHub")
+    p_update.add_argument("--force", "-f", action="store_true",
+                          help="Force re-check (bypass cache)")
+    p_update.add_argument("--notes", action="store_true",
+                          help="Print release notes of the latest version")
+
     args = parser.parse_args()
     if args.cmd is None:
         parser.print_help()
@@ -284,6 +334,7 @@ def main():
         "proxy": cmd_proxy,
         "backup": cmd_backup,
         "restore": cmd_restore,
+        "update-check": cmd_update,
     }
     cmds[args.cmd](args)
 

@@ -56,6 +56,9 @@ DEFAULTS: dict = {
     # ── 异常识别阈值 ──────────────────────────────────────────
     "anomaly_thresholds": {},    # error_rate / leak_diff_credits / stale_days / slow_ratio
     "log_retention_days": 90,    # request_log 保留天数（0 = 不清理，防无界增长）
+    # ── 日志治理（长驻进程日志轮转，防无限膨胀）──────────────
+    "log_max_bytes": 5242880,    # 单个日志文件大小上限（字节，5MB；0 = 不轮转）
+    "log_backup_count": 3,       # 日志轮转保留的备份文件数
     # ── 异常通知 ──────────────────────────────────────────────
     "notify_webhook": "",          # 异常 Webhook URL（钉钉/企业微信/Server酱等，留空不推送）
     "notify_tray": True,           # 异常时是否显示 Windows 托盘气泡
@@ -69,6 +72,15 @@ DEFAULTS: dict = {
     "proxy_host": "0.0.0.0",       # 代理监听地址（0.0.0.0 = 局域网可用）
     "proxy_port": 8002,            # 代理监听端口
     "proxy_token": "",             # 代理 API 密钥（客户端 Bearer 鉴权；留空则不鉴权=开放）
+    # ── 定时自动备份（默认关闭；备份到 data/backups/，保留 auto_backup_keep 份）──
+    "auto_backup_enabled": False,   # 是否开启定时自动备份
+    "auto_backup_interval_days": 1, # 备份间隔（天）
+    "auto_backup_keep": 7,          # 保留的备份份数（超出删除最旧）
+    # ── GitHub 更新检查 ─────────────────────────────────────────
+    "update_check_enabled": True,      # 是否自动检查更新（后台按间隔检查；关闭后仅手动）
+    "update_repo": "zylyes/tavily-key",  # GitHub 仓库（owner/repo）；留空 = 禁用更新检查
+    "update_check_interval_hours": 24,   # 自动检查间隔（小时）；0 = 关闭自动检查（仅手动）
+    "update_check_interval_unit": "hour",  # 面板展示单位：hour | day | week | month（仅 UI 展示，生效值以 hours 为准）
 }
 
 MODE_DEFAULTS: dict = {
@@ -166,15 +178,18 @@ def save(patch: dict) -> dict:
     return dict(cfg)
 
 
-_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes", "proxy_port")
+_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes", "proxy_port", "log_backup_count", "auto_backup_interval_days", "auto_backup_keep", "update_check_interval_hours")
+# 大整数字段：0 ~ 512MB（日志文件大小上限，_INT_FIELDS 的 0-65535 范围不够）
+_LARGE_INT_FIELDS = ("log_max_bytes",)
 _BOOL_FIELDS = (
     "autostart", "start_to_tray", "close_to_tray", "minimize_to_tray",
-    "mcp_auto_start", "notify_tray", "proxy_auto_start",
+    "mcp_auto_start", "notify_tray", "proxy_auto_start", "auto_backup_enabled",
+    "update_check_enabled",
 )
 _STR_FIELDS = (
     "mode", "domain", "host", "auth_token", "theme_mode",
     "mcp_transport", "mcp_host", "mcp_token", "mcp_human_id", "mcp_project_id",
-    "notify_webhook", "proxy_host", "proxy_token",
+    "notify_webhook", "proxy_host", "proxy_token", "update_repo", "update_check_interval_unit",
 )
 # 以 JSON 对象存储的字段：接受 dict 或 JSON 字符串
 _DICT_FIELDS = ("anomaly_thresholds", "mcp_default_parameters", "cache_ttls", "endpoint_rpm")
@@ -190,7 +205,15 @@ def validate_patch(patch: dict) -> dict:
     for k, v in patch.items():
         if k not in DEFAULTS:
             continue
-        if k in _INT_FIELDS:
+        if k in _LARGE_INT_FIELDS:
+            try:
+                n = int(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{k} must be an integer")
+            if not (0 <= n <= 512 * 1024 * 1024):
+                raise ValueError(f"{k} must be in range 0-536870912")
+            out[k] = n
+        elif k in _INT_FIELDS:
             try:
                 n = int(v)
             except (TypeError, ValueError):
@@ -228,6 +251,8 @@ def validate_patch(patch: dict) -> dict:
         raise ValueError("mcp_transport must be stdio, sse or streamable-http")
     if "theme_mode" in out and out["theme_mode"] not in ("system", "light", "dark"):
         raise ValueError("theme_mode must be system, light or dark")
+    if "update_check_interval_unit" in out and out["update_check_interval_unit"] not in ("hour", "day", "week", "month"):
+        raise ValueError("update_check_interval_unit must be hour, day, week or month")
     return out
 
 

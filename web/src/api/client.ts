@@ -188,6 +188,7 @@ export interface RequestLog {
   usage_source: string        // response | unknown | none
   source: string              // mcp | proxy | cli | ''
   is_client_error?: number
+  project_id?: string         // MCP 请求的 mcp_project_id 归属（代理请求为空）
   created_at: number          // unix 秒
 }
 
@@ -289,6 +290,7 @@ export interface LogsQuery {
   status?: '' | 'success' | 'failed'
   days?: number               // 0 = 全部
   source?: string             // mcp | proxy | cli | ''
+  project?: string            // request_log.project_id（MCP 项目归属）
   limit?: number              // 1-1000，默认 200
   offset?: number             // ≥0，默认 0
 }
@@ -334,6 +336,12 @@ export interface Settings {
   proxy_host: string
   proxy_port: number
   proxy_token: string
+  auto_backup_enabled: boolean
+  auto_backup_interval_days: number
+  auto_backup_keep: number
+  update_check_enabled: boolean   // 是否自动检查更新
+  update_check_interval_hours: number  // 自动检查间隔（小时，0=关闭）
+  update_check_interval_unit: 'hour' | 'day' | 'week' | 'month'  // 面板展示单位
   theme_mode: 'system' | 'light' | 'dark'   // 界面颜色模式（WebView 开屏背景据此调整）
   [key: string]: unknown      // 后端新增字段时的逃生门
 }
@@ -358,6 +366,7 @@ export interface McpStatus {
   urls: Record<string, string>   // local/ip/hostname/hostname_local（stdio 时为空）
   network: boolean               // 非 stdio 即 true
   auto_start: boolean
+  auto_restarts: number          // 会话内看门狗自动重启次数
   token: string                  // 脱敏值（abcd****wxyz），完整值只在 /api/settings
   token_set: boolean
 }
@@ -372,6 +381,7 @@ export interface ProxyStatus {
   url: string
   urls: Record<string, string>
   auto_start: boolean
+  auto_restarts: number          // 会话内看门狗自动重启次数
   token: string                  // 脱敏值（abcd****wxyz），完整值只在 /api/settings
   token_set: boolean
 }
@@ -426,10 +436,15 @@ export const getAnomalies = () =>
 export const getUsageAggregate = () =>
   request<{ ok: true; aggregate: Aggregate }>('/api/usage/aggregate')
 
-/** GET /api/usage/trend?days=&source=（days 1-90） */
-export const getUsageTrend = (days = 7, source = '') =>
+/** GET /api/usage/trend?days=&source=&project=（days 1-90） */
+export const getUsageTrend = (days = 7, source = '', project = '') =>
   request<{ ok: true; trend: UsageTrend }>(
-    `/api/usage/trend?days=${encodeURIComponent(days)}&source=${encodeURIComponent(source)}`)
+    `/api/usage/trend?days=${encodeURIComponent(days)}&source=${encodeURIComponent(source)}`
+      + `&project=${encodeURIComponent(project)}`)
+
+/** GET /api/projects —— 请求日志中出现过的项目 ID（面板筛选下拉） */
+export const getProjects = () =>
+  request<{ ok: true; projects: string[] }>('/api/projects')
 
 /** POST /api/keys/usage-sync —— 同步所有 active key 官方用量（较慢） */
 export const syncUsageAll = () =>
@@ -453,6 +468,7 @@ function logsQueryString(params: LogsQuery): string {
   if (params.status) p.set('status', params.status)
   if (params.days) p.set('days', String(params.days))
   if (params.source) p.set('source', params.source)
+  if (params.project) p.set('project', params.project)
   if (params.limit !== undefined) p.set('limit', String(params.limit))
   if (params.offset !== undefined) p.set('offset', String(params.offset))
   const s = p.toString()
@@ -466,6 +482,10 @@ export const getLogs = (params: LogsQuery = {}) =>
 /** GET /api/logs/export.csv —— 按筛选导出 CSV（BlobResult，调用方 saveBlob） */
 export const exportLogsCsv = (params: LogsQuery = {}) =>
   requestBlob(`/api/logs/export.csv${logsQueryString(params)}`)
+
+/** GET /api/audit/export.zip —— 全量请求审计包（zip：请求日志 + 池状态 + 汇总） */
+export const exportAuditZip = () =>
+  requestBlob('/api/audit/export.zip')
 
 // ── 设置 ───────────────────────────────────────────────────
 /** GET /api/settings */
@@ -517,3 +537,60 @@ export const restoreData = (file: File | Blob) =>
     headers: { 'Content-Type': 'application/octet-stream' },
     body: file,
   })
+
+// ── GitHub 更新检查 ──────────────────────────────────────────
+/** GET /api/update/check —— updater.check_update() 结果 */
+export interface UpdateInfo {
+  ok: boolean                  // 请求成功（False = 网络失败或已禁用）
+  disabled: boolean            // update_repo 未配置 = 关闭更新检查
+  current_version: string
+  version_type: 'stable' | 'beta'   // 当前版本类型（pre-release 后缀 → beta）
+  latest_version: string
+  update_available: boolean
+  can_auto_update: boolean     // 打包版（sys.frozen）支持下载安装
+  release_url: string
+  published_at: string         // ISO8601，可能为空
+  body: string                 // release notes（可能为空）
+  checked_at: number           // unix 秒
+  error: string
+  asset_name: string           // 打包产物文件名（Tavily-*-win64.zip），空=无产物
+  asset_url: string
+  asset_size: number           // 字节
+}
+
+/** GET /api/update/check?force=1（force 传 true 强制刷新网络，跳过缓存） */
+export const checkUpdate = (force = false) =>
+  request<{ ok: true; update: UpdateInfo }>(
+    `/api/update/check${force ? '?force=1' : ''}`)
+
+// ── 自动更新（下载 / 状态 / 应用，仅打包版）──────────────────
+/** GET /api/update/status —— updater.get_download_status() */
+export interface UpdateDownloadStatus {
+  state: 'idle' | 'starting' | 'downloading' | 'done' | 'error'
+  received: number             // 已下载字节
+  total: number                // 总字节（未知为 0）
+  error: string
+  version: string              // 正在下载/已就绪的版本
+  path: string                 // 解压后新版目录（done 时）
+}
+
+/** POST /api/update/download —— 后台下载最新打包 zip */
+export const startUpdateDownload = () =>
+  request<{ ok: boolean; error?: string }>('/api/update/download', jsonInit('POST'))
+
+/** GET /api/update/status —— 轮询下载进度 */
+export const getUpdateStatus = () =>
+  request<{ ok: true; status: UpdateDownloadStatus }>('/api/update/status')
+
+/** POST /api/update/apply —— 应用更新并重启（调用后当前进程将结束） */
+export const applyUpdate = () =>
+  request<{ ok: boolean; error?: string }>('/api/update/apply', jsonInit('POST'))
+
+/** GET /api/update/announcement —— 本次更新公告（一次性读取，读取后后端清除） */
+export interface UpdateAnnouncement {
+  version: string
+  body: string
+  applied_at: number
+}
+export const getUpdateAnnouncement = () =>
+  request<{ ok: true; announcement: UpdateAnnouncement | null }>('/api/update/announcement')

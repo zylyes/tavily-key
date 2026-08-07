@@ -15,6 +15,7 @@ import { useToast } from '@/composables/useToast'
 import {
   exportLogsCsv,
   getLogs,
+  getProjects,
   saveBlob,
   type LogsPage,
   type LogsQuery,
@@ -30,6 +31,7 @@ const toast = useToast()
 const status = ref<'' | 'success' | 'failed'>('')
 const endpoint = ref('')
 const source = ref('')
+const project = ref('')
 const days = ref(7)
 const keyword = ref('')          // 输入框即时值
 const keywordApplied = ref('')   // 防抖/回车后实际生效值
@@ -46,6 +48,16 @@ const sourceOptions = [
   { label: '搜索代理', value: 'proxy' },
   { label: 'CLI', value: 'cli' },
 ]
+/* 项目下拉：来自请求日志中出现过的 mcp_project_id（/api/projects） */
+const projectOptions = ref<Array<{ label: string; value: string }>>([{ label: '全部项目', value: '' }])
+const { data: projectsResp } = usePolling(getProjects, { interval: 30000 })
+watch(projectsResp, (v) => {
+  const list = v?.projects ?? []
+  projectOptions.value = [
+    { label: '全部项目', value: '' },
+    ...list.map((p) => ({ label: p, value: p })),
+  ]
+})
 const daysOptions = [
   { label: '近 1 天', value: 1 },
   { label: '近 3 天', value: 3 },
@@ -115,6 +127,7 @@ function currentQuery(): LogsQuery {
     key: keywordApplied.value || undefined,
     status: status.value,
     source: source.value || undefined,
+    project: project.value || undefined,
     days: days.value,
     limit: PAGE_SIZE,
     offset: offset.value,
@@ -187,6 +200,7 @@ async function doExport(): Promise<void> {
       key: keywordApplied.value || undefined,
       status: status.value,
       source: source.value || undefined,
+      project: project.value || undefined,
       days: days.value,
     })
     saveBlob(blob, filename)
@@ -228,7 +242,7 @@ async function copyRequestId(): Promise<void> {
 
 <template>
   <div class="view">
-    <PageHeader title="请求日志" desc="按状态 / 接口 / 来源 / 时间筛选，支持分页与 CSV 导出">
+    <PageHeader title="请求日志" desc="按状态 / 接口 / 来源 / 项目 / 时间筛选，支持分页与 CSV 导出">
       <template #actions>
         <GButton size="sm" :busy="refreshing" @click="manualRefresh">
           <GIcon name="refresh" :size="14" /> 刷新
@@ -242,6 +256,7 @@ async function copyRequestId(): Promise<void> {
         <GSelect v-model="status" :options="statusOptions" size="sm" @change="applyFilters" />
         <GSelect v-model="endpoint" :options="endpointOptions" size="sm" @change="applyFilters" />
         <GSelect v-model="source" :options="sourceOptions" size="sm" @change="applyFilters" />
+        <GSelect v-model="project" :options="projectOptions" size="sm" @change="applyFilters" />
         <GSelect v-model="days" :options="daysOptions" size="sm" @change="applyFilters" />
         <GInput
           v-model="keyword"

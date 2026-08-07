@@ -8,7 +8,8 @@ import GSelect from '@/components/GSelect.vue'
 import Skeleton from '@/components/Skeleton.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import { usePolling } from '@/composables/usePolling'
-import { getStats, getUsageTrend } from '@/api/client'
+import { useToast } from '@/composables/useToast'
+import { getProjects, getStats, getUsageTrend, saveBlob } from '@/api/client'
 import { fmtNum } from '@/utils/format'
 import StatCard from './parts/stats/StatCard.vue'
 import SegmentedControl from './parts/stats/SegmentedControl.vue'
@@ -16,14 +17,17 @@ import TrendChart from './parts/stats/TrendChart.vue'
 import EndpointChart from './parts/stats/EndpointChart.vue'
 import CreditsChart from './parts/stats/CreditsChart.vue'
 
-/* ═══ 筛选状态：天数与来源对本页所有图表联动 ═══ */
+/* ═══ 筛选状态：天数/来源/项目对本页所有图表联动 ═══ */
+const toast = useToast()
 const days = ref(7)
 const source = ref('')
+const project = ref('')
 
 const dayOptions = [
   { label: '近 7 天', value: 7 },
   { label: '近 14 天', value: 14 },
   { label: '近 30 天', value: 30 },
+  { label: '近 90 天', value: 90 },
 ]
 const sourceOptions = [
   { label: '全部来源', value: '' },
@@ -31,6 +35,19 @@ const sourceOptions = [
   { label: '搜索代理', value: 'proxy' },
   { label: 'CLI', value: 'cli' },
 ]
+/* 项目下拉：来自请求日志中出现过的 mcp_project_id（/api/projects） */
+const projectOptions = ref<Array<{ label: string; value: string }>>([{ label: '全部项目', value: '' }])
+const {
+  data: projectsResp,
+  refresh: refreshProjects,
+} = usePolling(getProjects, { interval: 30000 })
+watch(projectsResp, (v) => {
+  const list = v?.projects ?? []
+  projectOptions.value = [
+    { label: '全部项目', value: '' },
+    ...list.map((p) => ({ label: p, value: p })),
+  ]
+})
 
 /* ═══ 数据：stats（指标卡）+ trend（全部图表），12s 静默轮询 ═══ */
 const {
@@ -47,10 +64,10 @@ const {
   refreshing: trendRefreshing,
   error: trendError,
   refresh: refreshTrend,
-} = usePolling(() => getUsageTrend(days.value, source.value), { interval: 12000 })
+} = usePolling(() => getUsageTrend(days.value, source.value, project.value), { interval: 12000 })
 
-// 筛选变化 → 立即重取趋势（闭包读取最新 days/source）
-watch([days, source], () => {
+// 筛选变化 → 立即重取趋势（闭包读取最新 days/source/project）
+watch([days, source, project], () => {
   void refreshTrend()
 })
 
@@ -82,7 +99,34 @@ async function refreshAll(): Promise<void> {
   await Promise.all([
     refreshStats({ force: true, minBusyMs: 300 }),
     refreshTrend({ force: true, minBusyMs: 300 }),
+    refreshProjects({ force: true, minBusyMs: 300 }),
   ])
+}
+
+/** 当前筛选下的趋势数据导出 CSV（date/requests/success/failed/credits/endpoints） */
+function exportTrendCsv(): void {
+  const ps = points.value
+  if (!ps || !ps.length) {
+    toast.error('暂无趋势数据可导出')
+    return
+  }
+  const esc = (s: string): string => `"${s.replace(/"/g, '""')}"`
+  const rows = [
+    ['date', 'requests', 'success', 'failed', 'credits', 'endpoints'],
+    ...ps.map((p) => [
+      p.date,
+      String(p.requests),
+      String(p.success),
+      String(p.failed),
+      String(p.credits),
+      Object.entries(p.endpoints).map(([k, v]) => `${k}:${v}`).join(' | '),
+    ]),
+  ]
+  const csv = rows.map((r) => r.map(esc).join(',')).join('\n')
+  const src = source.value ? `-${source.value}` : ''
+  const prj = project.value ? `-${project.value}` : ''
+  saveBlob(new Blob([csv], { type: 'text/csv;charset=utf-8' }), `usage-trend-${days.value}d${src}${prj}.csv`)
+  toast.success('趋势数据已导出 CSV')
 }
 
 /** 首载双失败才显示错误块（已有数据时静默等待下一轮） */
@@ -96,8 +140,12 @@ const loadError = computed(() => {
   <div class="view">
     <PageHeader title="用量统计" desc="Key 池容量、请求趋势与积分消耗全景">
       <template #actions>
+        <GSelect v-model="project" :options="projectOptions" size="sm" />
         <GSelect v-model="source" :options="sourceOptions" size="sm" />
         <SegmentedControl v-model="days" :options="dayOptions" />
+        <GButton size="sm" :disabled="!points?.length" @click="exportTrendCsv">
+          <GIcon name="download" :size="13" />导出
+        </GButton>
         <GButton size="sm" :busy="refreshing" @click="refreshAll">
           <GIcon name="refresh" :size="13" />刷新
         </GButton>
