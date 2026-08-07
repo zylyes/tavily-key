@@ -5,6 +5,17 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.9.5] - 2026-08-07
+
+### Fixed
+
+- **Extract 默认超时统一 30s**：`tavily_extract` 未显式传 `timeout` 时不再按
+  `extract_depth` 区分（basic 10s / advanced 30s），统一对齐官方 SDK 默认
+  `timeout=30`。此前 basic 按 10s 常被慢页面触发 `Request timed out after
+  10.0 seconds.` 超时失败；显式传参 / `mcp_default_parameters` 注入仍优先。
+- **日志页筛选条不再换行**：「共 X 条」计数与筛选控件保持同一行（`filter-bar`
+  改 `nowrap`，下拉/搜索框适当缩窄），最小窗口宽度（1024px）下也不溢出。
+
 ## [0.9.4] - 2026-08-07
 
 ### Changed
@@ -408,6 +419,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.9.5]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.5
 [0.9.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.4
 [0.9.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.3
 [0.9.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.2

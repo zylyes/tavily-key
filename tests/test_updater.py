@@ -168,7 +168,7 @@ def test_handle_auto_update_notifies(monkeypatch):
     tray = _FakeTray()
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.9.5", body="新增功能A；修复B"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.9.6", body="新增功能A；修复B"))
     monkeypatch.setattr("notify.send_webhook",
                         lambda url, payload: sent.append((url, payload)) or True)
     calls: list[tuple] = []
@@ -190,7 +190,7 @@ def test_handle_auto_update_dedupes_by_version(monkeypatch):
     """同一版本只通知一次（去重），第二次调用不再通知。"""
     tray = _FakeTray()
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.9.5"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.9.6"))
 
     updater.handle_auto_update(tray=tray, webhook="")
     updater.handle_auto_update(tray=tray, webhook="")
@@ -205,7 +205,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     """webhook 通知含更新公告摘要与版本信息。"""
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.9.5"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.9.6"))
 
     def fake_webhook(url, payload):
         sent.append((url, payload))
@@ -216,7 +216,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     assert len(sent) == 1
     assert sent[0][0] == "https://example.com/hook"
     assert sent[0][1]["event"] == "update_available"
-    assert sent[0][1]["latest_version"] == "0.9.5"
+    assert sent[0][1]["latest_version"] == "0.9.6"
 
 
 # ── 自动更新：资产解析 / 下载 / 应用 ─────────────────────────

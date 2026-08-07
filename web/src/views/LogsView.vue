@@ -399,15 +399,20 @@ async function copyRequestId(): Promise<void> {
 <style scoped>
 .filter-bar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 8px;
 }
+.filter-bar :deep(.g-select) {
+  min-width: 84px;
+}
 .kw-input {
-  width: 180px;
+  width: 100px;
+  min-width: 100px;
 }
 .log-count {
   margin-left: auto;
+  flex: none;
   font-size: 12px;
   white-space: nowrap;
 }

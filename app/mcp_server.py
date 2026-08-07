@@ -470,8 +470,7 @@ async def tavily_extract(
         include_usage: Include credit usage (default True).
         query: User intent for reranking content chunks.
         chunks_per_source: Max chunks per source, 1-5. Requires query.
-        timeout: Max seconds per URL, 1-60. Default follows extract_depth
-            (basic 10s / advanced 30s), matching the official API.
+        timeout: Max seconds per URL, 1-60. Default 30s, matching the official API.
     """
     kwargs: dict[str, Any] = {
         "urls": urls,
@@ -487,10 +486,11 @@ async def tavily_extract(
     if timeout:
         kwargs["timeout"] = timeout
     kwargs = _tool_kwargs(tavily_extract, kwargs)
-    # 官方默认超时按 extract_depth：basic 10s / advanced 30s
-    # （用户显式传参 / mcp_default_parameters 注入优先）
+    # 官方 extract 默认超时 30s（SDK timeout=30，不分 extract_depth）。
+    # basic 若按 10s 常被慢页面触发「Request timed out after 10.0 seconds」
+    # 超时失败，故统一按官方默认 30s（用户显式传参 / mcp_default_parameters 注入优先）
     if "timeout" not in kwargs:
-        kwargs["timeout"] = 10.0 if (extract_depth or "").strip().lower() != "advanced" else 30.0
+        kwargs["timeout"] = 30.0
 
     def _do(client: TavilyClient):
         return client.extract(**kwargs)

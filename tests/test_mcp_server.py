@@ -204,8 +204,8 @@ def test_tavily_search_safe_search(monkeypatch):
     assert captured.get("safe_search") is False
 
 
-def test_extract_timeout_default_by_depth(monkeypatch):
-    """Extract 默认超时按 extract_depth：basic 10s / advanced 30s（显式传参优先）。"""
+def test_extract_timeout_default(monkeypatch):
+    """Extract 默认超时统一 30s（对齐官方 SDK），显式传参优先。"""
     captured = {}
 
     class _C:
@@ -216,7 +216,7 @@ def test_extract_timeout_default_by_depth(monkeypatch):
     monkeypatch.setattr(mcp_server, "_get_client", lambda *a, **k: (_C(), "tvly-***"))
     monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
     asyncio.run(mcp_server.tavily_extract(["https://a.com"], extract_depth="basic"))
-    assert captured.get("timeout") == 10.0
+    assert captured.get("timeout") == 30.0
     asyncio.run(mcp_server.tavily_extract(["https://a.com"], extract_depth="advanced"))
     assert captured.get("timeout") == 30.0
     asyncio.run(mcp_server.tavily_extract(["https://a.com"], extract_depth="advanced", timeout=45))
