@@ -483,6 +483,17 @@ export const getLogs = (params: LogsQuery = {}) =>
 export const exportLogsCsv = (params: LogsQuery = {}) =>
   requestBlob(`/api/logs/export.csv${logsQueryString(params)}`)
 
+/** POST /api/logs/clear —— 按筛选清理日志（空条件=清空全部），返回删除条数 */
+export const clearLogs = (params: LogsQuery = {}) =>
+  request<{ ok: true; deleted: number }>('/api/logs/clear', jsonInit('POST', {
+    endpoint: params.endpoint ?? '',
+    key: params.key ?? '',
+    status: params.status ?? '',
+    source: params.source ?? '',
+    project: params.project ?? '',
+    days: params.days ?? 0,
+  }))
+
 /** GET /api/audit/export.zip —— 全量请求审计包（zip：请求日志 + 池状态 + 汇总） */
 export const exportAuditZip = () =>
   requestBlob('/api/audit/export.zip')

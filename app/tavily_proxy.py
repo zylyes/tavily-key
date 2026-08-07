@@ -19,18 +19,17 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import anyio
+import mcp_server
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-import mcp_server
 from key_pool import KeyPool, _classify_error
 from logging_setup import get_logger
-from mcp_server import (_run_with_retry, _norm_flag, _client_for, _get_client,
-                        _record, _usage_credits)
+from mcp_server import _client_for, _get_client, _norm_flag, _record, _run_with_retry, _usage_credits
 from settings import get_settings
 
 _log = get_logger("tavily_proxy")
@@ -170,7 +169,14 @@ def _call(endpoint: str, fn: Callable,
         if "No active API keys" in msg:
             return _error(503, msg)
         status = {"auth": 401, "quota": 432, "rate": 429, "bad_request": 400}.get(_classify_error(msg), 500)
-        return _error(status, msg)
+        resp = _error(status, msg)
+        if status == 429:
+            # 透传 Retry-After：让 REST 客户端（Cherry Studio 等）正确退避，
+            # 避免限流时反复撞墙。值来自 _run_with_retry 附着在错误 JSON 的
+            # retry_after 字段（源自官方 429 头），缺省 1 秒兜底。
+            ra = data.get("retry_after")
+            resp.headers["Retry-After"] = str(ra if ra is not None else 1)
+        return resp
     return JSONResponse(data)
 
 

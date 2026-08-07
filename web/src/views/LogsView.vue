@@ -13,6 +13,7 @@ import EmptyState from '@/components/EmptyState.vue'
 import { usePolling } from '@/composables/usePolling'
 import { useToast } from '@/composables/useToast'
 import {
+  clearLogs,
   exportLogsCsv,
   getLogs,
   getProjects,
@@ -212,6 +213,47 @@ async function doExport(): Promise<void> {
   }
 }
 
+/* ── 清理日志（按当前筛选；无筛选 = 清空全部） ─────────────── */
+const clearOpen = ref(false)
+const clearing = ref(false)
+
+const clearScopeLabel = computed(() => {
+  const parts: string[] = []
+  if (status.value) parts.push(status.value === 'success' ? '成功' : '失败')
+  if (endpoint.value) parts.push(`接口 ${endpoint.value}`)
+  if (source.value) parts.push(`来源 ${srcLabel(source.value)}`)
+  if (project.value) parts.push(`项目 ${project.value}`)
+  if (days.value) parts.push(`近 ${days.value} 天`)
+  if (keywordApplied.value) parts.push(`Key ${keywordApplied.value}`)
+  return parts.length ? parts.join('、') : '全部日志'
+})
+
+async function doClear(): Promise<void> {
+  if (clearing.value) return
+  clearing.value = true
+  try {
+    const { deleted } = await clearLogs({
+      endpoint: endpoint.value || undefined,
+      key: keywordApplied.value || undefined,
+      status: status.value,
+      source: source.value || undefined,
+      project: project.value || undefined,
+      days: days.value,
+    })
+    toast.success(`已清理 ${deleted} 条日志`)
+    clearOpen.value = false
+    // 清理后强制刷新（清空总数与高亮状态）
+    knownIds.clear()
+    freshIds.value = new Set()
+    forceFetch = true
+    void refresh()
+  } catch (e) {
+    toast.error('清理失败：' + (e instanceof Error ? e.message : String(e)))
+  } finally {
+    clearing.value = false
+  }
+}
+
 /* ── 详情弹窗 ─────────────────────────────────────────────── */
 const detailLog = ref<RequestLog | null>(null)
 const detailOpen = ref(false)
@@ -270,11 +312,26 @@ async function copyRequestId(): Promise<void> {
         <GButton size="sm" :busy="exporting" @click="doExport">
           <GIcon name="download" :size="14" /> 导出 CSV
         </GButton>
+        <GButton size="sm" variant="danger" @click="clearOpen = true">
+          <GIcon name="trash" :size="14" /> 清理
+        </GButton>
         <span class="u-muted log-count">
           <template v-if="total">共 {{ fmtNum(total) }} 条</template>
         </span>
       </div>
     </GlassCard>
+
+    <!-- 清理日志确认弹窗 -->
+    <GModal v-model:open="clearOpen" title="清理请求日志" width="480px">
+      <p class="u-dim clear-warn">
+        将按当前筛选条件删除请求日志（范围：<b class="u-text">{{ clearScopeLabel }}</b>），
+        删除后不可恢复。用量趋势统计会同步更新。
+      </p>
+      <template #footer>
+        <GButton size="sm" @click="clearOpen = false">取消</GButton>
+        <GButton size="sm" variant="danger" :busy="clearing" @click="doClear">确认清理</GButton>
+      </template>
+    </GModal>
 
     <!-- 日志表格 -->
     <GlassCard pad="none">
@@ -540,5 +597,14 @@ async function copyRequestId(): Promise<void> {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 清理确认弹窗：危险操作说明 */
+.clear-warn {
+  line-height: 1.8;
+}
+.clear-warn b.u-text {
+  color: var(--danger);
+  font-weight: 600;
 }
 </style>

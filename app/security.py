@@ -95,6 +95,8 @@ class _FernetCipher:
         return runtime_dir() / ".tavily-secret.key"
 
     def _load_or_create_key(self) -> bytes:
+        from cryptography.fernet import Fernet  # 惰性导入（与 __init__ 一致）
+
         p = self._key_path()
         if p.exists():
             return p.read_bytes()

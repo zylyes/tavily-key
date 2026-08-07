@@ -32,6 +32,7 @@ import {
   type UpdateDownloadStatus,
   type UpdateInfo,
 } from '@/api/client'
+import MdView from '@/components/MdView.vue'
 import SettingRow from './parts/settings/SettingRow.vue'
 import { saveBackupAs } from '@/utils/webview'
 
@@ -446,6 +447,7 @@ async function saveUpdateCfg(): Promise<void> {
 const updateFlow = ref<'idle' | 'confirming' | 'downloading' | 'ready' | 'applying'>('idle')
 const updateDl = ref<UpdateDownloadStatus | null>(null)
 const updateModalOpen = ref(false)
+const noticeOpen = ref(false)
 let updatePollTimer: number | undefined
 
 /** 点击「立即更新」：弹出确认框 */
@@ -767,11 +769,12 @@ function updatePct(): number {
           </div>
         </div>
 
-        <!-- 发现新版本：更新公告（release notes） -->
+        <!-- 发现新版本：更新公告（点击弹窗查看，支持 Markdown） -->
         <template v-if="update?.update_available">
           <SettingRow label="更新公告" :hint="`${update.current_version} → ${update.latest_version}`">
-            <pre v-if="update.body" class="update-summary">{{ update.body }}</pre>
-            <span v-else class="u-dim">无更新说明，可前往 GitHub 查看发布页</span>
+            <GButton size="sm" :disabled="!update.body" @click="noticeOpen = true">
+              <GIcon name="eye" :size="13" />查看更新公告
+            </GButton>
           </SettingRow>
         </template>
 
@@ -801,18 +804,61 @@ function updatePct(): number {
       </GlassCard>
     </div>
 
+    <!-- 更新公告弹窗（Markdown 渲染） -->
+    <GModal v-model:open="noticeOpen" title="更新公告" width="600px">
+      <div class="announce-dialog">
+        <div class="announce-versions">
+          <span class="u-mono announce-ver">{{ update?.current_version ?? '—' }}</span>
+          <span class="announce-arrow">→</span>
+          <span class="u-mono announce-ver announce-ver-new">{{ update?.latest_version ?? '' }}</span>
+          <span class="announce-tag" :class="versionType === 'beta' ? 'is-beta' : ''">
+            {{ versionTypeLabel }}
+          </span>
+        </div>
+        <div class="announce-body">
+          <MdView v-if="update?.body" :text="update.body" />
+          <p v-else class="u-dim">无更新说明，可前往 GitHub 查看发布页</p>
+        </div>
+      </div>
+      <template #footer>
+        <GButton size="sm" @click="openRelease(update?.release_url || '')">
+          <GIcon name="external" :size="13" />前往 GitHub
+        </GButton>
+        <GButton
+          v-if="update?.can_auto_update"
+          size="sm"
+          variant="primary"
+          @click="noticeOpen = false; askUpdate()"
+        >
+          <GIcon name="download" :size="13" />立即更新
+        </GButton>
+        <GButton v-else size="sm" variant="primary" @click="noticeOpen = false">知道了</GButton>
+      </template>
+    </GModal>
+
     <!-- 立即更新确认 -->
-    <GModal v-model:open="updateModalOpen" title="立即更新" width="480px">
+    <GModal v-model:open="updateModalOpen" title="立即更新" width="560px">
       <div class="update-confirm">
-        <p>
-          发现新版本 <b class="u-mono">{{ update?.latest_version }}</b>（当前
-          {{ update?.current_version }}），将执行：
-        </p>
+        <div class="announce-versions">
+          <span class="u-mono announce-ver">{{ update?.current_version ?? '—' }}</span>
+          <span class="announce-arrow">→</span>
+          <span class="u-mono announce-ver announce-ver-new">{{ update?.latest_version ?? '' }}</span>
+          <span class="announce-tag" :class="versionType === 'beta' ? 'is-beta' : ''">
+            {{ versionTypeLabel }}
+          </span>
+        </div>
+        <p class="update-confirm-title">即将执行：</p>
         <ul>
           <li>从 GitHub 下载新版打包（{{ fmtBytes(update?.asset_size ?? 0) }}）并校验</li>
           <li>自动备份当前版本并替换程序文件</li>
           <li>自动重启应用</li>
         </ul>
+        <template v-if="update?.body">
+          <p class="update-confirm-label">更新说明</p>
+          <div class="announce-body announce-body-sm">
+            <MdView :text="update.body" />
+          </div>
+        </template>
         <p class="u-dim">config.json、Key 池、加密密钥等 data/ 运行数据不会丢失；MCP / 搜索代理服务将随重启恢复。</p>
       </div>
       <template #footer>
@@ -965,21 +1011,6 @@ function updatePct(): number {
   font-size: 11px;
   text-align: right;
 }
-.update-summary {
-  max-height: 140px;
-  overflow: auto;
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-2);
-  background: var(--bg-2);
-  border: 1px solid var(--glass-border);
-  border-radius: 8px;
-  padding: 8px 10px;
-}
 .update-confirm p { font-size: 12.5px; margin: 4px 0; }
 .update-confirm ul {
   margin: 8px 0;
@@ -987,5 +1018,55 @@ function updatePct(): number {
   font-size: 12px;
   line-height: 1.9;
   color: var(--text-2);
+}
+</style>
+
+<!-- 更新公告弹窗（GModal Teleport 到 body，需全局） -->
+<style>
+.announce-dialog { display: flex; flex-direction: column; gap: 12px; }
+.announce-versions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.announce-ver { color: var(--text); }
+.announce-ver-new { color: var(--accent-text); font-weight: 650; }
+.announce-arrow { color: var(--text-3); }
+.announce-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  border-radius: var(--r-pill);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-softer);
+}
+.announce-tag.is-beta {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: transparent;
+}
+.announce-body {
+  max-height: 46vh;
+  overflow: auto;
+  background:
+    linear-gradient(180deg, var(--glass-hi) 0%, transparent 120px),
+    var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--r-ctrl);
+  padding: 12px 14px;
+}
+.announce-body-sm { max-height: 24vh; }
+.update-confirm-title { font-size: 12.5px; margin: 2px 0 0; }
+.update-confirm-label {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  letter-spacing: .04em;
+  color: var(--text-3);
 }
 </style>

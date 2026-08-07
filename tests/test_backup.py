@@ -2,9 +2,8 @@
 import re
 import zipfile
 
-import pytest
-
 import backup
+import pytest
 
 
 @pytest.fixture

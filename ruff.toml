@@ -1,0 +1,24 @@
+# Ruff 配置 —— lint + format（python -m ruff check / ruff format）
+# 用法：ruff check app/ tests/      # 静态检查
+#       ruff format app/ tests/     # 格式化（黑线风格，120 列）
+#       ruff check --fix app/ tests/  # 自动修复可修复项
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = [
+  # 行长由 ruff format 处理，不在 lint 阶段报
+  "E501",
+  # FastAPI 端点默认参数 Body(...) / Query(...) 是惯用法
+  "B008",
+  # SIM 中「先写条件再写返回」等风格化建议，改动面大收益低
+  "SIM102", "SIM108", "SIM114",
+  # SIM105 建议改 contextlib.suppress：项目里大量 except 带容错注释，
+  # 改成 suppress 会丢失注释上下文，不采用
+  "SIM105",
+]
+
+[lint.per-file-ignores]
+# 测试文件允许宽松命名与断言风格
+"tests/**" = ["B", "SIM"]

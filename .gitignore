@@ -46,3 +46,8 @@ docs/memory/
 web/node_modules/
 web/dist/
 Tavily.lnk
+
+.coverage
+.coverage.*
+.htmlcov/
+

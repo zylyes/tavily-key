@@ -144,21 +144,37 @@ flowchart TD
     F --> G[返回 raw_key 与 masked 元组]
 ```
 
-### 最少使用优先
+### 最少使用优先（按剩余额度）
 
-`next_key_least_used()` 按 `request_count ASC, last_used_at ASC` 排序，总是返回累计请求次数最少的 Key，适合更严格的"按量分摊"场景：
+`next_key_least_used()` 按**剩余额度**（官方用量上限 − 已用，`credits_limit` 缺失时回退套餐 `plan_limit`）降序排序，优先使用剩余额度最多的 Key；剩余额度相同的 Key 组内**随机打散**（起点随机 + 顺序扫描），防止固定顺序导致请求集中命中同一批 Key、触发单 Key 限流。适合免费池「避免个别 Key 提前耗尽 432」的场景（v0.10.0 起，此前按今日请求数最少）：
 
 ```python
-def next_key_least_used(self) -> tuple[str, str] | None:
-    """Return key with fewest requests today."""
+def next_key_least_used(self, endpoint: str = "search", skip_limited: bool = False) -> tuple[str, str] | None:
+    """按剩余额度优先取 key（least-used 语义：用量最少的 key 优先）。"""
     conn = self._get_conn()
     rows = conn.execute(
-        "SELECT key, masked FROM api_keys WHERE is_active=1 AND is_exhausted=0 ORDER BY request_count ASC, last_used_at ASC"
+        """
+        SELECT k.key, k.masked, k.credits_used, k.credits_limit, k.plan_limit
+        FROM api_keys k
+        WHERE k.is_active = 1 AND k.is_exhausted = 0
+        ORDER BY
+            (COALESCE(NULLIF(k.credits_limit, 0), k.plan_limit) - k.credits_used) DESC,
+            k.last_used_at ASC
+        """
     ).fetchall()
     if not rows:
         return None
-    row = rows[0]
-    return (row["key"], row["masked"])
+    max_remaining = self._remaining_credits(rows[0])
+    start = random.randrange(
+        sum(1 for r in rows if self._remaining_credits(r) == max_remaining)
+    )
+    for off in range(len(rows)):
+        row = rows[(start + off) % len(rows)]
+        masked = row["masked"]
+        if not skip_limited or self._bucket(masked, endpoint).wait_time() <= 0:
+            self._consume_bucket(masked, endpoint)
+            return (self._decrypt_or_migrate(row["key"], masked), masked)
+    return None
 ```
 
 ## 并发控制

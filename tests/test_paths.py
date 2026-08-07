@@ -1,8 +1,6 @@
 """paths 模块单元测试：统一运行时目录与旧文件迁移。"""
 import json
 
-import pytest
-
 from paths import _migrate, base_dir, runtime_dir
 
 

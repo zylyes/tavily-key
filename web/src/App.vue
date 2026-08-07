@@ -8,6 +8,7 @@ import GToast from '@/components/GToast.vue'
 import LoginModal from '@/components/LoginModal.vue'
 import ResizeHandles from '@/components/ResizeHandles.vue'
 import { getUpdateAnnouncement, type UpdateAnnouncement } from '@/api/client'
+import MdView from '@/components/MdView.vue'
 import { initAuth } from '@/composables/useAuth'
 import { setupWebviewBridge } from '@/utils/webview'
 
@@ -77,7 +78,7 @@ onMounted(() => {
       <p class="announcement-ver">
         已更新到 <b class="u-mono">{{ announcement?.version || '新版本' }}</b>
       </p>
-      <pre v-if="announcement?.body" class="announcement-body">{{ announcement.body }}</pre>
+      <MdView v-if="announcement?.body" :text="announcement.body" class="announcement-body" />
       <p v-else class="u-dim">本次更新没有附带更新说明。</p>
     </div>
     <template #footer>
@@ -167,16 +168,13 @@ onMounted(() => {
 .announcement-body {
   max-height: 300px;
   overflow: auto;
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-2);
-  background: var(--bg-2);
+  background:
+    linear-gradient(180deg, var(--glass-hi) 0%, transparent 120px),
+    var(--glass-bg);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border: 1px solid var(--glass-border);
-  border-radius: 8px;
+  border-radius: var(--r-ctrl);
   padding: 10px 12px;
 }
 </style>

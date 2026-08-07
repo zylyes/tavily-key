@@ -5,22 +5,22 @@ API keys managed by KeyPool with configurable load-balancing strategy.
 """
 from __future__ import annotations
 
-import anyio
 import inspect
 import json
 import re
 import threading
 import time
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-from tavily import BadRequestError, TavilyClient
-
-from key_pool import KeyPool, _mask, _classify_error
+import anyio
+from key_pool import KeyPool, _classify_error
 from logging_setup import get_logger
+from mcp.server.fastmcp import FastMCP
 from paths import runtime_dir
 from settings import get_settings, get_settings_fresh
+from tavily import BadRequestError, TavilyClient
 
 _log = get_logger("mcp_server")
 
@@ -54,7 +54,12 @@ def _load_research_keys() -> None:
 
 
 def _save_research_key(request_id: str, masked: str) -> None:
-    """持久化 request_id→masked 映射（上限 1000 条防无界增长）。"""
+    """记录 request_id→masked 映射（内存立即生效，磁盘延迟合并写）。
+
+    上限 1000 条防无界增长。写盘不再每次同步全量落盘（research 提交高频时
+    浪费 IO），改为延迟合并写：调度一个后台线程，1s 窗口内的多次修改合并为
+    一次写盘；服务器重启最多丢失最近 ~1s 的映射（重新提交即可），可接受。
+    """
     global _research_keys
     with _research_keys_lock:
         _research_keys[request_id] = masked
@@ -65,12 +70,50 @@ def _save_research_key(request_id: str, masked: str) -> None:
                 "research_keys 映射超上限，裁剪最旧 %d 条（现 %d 条），"
                 "超龄 research 任务 status 将回退轮询", dropped, len(_research_keys)
             )
-        try:
-            _RESEARCH_KEYS_PATH.write_text(
-                json.dumps(_research_keys, ensure_ascii=False), encoding="utf-8"
-            )
-        except Exception:  # noqa: BLE001
-            pass
+    _schedule_research_key_save()
+
+
+# ── research_keys 延迟合并写盘 ────────────────────────────────
+# _save_research_key 内存更新后调度后台写盘；同一时刻最多一个写盘线程
+# （幂等调度），窗口内新修改会触发下一轮写盘，最终一致。
+_SAVE_DEBOUNCE = 1.0       # 秒：合并窗口（窗口内多次修改合并为一次落盘）
+_save_pending = False
+_save_lock = threading.Lock()
+
+
+def _flush_research_keys() -> None:
+    """立即把当前 research_keys 映射写盘（供测试 / 退出兜底调用）。"""
+    try:
+        with _research_keys_lock:
+            data = dict(_research_keys)
+        _RESEARCH_KEYS_PATH.write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _schedule_research_key_save() -> None:
+    """调度延迟合并写盘（幂等：已有挂起的写盘则不再重复调度）。"""
+    global _save_pending
+    with _save_lock:
+        if _save_pending:
+            return
+        _save_pending = True
+
+    def _worker():
+        global _save_pending
+        while True:
+            time.sleep(_SAVE_DEBOUNCE)
+            # 先释放 pending：写盘窗口内若有新修改会触发下一轮循环，保证最终一致
+            with _save_lock:
+                _save_pending = False
+            _flush_research_keys()
+            with _save_lock:
+                if not _save_pending:
+                    break
+
+    threading.Thread(target=_worker, daemon=True, name="research-keys-save").start()
 
 
 _load_research_keys()
@@ -304,6 +347,7 @@ def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | 
     if project_id is None:
         project_id = (get_settings_fresh().get("mcp_project_id") or "")
     last_err = ""
+    last_retry_after: float | None = None
     for attempt in range(3):
         try:
             client, masked = _get_client(endpoint)
@@ -333,6 +377,8 @@ def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | 
                 cat = _classify_error(err)
                 last_err = err
                 ra = _retry_after(e)
+                if ra is not None:
+                    last_retry_after = ra
                 if cat == "rate" and ra is not None:
                     if ra < _RETRY_AFTER_SAME_KEY_MAX and same_key_waits < 2:
                         # 短等待：同 key 重试，不消耗别的 key 限流预算
@@ -343,8 +389,15 @@ def _run_with_retry(endpoint: str, fn, on_success: Callable[[str, Any], None] | 
                         break  # 长等待：切换其他 key 重试
                 if cat in ("quota", "auth") and attempt < 2:
                     break  # 换 key 重试
-                return json.dumps({"error": err, "key_used": masked}, ensure_ascii=False)
-    return json.dumps({"error": last_err, "key_used": "?"}, ensure_ascii=False)
+                payload = {"error": err, "key_used": masked}
+                if last_retry_after is not None:
+                    # 供 REST 代理映射 Retry-After 头，让客户端正确退避
+                    payload["retry_after"] = round(last_retry_after, 1)
+                return json.dumps(payload, ensure_ascii=False)
+    payload = {"error": last_err, "key_used": "?"}
+    if last_retry_after is not None:
+        payload["retry_after"] = round(last_retry_after, 1)
+    return json.dumps(payload, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1321,8 +1374,8 @@ def main():
     - mcp_transport=streamable-http : Streamable HTTP 网络服务
     - mcp_token 非空时，网络模式要求请求携带 `Authorization: Bearer <token>`
     """
-    from settings import get_settings
     from mcp.server.transport_security import TransportSecuritySettings
+    from settings import get_settings
 
     cfg = get_settings()
     transport = (cfg.get("mcp_transport") or "sse").strip().lower()

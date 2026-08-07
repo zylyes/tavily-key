@@ -3,19 +3,18 @@ Tavily API Key Pool — SQLite-backed key rotation, usage tracking, load balanci
 """
 from __future__ import annotations
 
+import random
 import sqlite3
 import threading
 import time
-import json
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
-from security import encrypt_text, is_ciphertext, decrypt_text
-from logging_setup import get_logger
-from settings import get_settings, cache_ttls, get_settings_fresh
 from cache import TTLCache, emit_invalidate, signal_mtime
+from logging_setup import get_logger
 from paths import runtime_dir
+from security import decrypt_text, encrypt_text, is_ciphertext
+from settings import cache_ttls, get_settings, get_settings_fresh
 
 _log = get_logger("key_pool")
 
@@ -277,6 +276,29 @@ class KeyPool:
             )
         except sqlite3.Error:  # noqa: BLE001
             pass
+        # request_log 查询索引：日志分页（COUNT + ORDER BY created_at DESC）、
+        # 用量趋势（GROUP BY date）、异常检测（按 key/endpoint/source/project
+        # 聚合）此前全表扫描；90 天保留策略下数据量持续增长，补索引避免长期
+        # 运行后日志页/统计页变慢。
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_log_created ON request_log(created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_log_key_created "
+            "ON request_log(key_masked, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_log_endpoint_created "
+            "ON request_log(endpoint, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_log_source_created "
+            "ON request_log(source, created_at DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_request_log_project_created "
+            "ON request_log(project_id, created_at DESC)"
+        )
         conn.commit()
         conn.close()
 
@@ -515,27 +537,41 @@ class KeyPool:
                 return (self._decrypt_or_migrate(row["key"], masked), masked)
         return None
 
+    def _remaining_credits(self, row) -> int:
+        """单行剩余额度（effective_limit - credits_used，负值钳为 0）。"""
+        limit = row["credits_limit"] if (row["credits_limit"] or 0) > 0 else (row["plan_limit"] or 0)
+        return max(0, int(limit) - int(row["credits_used"]))
+
     def next_key_least_used(self, endpoint: str = "search", skip_limited: bool = False) -> tuple[str, str] | None:
-        """取今日请求最少的 active 且未耗尽 key（按 endpoint 独立限流桶）。
+        """按剩余额度优先取 key（least-used 语义：用量最少的 key 优先）。
+
+        免费池场景：优先使用剩余额度多的 key，避免个别 key 提前耗尽触发
+        432（官方额度耗尽）；剩余额度相同的 key 组内随机打散，防止固定顺序
+        导致请求集中命中同一批 key（对标 TavilyProxyManager）。
 
         skip_limited=True 时跳过该 endpoint 令牌不足的 key。
         """
         conn = self._get_conn()
-        day_start = time.time() - 86400
         rows = conn.execute(
             """
-            SELECT k.key, k.masked,
-                   (SELECT COUNT(*) FROM request_log r
-                    WHERE r.key_masked = k.masked AND r.created_at > ?) AS today_count
+            SELECT k.key, k.masked, k.credits_used, k.credits_limit, k.plan_limit
             FROM api_keys k
             WHERE k.is_active = 1 AND k.is_exhausted = 0
-            ORDER BY today_count ASC, k.last_used_at ASC
-            """,
-            (day_start,),
+            ORDER BY
+                (COALESCE(NULLIF(k.credits_limit, 0), k.plan_limit) - k.credits_used) DESC,
+                k.last_used_at ASC
+            """
         ).fetchall()
         if not rows:
             return None
-        for row in rows:
+        # 剩余额度最高的 key 集合内随机打散（起点随机 + 顺序扫描）：同权 key
+        # 不被固定顺序压制，请求更分散、更难集中触发单 key 限流。
+        max_remaining = self._remaining_credits(rows[0])
+        start = random.randrange(
+            sum(1 for r in rows if self._remaining_credits(r) == max_remaining)
+        )
+        for off in range(len(rows)):
+            row = rows[(start + off) % len(rows)]
             masked = row["masked"]
             if not skip_limited or self._bucket(masked, endpoint).wait_time() <= 0:
                 self._consume_bucket(masked, endpoint)
@@ -1114,6 +1150,55 @@ class KeyPool:
             params + [int(limit), int(offset)],
         ).fetchall()
         return [dict(r) for r in rows], int(total)
+
+    def clear_logs(self, endpoint: str = "", key_masked: str = "", status: str = "",
+                   source: str = "", project_id: str = "", before: float = 0.0,
+                   after: float = 0.0) -> int:
+        """按条件清理请求日志，返回删除条数（保留策略之外的手动清理入口）。
+
+        筛选条件与 query_logs 一致（空条件 = 清空全部）；before/after 为
+        unix 时间戳。清理后失效用量趋势缓存（面板统计页数据不再含被删记录）。
+        """
+        where: list[str] = []
+        params: list = []
+        if endpoint:
+            where.append("endpoint = ?")
+            params.append(endpoint)
+        if key_masked:
+            where.append("key_masked = ?")
+            params.append(key_masked)
+        if source:
+            where.append("source = ?")
+            params.append(source)
+        if project_id:
+            where.append("project_id = ?")
+            params.append(project_id)
+        if status == "success":
+            where.append("success = 1")
+        elif status == "failed":
+            where.append("success = 0")
+        if before:
+            where.append("created_at <= ?")
+            params.append(before)
+        if after:
+            where.append("created_at >= ?")
+            params.append(after)
+        cond = (" WHERE " + " AND ".join(where)) if where else ""
+        conn = self._get_conn()
+        cur = conn.execute(f"DELETE FROM request_log{cond}", params)
+        conn.commit()
+        self._invalidate_caches()
+        return cur.rowcount
+
+    def project_stats(self, days: int = 1) -> dict[str, int]:
+        """近 N 天 request_log 按项目统计请求数（供 CLI audit，避免拉全量日志）。"""
+        conn = self._get_conn()
+        rows = conn.execute(
+            "SELECT project_id, COUNT(*) AS cnt FROM request_log "
+            "WHERE project_id != '' AND created_at > ? GROUP BY project_id ORDER BY cnt DESC",
+            (time.time() - max(1, int(days)) * 86400,),
+        ).fetchall()
+        return {r["project_id"]: r["cnt"] for r in rows}
 
 
 def _mask(key: str) -> str:

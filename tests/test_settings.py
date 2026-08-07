@@ -1,6 +1,5 @@
 """settings.validate_patch 配置校验单元测试。"""
 import pytest
-
 from settings import mcp_urls, proxy_url, proxy_urls, validate_patch
 
 

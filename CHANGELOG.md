@@ -5,6 +5,60 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.0] - 2026-08-08
+
+### Added
+
+- **定时自动同步官方用量（月度额度自动恢复）**：新配置 `usage_auto_sync_hours`
+  （默认 6 小时，0=关闭）——后台按周期自动调用官方 `/usage` 同步，免费套餐额度
+  每月重置后，exhausted key 在官方用量归零时自动恢复，不再依赖手动「更新用量」/
+  托盘菜单同步；周期下限 300s 防过频（官方 `/usage` 按 key 独立限流 10 次/10 分钟）。
+- **请求日志手动清理**：面板日志页新增「清理」按钮（按当前筛选条件清理，无筛选=
+  清空全部，删除前确认弹窗）+ `POST /api/logs/clear` 端点；清理后日志列表与用量
+  趋势统计同步更新。CLI `audit` 按项目统计改用 SQL 聚合（不再拉取全量日志）。
+- **更新公告 Markdown 渲染**：面板「设置 → 关于与更新」的更新公告改为弹窗展示，
+  release notes 支持 Markdown 排版（新增零依赖 `MdView` 渲染组件，先转义 HTML
+  防 XSS）；应用启动的「更新完成公告」同步支持 Markdown。
+
+### Changed
+
+- **least-used 策略改为按剩余额度优先**：Key 池负载均衡在 `least-used` 策略下
+  优先使用剩余额度（官方用量上限 − 已用）最多的 key，避免免费池个别 key 提前
+  耗尽触发 432；剩余额度相同的 key 组内随机打散，防止请求集中命中同一批 key
+  （对标 TavilyProxyManager）。
+- **research_keys.json 写盘节流**：request_id→key 映射由「每次提交全量写盘」
+  改为延迟合并写（1s 窗口内多次修改合并为一次落盘），降低高频 research 提交的
+  磁盘 IO；新增 `_flush_research_keys` 供退出/测试兜底。
+- **代理 429 响应携带 Retry-After 头**：搜索代理对限流错误返回 HTTP 429 时附带
+  `Retry-After` 头（值来自官方 429 retry-after，缺省 1s），REST 客户端
+  （Cherry Studio 等）可正确退避、避免反复撞限流。
+
+### Fixed
+
+- **request_log 无索引导致查询退化**：为 `request_log` 补充 5 个查询索引
+  （`created_at` / `key_masked` / `endpoint` / `source` / `project_id`，
+  均含 `created_at`），日志分页、用量趋势聚合、异常检测在大数据量下不再
+  全表扫描。
+
+### 工程与测试
+
+- **GitHub Actions CI**（`.github/workflows/ci.yml`）：push / PR 自动跑后端
+  `pytest` + `ruff check`（Python 3.12）与前端 `npm ci && npm run build`
+  （含 `vue-tsc` typecheck），杜绝「本地能过、CI 不过」的回归。
+- **Ruff 集成**：新增 `ruff.toml`（E/F/I/UP/B/SIM 规则），清理存量 79 个
+  告警（未用导入 / 导入排序 / 类型注解 / 死代码等），`ruff check app/ tests/`
+  全绿；顺带修复 `security.py` 中 `_load_or_create_key` 缺失的 Fernet 局部
+  导入（潜在 NameError）。
+- **测试补课**：新增 `tests/test_cli.py`（19 例，`cli.py` 覆盖率 0% → 63%，
+  覆盖 add / list / usage / audit / backup / restore / update-check 全部子
+  命令）；修复 68 个 `ResourceWarning`（测试结束统一关闭 KeyPool sqlite 连接）。
+- **开发体验**：新增 `.vscode/settings.json`（Pylance `extraPaths: ["app"]`
+  消除测试导入误报，Ruff / Vue / Prettier 格式化配置）与 `extensions.json`
+  （推荐扩展）。
+- **依赖收紧**：`tavily-python` 收紧到 `~=0.7.0`（SDK 行为已验证，防 0.8+
+  破坏性变更）、`pywebview` 提到 `>=6.0`（项目依赖其 6.x API），降低升级回归
+  风险。
+
 ## [0.9.5] - 2026-08-07
 
 ### Fixed

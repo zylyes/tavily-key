@@ -1,11 +1,9 @@
 """Dashboard API 测试：访问鉴权中间件（对比 constant-time）与设置保存校验。"""
 import sys
-from pathlib import Path
-
-import pytest
-from fastapi.testclient import TestClient
 
 import dashboard
+import pytest
+from fastapi.testclient import TestClient
 
 
 @pytest.fixture()
@@ -353,6 +351,39 @@ def test_logs_export_csv(client, monkeypatch):
                      "source": "mcp", "project_id": "proj-a", "error_msg": ""}], 1
 
     monkeypatch.setattr(dashboard, "pool", _Fake())
+
+
+def test_logs_clear_endpoint(client, monkeypatch):
+    """/api/logs/clear 按筛选清理并返回删除条数（透传筛选条件）。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    captured: dict = {}
+
+    class _Fake:
+        def clear_logs(self, **kw):
+            captured.update(kw)
+            return 7
+
+    monkeypatch.setattr(dashboard, "pool", _Fake())
+    dashboard._api_cache.clear()
+    r = client.post("/api/logs/clear", json={"endpoint": "search", "days": 7})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True and body["deleted"] == 7
+    assert captured.get("endpoint") == "search"
+    assert captured.get("before", 0) > 0  # days=7 → before 为 7 天前时间戳
+
+
+def test_usage_sync_interval(monkeypatch):
+    """自动同步间隔：按配置小时换算；0=关闭；下限 300s 防过频。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"usage_auto_sync_hours": 6})
+    assert dashboard._usage_sync_interval() == 6 * 3600
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"usage_auto_sync_hours": 0})
+    assert dashboard._usage_sync_interval() == 0.0
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"usage_auto_sync_hours": 1})
+    assert dashboard._usage_sync_interval() == 3600.0
+    # 缺失配置（旧 config.json）回退默认 6 小时
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {})
+    assert dashboard._usage_sync_interval() == 6 * 3600
 
 
 def test_audit_export_zip(client, monkeypatch):

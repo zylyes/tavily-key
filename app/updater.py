@@ -34,11 +34,10 @@ import time
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Optional
 
 from logging_setup import get_logger
 from settings import get_settings
-from version import DEFAULT_REPO, __version__
+from version import __version__
 
 _log = get_logger("updater")
 
@@ -50,9 +49,9 @@ _USER_AGENT = f"tavily-key-pool/{__version__} (update-check)"
 
 _lock = threading.Lock()
 _cached_ts = 0.0      # time.monotonic 上次真实检查时间
-_cached_result: Optional[dict] = None
+_cached_result: dict | None = None
 # 后台自动检查已通知过的版本（按版本去重，避免每次检查都重复推送）
-_notified_version: Optional[str] = None
+_notified_version: str | None = None
 
 # ── 自动下载状态（面板轮询）──────────────────────────────────
 # state: idle | starting | downloading | done | error
@@ -407,7 +406,6 @@ def _write_update_script(new_dir: str) -> Path:
 
     base = base_dir()
     log_path = runtime_dir() / "update_apply.log"
-    bak = base / "backup-old"
     bat = runtime_dir() / "apply_update.bat"
     # 路径统一转义：cmd 中 &()^ 等需转义，简单场景用引号包裹即可
     content = f"""@echo off
@@ -468,7 +466,8 @@ def apply_update() -> dict:
 
         # 先尝试优雅停止子进程（MCP/代理），脚本再 taskkill 兜底
         try:
-            import mcp_manager, proxy_manager
+            import mcp_manager
+            import proxy_manager
             mcp_manager.stop()
             proxy_manager.stop()
         except Exception:  # noqa: BLE001

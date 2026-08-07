@@ -7,9 +7,8 @@
 import json
 
 import pytest
-from fastapi.testclient import TestClient
-
 import tavily_proxy
+from fastapi.testclient import TestClient
 from tavily_proxy import proxy_app
 
 TOKEN = "proxy-secret-123"
@@ -201,6 +200,25 @@ def test_error_quota_432(proxy_env, monkeypatch):
 def test_error_rate_429(proxy_env, monkeypatch):
     _set_retry_error(monkeypatch, {"error": "Your request has been blocked due to excessive requests."})
     assert _client().post("/search", json={"query": "x"}).status_code == 429
+
+
+def test_error_rate_429_has_retry_after_header(proxy_env, monkeypatch):
+    """429 响应携带 Retry-After 头（值来自 _run_with_retry 错误 JSON），客户端可正确退避。"""
+    _set_retry_error(monkeypatch, {
+        "error": "Your request has been blocked due to excessive requests.",
+        "retry_after": 12.0,
+    })
+    r = _client().post("/search", json={"query": "x"})
+    assert r.status_code == 429
+    assert r.headers.get("Retry-After") == "12.0"
+
+
+def test_error_rate_429_retry_after_defaults_to_1(proxy_env, monkeypatch):
+    """429 无 retry_after 字段：Retry-After 头用 1 秒兜底。"""
+    _set_retry_error(monkeypatch, {"error": "Your request has been blocked due to excessive requests."})
+    r = _client().post("/search", json={"query": "x"})
+    assert r.status_code == 429
+    assert r.headers.get("Retry-After") == "1"
 
 
 def test_error_other_500(proxy_env, monkeypatch):

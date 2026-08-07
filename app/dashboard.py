@@ -16,17 +16,23 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Body, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
-
 import autostart
 import mcp_manager
 import proxy_manager
 from cache import TTLCache
+from fastapi import Body, FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from key_pool import KeyPool
 from settings import (
-    get_settings, save as save_settings, public_url, mcp_url, validate_patch, cache_ttls,
+    cache_ttls,
+    get_settings,
+    mcp_url,
+    public_url,
+    validate_patch,
+)
+from settings import (
+    save as save_settings,
 )
 from tray import TrayIcon
 
@@ -85,11 +91,18 @@ async def lifespan(app: FastAPI):
         target=_update_check_loop, args=(updatecheck_stop,), daemon=True, name="tavily-updatecheck"
     )
     updatecheck_thread.start()
+    # 定时自动同步官方用量（exhausted key 月度归零自动恢复，见 _usage_sync_loop）
+    usagesync_stop = threading.Event()
+    usagesync_thread = threading.Thread(
+        target=_usage_sync_loop, args=(usagesync_stop,), daemon=True, name="tavily-usagesync"
+    )
+    usagesync_thread.start()
     yield
     notify_stop.set()
     watchdog_stop.set()
     autobackup_stop.set()
     updatecheck_stop.set()
+    usagesync_stop.set()
     # 关闭：停止由本软件管理的 MCP 服务与搜索代理
     try:
         mcp_manager.stop()
@@ -253,6 +266,51 @@ pool = KeyPool()
 _api_cache = TTLCache(default_ttl=1.0, maxsize=512)
 
 
+# ── 定时自动同步官方用量（月度额度恢复的关键）──────────────────
+# 免费套餐额度每月重置：exhausted key 在官方 /usage 归零后自动恢复
+# （key_pool.sync_usage 内置月度重置检测）。此前恢复依赖手动「更新用量」/
+# 托盘菜单同步，月初不手动同步 exhausted key 不会自动恢复——本后台循环按
+# usage_auto_sync_hours 周期全量同步，补齐该缺口（官方 /usage 按 key 独立
+# 限流 10 次/10 分钟，周期全量同步远低于上限）。
+_USAGE_SYNC_FIRST_DELAY = 300.0   # 秒：启动后延迟首次同步（避开启动高峰）
+_USAGE_SYNC_MIN_INTERVAL = 300.0  # 秒：周期下限（防止配置过频打 /usage）
+
+
+def _usage_sync_interval() -> float:
+    """自动同步间隔秒数（usage_auto_sync_hours；0=关闭；下限防过频）。"""
+    try:
+        hours = max(int(get_settings().get("usage_auto_sync_hours", 6) or 0), 0)
+    except (TypeError, ValueError):
+        hours = 6
+    if hours <= 0:
+        return 0.0
+    return max(hours * 3600.0, _USAGE_SYNC_MIN_INTERVAL)
+
+
+def _usage_sync_loop(stop_event: threading.Event) -> None:
+    """周期自动同步官方用量：exhausted key 月度归零自动恢复。"""
+    from logging_setup import get_logger
+
+    log = get_logger("usage_sync")
+    interval = _usage_sync_interval()
+    if interval <= 0:
+        return  # 配置关闭自动同步
+    first = True
+    while not stop_event.wait(_USAGE_SYNC_FIRST_DELAY if first else interval):
+        first = False
+        try:
+            results = pool.sync_usage()
+            recovered = [r["masked"] for r in results if r.get("recovered")]
+            if recovered:
+                log.info("自动同步用量：%d 个 key 月度额度已重置并恢复", len(recovered))
+        except Exception as e:  # noqa: BLE001
+            log.warning("自动同步用量失败: %s", str(e)[:200])
+        # 配置可能热更新：每次同步后重读间隔（0=关闭则退出）
+        interval = _usage_sync_interval()
+        if interval <= 0:
+            return
+
+
 def _service_ttl() -> float:
     return float(cache_ttls().get("service_status", 1.0))
 
@@ -382,6 +440,7 @@ def _logo_png() -> bytes | None:
         if p.exists():
             try:
                 import io
+
                 from PIL import Image
 
                 buf = io.BytesIO()
@@ -517,6 +576,27 @@ def api_logs(endpoint: str = "", key: str = "", status: str = "", days: int = 0,
     resp = {"ok": True, "logs": rows, "total": total, "limit": int(limit), "offset": max(0, int(offset))}
     _api_cache.set(cache_key, resp, _logs_ttl())
     return resp
+
+
+@app.post("/api/logs/clear")
+def api_logs_clear(payload: dict = Body(...)):
+    """按条件清理请求日志（面板「清理日志」按钮；空条件 = 清空全部）。
+
+    筛选条件与 /api/logs 一致（endpoint/key/status/source/project/days），
+    返回删除条数；清理后失效日志/趋势 API 缓存，避免残留旧数据。
+    """
+    days = max(int(payload.get("days") or 0), 0)
+    before = (time.time() - days * 86400) if days else 0.0
+    n = pool.clear_logs(
+        endpoint=(payload.get("endpoint") or "").strip(),
+        key_masked=(payload.get("key") or "").strip(),
+        status=(payload.get("status") or "").strip(),
+        source=(payload.get("source") or "").strip(),
+        project_id=(payload.get("project") or "").strip(),
+        before=before,
+    )
+    _api_cache.invalidate("logs:")
+    return {"ok": True, "deleted": n}
 
 
 @app.get("/api/logs/export.csv")
@@ -871,6 +951,7 @@ async def api_restore(request: Request):
 def _run_server_thread(host: str, port: int):
     """在后台线程启动 uvicorn 服务（供网页套壳窗口使用）。"""
     import threading
+
     import uvicorn
 
     config = uvicorn.Config(app, host=host, port=port, log_level="warning")
@@ -1031,7 +1112,6 @@ class _WindowApi:
         对话框/写入异常返回 {ok: False, error: str(e)}（仅文件名/路径，不泄露备份内容）。
         """
         import webview
-
         from backup import backup_to
         from paths import base_dir
 
@@ -1503,7 +1583,6 @@ def run_app() -> None:
     双击 Tavily.exe 即打开应用窗口，不再跳转系统浏览器；
     关闭窗口自动停止服务并退出。WebView2 不可用时自动回退浏览器。
     """
-    import time
     import webbrowser
 
     # 打包版单实例：已有实例在运行则激活其窗口并静默退出，避免重复启动
@@ -1631,9 +1710,9 @@ if __name__ == "__main__":
 
     # windowed 打包（console=False）下 stdout/stderr 可能为 None，先兜底
     if sys.stdout is None:
-        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 —— 需长期持有句柄
     if sys.stderr is None:
-        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 —— 需长期持有句柄
 
     # ── MCP 角色：Tavily.exe --mcp（或 python dashboard.py --mcp）─────────
     # 由 mcp_manager 作为子进程拉起，仅运行 MCP 服务本体。

@@ -165,13 +165,9 @@ def cmd_audit(args):
             p = (t.get("points") or [])
             src[s] = (p[-1].get("requests", 0) if p else 0)
         print("  按来源: " + ", ".join(f"{k}={v}" for k, v in src.items()))
-        # 按项目拆分（request_log.project_id：MCP 请求的 mcp_project_id 归属）
-        proj: dict[str, int] = {}
-        rows, _ = pool.query_logs(limit=1000)
-        for r in rows:
-            p = (r.get("project_id") or "").strip()
-            if p:
-                proj[p] = proj.get(p, 0) + 1
+        # 按项目拆分（request_log.project_id：MCP 请求的 mcp_project_id 归属）。
+        # 用 SQL 聚合（近 24h），避免拉全量日志逐行统计。
+        proj = pool.project_stats(1)
         if proj:
             print("  按项目: " + ", ".join(f"{k}={v}" for k, v in sorted(proj.items())))
     except Exception:  # noqa: BLE001

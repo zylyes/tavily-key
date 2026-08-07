@@ -70,6 +70,7 @@ API 端点的设计遵循以下约定：
 | GET | `/api/research/tasks` | 无 | Research 任务看板：最近提交的异步任务与状态（TTL 缓存 + 查询上限） |
 | GET | `/api/logs` | 无 | 筛选请求日志（`endpoint`/`key`/`status`/`days`/`limit`/`offset`，分页） |
 | GET | `/api/logs/export.csv` | 无 | 按当前筛选导出请求日志为 CSV |
+| POST | `/api/logs/clear` | 筛选字段 | 按条件清理请求日志（空条件=清空全部），返回 `{deleted}` |
 | POST | `/api/keys/usage-sync` | 无 | 从 Tavily 官方 `/usage` 同步所有 active Key 的真实用量 |
 | POST | `/api/keys/usage-sync/one` | `{"masked": "..."}` | 更新单个 Key 的官方用量（供面板逐个进度展示） |
 | GET | `/api/settings` | 无 | 读取当前部署设置（mode/domain/host/port/auth_token 等） |

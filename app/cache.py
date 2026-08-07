@@ -15,8 +15,9 @@ from __future__ import annotations
 import functools
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 
 class TTLCache:
@@ -45,7 +46,7 @@ class TTLCache:
                 return default
             return value
 
-    def set(self, key: Any, value: Any, ttl: Optional[float] = None) -> None:
+    def set(self, key: Any, value: Any, ttl: float | None = None) -> None:
         """写入缓存；ttl 缺省时使用实例默认 TTL。"""
         ttl = float(ttl) if ttl is not None else self._default_ttl
         expire_at = time.monotonic() + max(0.0, ttl)
@@ -89,7 +90,7 @@ class TTLCache:
 
 
 def ttl_cached(ttl: float = 60.0, maxsize: int = 1024,
-               key_func: Optional[Callable] = None) -> Callable:
+               key_func: Callable | None = None) -> Callable:
     """函数级 TTL 缓存装饰器。
 
     - 以 (args, tuple(sorted(kwargs.items()))) 作为缓存键；可用 key_func 自定义。
@@ -130,18 +131,18 @@ def ttl_cached(ttl: float = 60.0, maxsize: int = 1024,
 # KeyPool 缓存相互独立。写操作方（如 dashboard 停用 key）通过原子更新一个
 # 共享信号文件的时间戳广播"缓存已失效"；其他进程在读取重计算缓存前检查
 # mtime，比本进程见过的更新则清空自身缓存。成本：每次读取一次 stat（µs 级）。
-_signal_file: Optional[Path] = None
+_signal_file: Path | None = None
 _signal_lock = threading.Lock()
 
 
-def set_signal_file(path: Optional[Path]) -> None:
+def set_signal_file(path: Path | None) -> None:
     """设置跨进程失效信号文件路径（缺省为 runtime_dir()/cache_invalidate.sig）。"""
     global _signal_file
     with _signal_lock:
         _signal_file = path
 
 
-def _sig_path() -> Optional[Path]:
+def _sig_path() -> Path | None:
     with _signal_lock:
         p = _signal_file
     if p is not None:

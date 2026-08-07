@@ -2,9 +2,8 @@
 import builtins
 import time
 
-import pytest
-
 import key_pool
+import pytest
 from key_pool import KeyPool
 
 
@@ -14,6 +13,7 @@ def pool(tmp_path):
     KeyPool._instance = None
     p = KeyPool(str(tmp_path / "test.db"))
     yield p
+    p.close_all_connections()  # 释放 sqlite 连接，避免 ResourceWarning
     KeyPool._instance = None
 
 
@@ -82,19 +82,40 @@ def test_next_key_none_when_empty(pool):
     assert pool.next_key_least_used() is None
 
 
-def test_least_used_prefers_low_today_count(pool):
+def test_least_used_prefers_higher_remaining_credit(pool):
+    """least-used 优先剩余额度多的 key（免费池避免个别 key 提前耗尽 432）。"""
     pool.add_keys_batch([KEY1, KEY2])
-    # 给 KEY1 记 5 次今日请求
     conn = pool._get_conn()
-    now = key_pool.time.time()
-    for _ in range(5):
-        conn.execute(
-            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, created_at) VALUES (?,?,?,?,?)",
-            (MASK1, "search", 1, 1, now),
-        )
+    conn.execute(
+        "UPDATE api_keys SET credits_used=900, credits_limit=1000 WHERE masked=?",
+        (MASK1,),
+    )
+    conn.execute(
+        "UPDATE api_keys SET credits_used=100, credits_limit=1000 WHERE masked=?",
+        (MASK2,),
+    )
     conn.commit()
+    # 剩余额度：KEY1=100、KEY2=900 → 应优先 KEY2
     _, masked = pool.next_key_least_used()
     assert masked == MASK2
+
+
+def test_least_used_same_remaining_is_randomized(pool):
+    """剩余额度相同的 key 组内随机打散：多次调用两者都应被选到。"""
+    pool.add_keys_batch([KEY1, KEY2])
+    conn = pool._get_conn()
+    conn.execute(
+        "UPDATE api_keys SET credits_used=0, credits_limit=1000 WHERE masked IN (?,?)",
+        (MASK1, MASK2),
+    )
+    conn.commit()
+    seen = set()
+    for _ in range(100):
+        _, masked = pool.next_key_least_used()
+        seen.add(masked)
+        if len(seen) == 2:
+            break
+    assert seen == {MASK1, MASK2}
 
 
 def test_deactivated_keys_excluded(pool):
@@ -102,6 +123,43 @@ def test_deactivated_keys_excluded(pool):
     pool.deactivate_key(MASK1, "test")
     seen = {pool.next_key()[1] for _ in range(3)}
     assert seen == {MASK2}
+
+
+# ── 日志清理 / 项目统计 ─────────────────────────────────────────
+def test_clear_logs_by_condition(pool):
+    pool.add_key(KEY1)
+    now = key_pool.time.time()
+    conn = pool._get_conn()
+    for ep in ("search", "search", "extract"):
+        conn.execute(
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, created_at) VALUES (?,?,?,?,?)",
+            (MASK1, ep, 1, 1, now),
+        )
+    conn.commit()
+    # 按 endpoint 清理：只删 search
+    n = pool.clear_logs(endpoint="search")
+    assert n == 2
+    rows, total = pool.query_logs(limit=100)
+    assert total == 1 and rows[0]["endpoint"] == "extract"
+    # 清空全部
+    n2 = pool.clear_logs()
+    assert n2 == 1
+    _, total2 = pool.query_logs(limit=100)
+    assert total2 == 0
+
+
+def test_project_stats_aggregates(pool):
+    pool.add_key(KEY1)
+    now = key_pool.time.time()
+    conn = pool._get_conn()
+    for pid in ("p-a", "p-a", "p-b"):
+        conn.execute(
+            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, project_id, created_at) VALUES (?,?,?,?,?,?)",
+            (MASK1, "search", 1, 1, pid, now),
+        )
+    conn.commit()
+    stats = pool.project_stats(1)
+    assert stats == {"p-a": 2, "p-b": 1}
 
 
 # ── 健康检查防误伤 ─────────────────────────────────────────────
@@ -347,11 +405,11 @@ def test_record_usage_source_logged(pool):
     pool.record_request(MASK1, "research", 20, True, 0, request_id="r-1", usage_source="unknown")
     pool.record_request(MASK1, "search", 30, False, 0, "boom", usage_source="none")
     logs = pool.get_recent_logs(10)
-    by_ep = {l["endpoint"]: l for l in logs}
+    by_ep = {log["endpoint"]: log for log in logs}
     assert by_ep["search"]["usage_source"] == "response"
     assert by_ep["research"]["usage_source"] == "unknown"
     assert by_ep["search"]["success"] == 1
-    assert any(l["usage_source"] == "none" for l in logs)
+    assert any(log["usage_source"] == "none" for log in logs)
 
 
 def test_record_source_logged_and_filtered(pool):

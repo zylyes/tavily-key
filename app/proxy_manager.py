@@ -172,7 +172,7 @@ def start() -> dict:
         env["TAVILY_ROLE"] = "proxy"
         try:
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            logf = open(LOG_PATH, "ab")
+            logf = open(LOG_PATH, "ab")  # noqa: SIM115 —— 文件句柄需传给子进程长期持有
             # Windows 下父进程为无控制台应用（Tavily.exe --noconsole / pywebview 面板），
             # 若不指定 CREATE_NO_WINDOW，每次拉起子进程都会弹出新的命令行窗口。
             creationflags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0

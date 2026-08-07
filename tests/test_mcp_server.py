@@ -3,14 +3,13 @@ import asyncio
 import json
 import threading
 
+import mcp_server
 import pytest
+from key_pool import ApiKey
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 from starlette.testclient import TestClient
-
-import mcp_server
-from key_pool import ApiKey
 
 
 @pytest.fixture(autouse=True)
@@ -349,6 +348,7 @@ def test_tavily_research_status_uses_same_key(monkeypatch):
 def test_logging_rotation(tmp_path, monkeypatch):
     """日志文件超限自动轮转（RotatingFileHandler），长驻进程日志不再无限膨胀。"""
     import logging
+
     import logging_setup
 
     monkeypatch.setattr(logging_setup, "_root", None)
@@ -373,6 +373,8 @@ def test_research_key_persists_across_reload(monkeypatch, tmp_path):
     monkeypatch.setattr(mcp_server, "_RESEARCH_KEYS_PATH", fake_path)
 
     mcp_server._save_research_key("rid-persist", "tvly-persist***")
+    # 写盘为延迟合并：显式冲刷（_flush_research_keys）后再断言落盘
+    mcp_server._flush_research_keys()
     assert fake_path.exists()
 
     # 模拟重启：清空内存后重新从磁盘加载
@@ -380,6 +382,41 @@ def test_research_key_persists_across_reload(monkeypatch, tmp_path):
     mcp_server._load_research_keys()
     assert mcp_server._research_keys.get("rid-persist") == "tvly-persist***"
 
+    mcp_server._research_keys.clear()
+
+
+def test_research_key_save_is_debounced(monkeypatch, tmp_path):
+    """research_keys 写盘延迟合并：多次保存不产生重复全量写盘。"""
+    import json as _json
+
+    class _FakePath:
+        """可记录 write_text 调用的假路径对象。"""
+        def __init__(self):
+            self.data: list[str] = []
+
+        def write_text(self, text, encoding="utf-8"):
+            self.data.append(text)
+
+        def exists(self):
+            return True
+
+        def read_text(self, encoding="utf-8"):
+            return "{}"
+
+        def __str__(self):
+            return "<fake>"
+
+    fake = _FakePath()
+    monkeypatch.setattr(mcp_server, "_RESEARCH_KEYS_PATH", fake)
+    mcp_server._save_research_key("rid-1", "tvly-1***")
+    mcp_server._save_research_key("rid-2", "tvly-2***")
+    # 延迟合并窗口内未立即落盘
+    assert fake.data == []
+    # 冲刷后一次写盘包含两条
+    mcp_server._flush_research_keys()
+    assert len(fake.data) == 1
+    data = _json.loads(fake.data[0])
+    assert data.get("rid-1") == "tvly-1***" and data.get("rid-2") == "tvly-2***"
     mcp_server._research_keys.clear()
 
 
@@ -664,6 +701,29 @@ def test_run_with_retry_long_retry_after_switches_key(monkeypatch):
     out = json.loads(mcp_server._run_with_retry("search", lambda c: c.search(query="q")))
     assert state["calls"] == 2
     assert out["results"][0]["title"] == "t"
+
+
+def test_run_with_retry_error_includes_retry_after(monkeypatch):
+    """429 长 retry-after 且换 key 仍限流：最终错误响应携带 retry_after 供代理映射头。"""
+    state = {"calls": 0}
+
+    class _Bad:
+        def search(self, **kw):
+            e = Exception("429 Too Many Requests")
+            e.retry_after = 10.0
+            raise e
+
+    def fake_get_client(*a, **k):
+        state["calls"] += 1
+        return _Bad(), f"tvly-{state['calls']}***"
+
+    monkeypatch.setattr(mcp_server, "_get_client", fake_get_client)
+    monkeypatch.setattr(mcp_server, "_record", lambda *a, **k: None)
+    # 3 个 key 全部限流 → 返回错误 JSON，且含 retry_after 字段
+    out = json.loads(mcp_server._run_with_retry("search", lambda c: c.search(query="q")))
+    assert state["calls"] == 3
+    assert out.get("error")
+    assert out.get("retry_after") == 10.0
 
 
 # ── P0-5：mcp_human_id 接线 ────────────────────────────────────

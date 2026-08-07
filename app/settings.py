@@ -42,6 +42,10 @@ DEFAULTS: dict = {
     "rate_limit_rpm": 90,        # 每 key 令牌桶速率兜底（endpoint_rpm 未覆盖的端点用）
     "rate_limit_max_wait": 1.0,  # 全部 key 受限时最多等待秒数
     "usage_cache_ttl": 60,       # /usage 同步结果缓存 TTL（秒）
+    # 定时自动同步官方用量（小时；0=关闭）：免费套餐额度每月重置，exhausted key
+    # 在 /usage 归零后自动恢复。此前恢复依赖手动「更新用量」/托盘菜单同步，月初
+    # 不手动同步 exhausted key 不会自动恢复——本周期自动同步补齐该缺口。
+    "usage_auto_sync_hours": 6,
     # 按 endpoint 分组的每 key 限流（RPM）。官方限流按 key 独立（池内 key 均来自
     # 不同账号）：research「创建任务」独立 20 RPM、crawl 独立 100 RPM、默认 dev
     # 100 RPM。默认值按官方上限留 10% 余量；未列出的 endpoint 回退 rate_limit_rpm。
@@ -178,7 +182,7 @@ def save(patch: dict) -> dict:
     return dict(cfg)
 
 
-_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes", "proxy_port", "log_backup_count", "auto_backup_interval_days", "auto_backup_keep", "update_check_interval_hours")
+_INT_FIELDS = ("port", "mcp_port", "rate_limit_rpm", "usage_cache_ttl", "log_retention_days", "notify_interval_minutes", "proxy_port", "log_backup_count", "auto_backup_interval_days", "auto_backup_keep", "update_check_interval_hours", "usage_auto_sync_hours")
 # 大整数字段：0 ~ 512MB（日志文件大小上限，_INT_FIELDS 的 0-65535 范围不够）
 _LARGE_INT_FIELDS = ("log_max_bytes",)
 _BOOL_FIELDS = (
@@ -209,7 +213,7 @@ def validate_patch(patch: dict) -> dict:
             try:
                 n = int(v)
             except (TypeError, ValueError):
-                raise ValueError(f"{k} must be an integer")
+                raise ValueError(f"{k} must be an integer") from None
             if not (0 <= n <= 512 * 1024 * 1024):
                 raise ValueError(f"{k} must be in range 0-536870912")
             out[k] = n
@@ -217,7 +221,7 @@ def validate_patch(patch: dict) -> dict:
             try:
                 n = int(v)
             except (TypeError, ValueError):
-                raise ValueError(f"{k} must be an integer")
+                raise ValueError(f"{k} must be an integer") from None
             if not (0 <= n <= 65535):
                 raise ValueError(f"{k} must be in range 0-65535")
             out[k] = n
@@ -225,7 +229,7 @@ def validate_patch(patch: dict) -> dict:
             try:
                 out[k] = float(v)
             except (TypeError, ValueError):
-                raise ValueError(f"{k} must be a number")
+                raise ValueError(f"{k} must be a number") from None
         elif k in _BOOL_FIELDS:
             out[k] = bool(v)
         elif k in _STR_FIELDS:
