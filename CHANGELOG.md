@@ -5,6 +5,26 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.8.0] - 2026-08-06
+
+### Added
+
+- **Dashboard 前端整体重构**：新增 `web/` 前端工程（Vue 3.5 + Vite 6 + TypeScript strict + vue-router hash + ECharts 5，7 个业务视图懒加载、主题协议与旧版一致、完全离线无 CDN）；`dashboard.py` 改由 `web/dist` 托管（`/assets` 静态挂载、`/` 每次现读 index.html + no-cache 防 WebView 缓存旧页面）；**旧版 `dashboard.html` 移除、无回退**（`web/dist` 缺失时启动明确报错并提示构建命令）；`scripts/build_win.bat` 新增 [1/2] 前端构建步骤（node/npm 检查、残留 vite/esbuild 进程清理、`npm ci` 失败重试、产物校验、`:fail` 失败不闪退）；`Tavily.spec` 打包 `web\dist` → `_internal/web/dist`。
+- **界面主题模式**：新配置 `theme_mode`（`system`/`light`/`dark`，默认 system）；WebView 开屏背景色跟随（Windows 注册表 AppsUseLightTheme 检测），前端 `localStorage.tavilyTheme` 协议与旧版一致。
+- **打包版单实例激活**：重复启动时自动激活已有实例窗口并退出（0.25s 短超时端口探测 + `POST /api/activate` + 前台聚焦：SW_RESTORE/SW_SHOW/模拟 Alt 绕过前台锁定/BringWindowToTop）；仅打包版启用。
+- **WebView2 持久化用户数据**：`private_mode=False` + `data/webview` 存储目录，主题等 localStorage 跨重启保留。
+- **桌面版备份「另存为」**：`_WindowApi.save_backup_as` 系统保存对话框（默认程序根目录，取消/异常清晰返回）。
+- **`POST /api/mcp/token/generate`**：面板一键生成随机 MCP 访问令牌。
+
+### Changed
+
+- **备份密钥条件性**：`.tavily-secret.key` 存在才打包（Windows DPAPI / 无加密后端下不生成，属正常），恢复必需文件从 3 个降为 2 个（`config.json` / `tavily_keys.db`）——旧备份恢复完全兼容；备份前校验必需文件（缺失即失败，不产出残缺 zip）+ **生成后校验**（zip 完整性 + CRC，失败删除残留）。
+- **`/api/mcp/status` 的 `mcp_token` 脱敏**（前 4 后 4 + `token_set`），完整令牌仅 `/api/settings` 提供（与 proxy_token 脱敏一致）。
+
+### Fixed
+
+- **WebView2 启动加载旧缓存页面/开屏黑屏**：`/` 显式 no-cache + 窗口背景色跟随所选主题（此前缓存导致启动动画缺失）。
+
 ## [0.7.0] - 2026-08-06
 
 ### Added
@@ -250,6 +270,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.8.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.8.0
 [0.7.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.7.0
 [0.6.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.6.0
 [0.5.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.5.0

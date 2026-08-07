@@ -1,8 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('app\\dashboard.html', '.'), ('assets\\tavily.ico', 'assets')]
+datas = [('assets\\tavily.ico', 'assets')]
+# 新前端产物（web/ 下 vite build 输出，以项目根为基准；工作目录=项目根）。
+# 缺失时构建直接失败：dashboard.py 在运行期要求 web/dist/index.html 必须
+# 存在，不保留旧前端回退。
+if not os.path.isfile('web\\dist\\index.html'):
+    print('[Tavily.spec] ERROR: web\\dist\\index.html not found - cannot bundle the frontend;')
+    print('[Tavily.spec] run "cd web && npm ci && npm run build" first (build_win.bat does this).')
+    print('[Tavily.spec] Build aborted: the web frontend is REQUIRED (no legacy fallback).')
+    raise SystemExit(1)
+datas.append(('web\\dist', 'web/dist'))
 binaries = []
 hiddenimports = ['mcp_server', 'tavily_proxy', 'backup', 'uvicorn.loops.auto', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
 hiddenimports += collect_submodules('mcp.server')

@@ -1,6 +1,6 @@
 # Web Dashboard
 
-> <cite>本文内容基于以下源码整理：[`dashboard.py`](file://app/dashboard.py) · [`dashboard.html`](file://app/dashboard.html) · [`README.md`](file://README.md)</cite>
+> <cite>本文内容基于以下源码整理：[`dashboard.py`](file://app/dashboard.py) · [`web/`](file://web)（Vue 3 前端源码）· [`README.md`](file://README.md)</cite>
 
 ## 目录
 
@@ -21,7 +21,7 @@ Web Dashboard 是项目自带的浏览器管理界面，基于 FastAPI 构建，
 - 查看最近请求日志与失败原因
 - 一键触发全量健康检查
 
-后端路由与接口逻辑集中在 [`dashboard.py`](file://app/dashboard.py)，页面结构、样式与交互逻辑全部内联在 [`dashboard.html`](file://app/dashboard.html) 中；启动方式与 systemd 自启说明可参考 [`README.md`](file://README.md)。
+后端路由与接口逻辑集中在 [`dashboard.py`](file://app/dashboard.py)，前端为 Vue 3 + Vite 单页应用，源码位于 [`web/src`](file://web/src)，构建产物 `web/dist/index.html` 由后端在 `/` 路由提供；启动方式与 systemd 自启说明可参考 [`README.md`](file://README.md)。
 
 Dashboard 与 CLI、MCP Server 共享同一个 `KeyPool` 实例和 SQLite 数据库，关于 Key 轮询、健康检查与用量追踪的整体设计，可参阅 [核心功能](核心功能/核心功能.md) 与 [项目概述](项目概述/项目概述.md)。
 
@@ -66,15 +66,16 @@ if __name__ == "__main__":
 - **本机访问**：`http://127.0.0.1:8000`
 - **局域网访问**（以 `0.0.0.0` 绑定时）：`http://<服务器IP>:8000`
 
-根路径 `/` 直接返回由模板渲染的页面：
+根路径 `/` 直接返回新前端构建产物 `web/dist/index.html`（Vue 3 + Vite 构建）：
 
 ```python
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return DASHBOARD_HTML
+    # 每次现读 index.html（文件很小，前端重新构建后免重启即生效）
+    return HTMLResponse((_WEB_DIST / "index.html").read_text(encoding="utf-8"))
 ```
 
-页面加载后会每 10 秒自动刷新一次统计数据（`setInterval(load, 10000)`），MCP 服务状态每 5 秒刷新一次（`setInterval(loadMcp, 5000)`），所有操作均通过 REST API 完成，无需刷新页面。
+构建产物缺失（`web/dist/index.html` 不存在）时，`dashboard.py` 在导入期即失败并报错，服务无法启动（旧前端已归档到 `docs/archive/dashboard-legacy.html`，不再回退）。页面数据通过 REST API 获取，各视图按需定时轮询（约 5~12 秒，见 `web/src/composables/usePolling.ts`）并支持操作后手动刷新。
 
 ## 界面组成
 
@@ -183,7 +184,7 @@ Dashboard 前端依赖以下接口：
 ```mermaid
 flowchart LR
     subgraph 前端
-        HTML[dashboard.html<br/>单页应用]
+        HTML[web/dist/index.html<br/>Vue 3 单页应用]
     end
     subgraph 后端
         API[FastAPI 路由<br/>/api/stats 等]

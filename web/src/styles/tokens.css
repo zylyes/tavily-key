@@ -1,0 +1,161 @@
+/* ═══════════════════════════════════════════════════════════════
+   设计 Token —— 双主题（深色默认 / 浅色），CSS 变量驱动
+   主题协议：<html data-theme="dark|light" data-theme-mode="system|light|dark">
+   ═══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── 字体 ─────────────────────────────────────────────── */
+  --font-sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+
+  /* ── 圆角 ─────────────────────────────────────────────── */
+  --r-card: 14px;          /* 卡片 */
+  --r-ctrl: 10px;          /* 控件（按钮/输入框/下拉） */
+  --r-sm: 8px;
+  --r-pill: 999px;
+
+  /* ── 动效 ─────────────────────────────────────────────── */
+  --dur-1: 140ms;
+  --dur-2: 240ms;
+  --dur-3: 400ms;
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.4, .4, 1);
+
+  /* ── 布局 ─────────────────────────────────────────────── */
+  --header-h: 56px;
+  --nav-w: 208px;
+  --nav-w-collapsed: 64px;
+
+  /* ── 层级 ─────────────────────────────────────────────── */
+  --z-nav: 40;
+  --z-header: 50;
+  --z-modal: 98;
+  --z-login: 99;
+  --z-toast: 100;
+  --z-resize: 9999;
+}
+
+/* ── 深色主题（默认）────────────────────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #070b14;
+  --bg-2: #0b1120;
+  --bg-3: #111a30;
+
+  --text: #e9edf7;
+  --text-2: rgba(233, 237, 247, .64);
+  --text-3: rgba(233, 237, 247, .42);
+
+  /* accent 靛蓝紫 */
+  --accent: #7c8cff;
+  --accent-2: #a78bfa;
+  --accent-text: #aab4ff;                    /* 文本用 accent（对比度更高） */
+  --accent-soft: rgba(124, 140, 255, .16);
+  --accent-softer: rgba(124, 140, 255, .08);
+  --on-accent: #0a0f1e;
+  --accent-grad: linear-gradient(135deg, #6d7cff, #8b7bff 55%, #a78bfa);
+  --accent-grad-soft: linear-gradient(135deg, rgba(109,124,255,.18), rgba(167,139,250,.14));
+
+  /* 语义色 */
+  --success: #34d399;
+  --success-soft: rgba(52, 211, 153, .14);
+  --warn: #fbbf24;
+  --warn-soft: rgba(251, 191, 36, .14);
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, .14);
+  --info: #60a5fa;
+  --info-soft: rgba(96, 165, 250, .14);
+  --neutral-soft: rgba(233, 237, 247, .08);
+
+  /* 玻璃表面 */
+  --glass-bg: rgba(146, 160, 255, .055);
+  --glass-bg-2: rgba(146, 160, 255, .095);   /* 更实的玻璃（弹出层/下拉） */
+  --glass-border: rgba(255, 255, 255, .075);
+  --glass-border-strong: rgba(255, 255, 255, .13);
+  --glass-hi: rgba(255, 255, 255, .06);      /* 上缘高光 */
+  --glass-blur: blur(18px) saturate(1.5);
+
+  --input-bg: rgba(5, 8, 16, .45);
+  --mask: rgba(4, 7, 14, .55);
+
+  /* 投影 */
+  --shadow-card:
+    inset 0 1px 0 rgba(255, 255, 255, .04),
+    0 12px 32px -12px rgba(2, 6, 18, .7),
+    0 2px 8px -2px rgba(2, 6, 18, .5);
+  --shadow-pop:
+    0 24px 64px -16px rgba(2, 6, 18, .85),
+    0 4px 16px -4px rgba(2, 6, 18, .6);
+
+  /* 环境光斑 */
+  --orb-1: rgba(109, 124, 255, .22);
+  --orb-2: rgba(34, 211, 238, .13);
+  --orb-3: rgba(167, 139, 250, .16);
+
+  --scrollbar: rgba(255, 255, 255, .14);
+  --scrollbar-hover: rgba(255, 255, 255, .26);
+  --focus-ring: rgba(124, 140, 255, .45);
+}
+
+/* ── 浅色主题 ──────────────────────────────────────────── */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #eef1f8;
+  --bg-2: #e6eaf4;
+  --bg-3: #dbe2f0;
+
+  --text: #1b2138;
+  --text-2: rgba(27, 33, 56, .68);
+  --text-3: rgba(27, 33, 56, .46);
+
+  /* accent 靛蓝紫（加深保证 AA） */
+  --accent: #4f5ef0;
+  --accent-2: #7c5cf0;
+  --accent-text: #4550d8;
+  --accent-soft: rgba(79, 94, 240, .13);
+  --accent-softer: rgba(79, 94, 240, .07);
+  --on-accent: #ffffff;
+  --accent-grad: linear-gradient(135deg, #4f5ef0, #6a5cf5 55%, #8358f2);
+  --accent-grad-soft: linear-gradient(135deg, rgba(79,94,240,.12), rgba(131,88,242,.1));
+
+  /* 语义色（加深保证 AA） */
+  --success: #0d9d6c;
+  --success-soft: rgba(13, 157, 108, .14);
+  --warn: #b07908;
+  --warn-soft: rgba(176, 121, 8, .15);
+  --danger: #d63c3c;
+  --danger-soft: rgba(214, 60, 60, .12);
+  --info: #1f6fd8;
+  --info-soft: rgba(31, 111, 216, .12);
+  --neutral-soft: rgba(27, 33, 56, .07);
+
+  /* 玻璃表面（柔白磨砂） */
+  --glass-bg: rgba(255, 255, 255, .52);
+  --glass-bg-2: rgba(255, 255, 255, .78);
+  --glass-border: rgba(255, 255, 255, .75);
+  --glass-border-strong: rgba(255, 255, 255, .95);
+  --glass-hi: rgba(255, 255, 255, .85);
+  --glass-blur: blur(18px) saturate(1.6);
+
+  --input-bg: rgba(255, 255, 255, .7);
+  --mask: rgba(224, 230, 244, .5);
+
+  --shadow-card:
+    inset 0 1px 0 rgba(255, 255, 255, .7),
+    0 12px 32px -14px rgba(35, 48, 90, .22),
+    0 2px 8px -2px rgba(35, 48, 90, .1);
+  --shadow-pop:
+    0 24px 64px -16px rgba(35, 48, 90, .32),
+    0 4px 16px -4px rgba(35, 48, 90, .16);
+
+  /* 环境光斑（同色系淡晕） */
+  --orb-1: rgba(109, 124, 255, .3);
+  --orb-2: rgba(34, 211, 238, .24);
+  --orb-3: rgba(167, 139, 250, .26);
+
+  --scrollbar: rgba(27, 33, 56, .18);
+  --scrollbar-hover: rgba(27, 33, 56, .32);
+  --focus-ring: rgba(79, 94, 240, .35);
+}

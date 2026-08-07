@@ -9,6 +9,7 @@ FastAPI web dashboard — visualize API key pool usage, add/remove keys.
 from __future__ import annotations
 
 import ctypes
+import os
 import sys
 import threading
 import time
@@ -17,6 +18,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Body, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 import autostart
 import mcp_manager
@@ -116,15 +118,67 @@ def _mask_token(tok: str) -> str:
     return f"{tok[:4]}****{tok[-4:]}"
 
 
-def _resource_dir() -> Path:
-    """只读资源（dashboard.html）目录：打包后为 _MEIPASS，开发时为源码目录。"""
+def _system_light_theme() -> bool:
+    """判断 Windows 系统主题是否为浅色（注册表 AppsUseLightTheme=1）。
+
+    用于 WebView 窗口初始背景色（background_color）跟随主题：浅色系统用
+    浅色底、深色系统用深色底，避免启动黑屏。非 Windows / 读取失败回退深色。
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        )
+        try:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return bool(value)
+        finally:
+            winreg.CloseKey(key)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _window_bg_color() -> str:
+    """WebView 窗口初始背景色：优先跟随应用内选择的颜色模式
+    （config.json theme_mode: system/light/dark）；light 浅色、dark 深色，
+    system 或未设置时跟随系统主题，避免开屏背景与所选主题不一致。"""
+    mode = get_settings().get("theme_mode")
+    if mode == "light":
+        return "#eef1f8"
+    if mode == "dark":
+        return "#070b14"
+    return "#eef1f8" if _system_light_theme() else "#070b14"
+
+
+def _web_dist() -> Path:
+    """新前端（web/，Vite 构建产物）目录：含 index.html，打包后位于
+    _MEIPASS/web/dist（见 Tavily.spec datas）；开发时为项目根下的
+    web/dist（本文件在 app/ 下，项目根是其父目录的父目录）。
+
+    index.html 缺失时直接抛错：新前端是唯一前端，不静默回退旧版。
+    """
     if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS)
-    return Path(__file__).resolve().parent
+        dist = Path(sys._MEIPASS) / "web" / "dist"
+    else:
+        dist = Path(__file__).resolve().parent.parent / "web" / "dist"
+    index = dist / "index.html"
+    if not index.is_file():
+        raise FileNotFoundError(
+            f"[dashboard] 新前端构建产物缺失: {index} 不存在；"
+            "请先构建前端（cd web && npm ci && npm run build，"
+            "scripts/build_win.bat 会自动执行），否则服务无法启动。"
+        )
+    return dist
 
 
-TPL = _resource_dir() / "dashboard.html"
-DASHBOARD_HTML = TPL.read_text(encoding="utf-8")
+# dist 在 import 期解析一次（静态资源挂载点必须在 import 期注册）；
+# dist 缺失时模块导入直接失败（不静默回退旧前端）。
+_WEB_DIST = _web_dist()
+if (_WEB_DIST / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=_WEB_DIST / "assets"), name="web-assets")
 
 # ── 访问鉴权 ───────────────────────────────────────────────────
 @app.middleware("http")
@@ -143,7 +197,14 @@ async def auth_middleware(request: Request, call_next):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return DASHBOARD_HTML
+    # 每次现读 index.html（文件很小，前端重新构建后免重启即生效）；
+    # 显式 no-cache：WebView2 默认缓存本地响应，否则启动时可能加载旧页面
+    # 导致启动动画缺失（表现为加载期黑屏/直接跳应用界面）。
+    body = (_WEB_DIST / "index.html").read_text(encoding="utf-8")
+    return HTMLResponse(
+        body,
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 @app.get("/favicon.ico")
@@ -388,11 +449,20 @@ def api_autostart_set(payload: dict = Body(...)):
 # ── MCP 服务管理（面板开关 / 状态 / 地址）───────────────────────
 @app.get("/api/mcp/status")
 def api_mcp_status():
-    """MCP 服务运行状态（短 TTL 缓存，吸收 5s 轮询与重复调用）。"""
+    """MCP 服务运行状态 + 访问令牌（脱敏，短 TTL 缓存，吸收 5s 轮询与重复调用）。
+
+    完整 mcp_token 仅由设置接口 /api/settings 提供（设置页输入框回显用），
+    状态接口只回脱敏值，避免任何能访问面板的页面把访问令牌明文带出。
+    """
     hit = _api_cache.get("mcp:status")
     if hit is not None:
         return hit
-    resp = {"ok": True, **mcp_manager.status()}
+    resp = {
+        "ok": True,
+        **mcp_manager.status(),
+        "token": _mask_token((get_settings().get("mcp_token") or "").strip()),
+        "token_set": bool((get_settings().get("mcp_token") or "").strip()),
+    }
     _api_cache.set("mcp:status", resp, _service_ttl())
     return resp
 
@@ -411,6 +481,17 @@ def api_mcp_stop():
     _api_cache.invalidate("mcp:")
     result["status"] = mcp_manager.status()
     return result
+
+
+@app.post("/api/mcp/token/generate")
+def api_mcp_token_generate():
+    """生成随机 MCP 访问令牌并保存（面板「生成新密钥」按钮调用）。"""
+    import secrets
+
+    token = secrets.token_urlsafe(24)
+    save_settings({"mcp_token": token})
+    _api_cache.invalidate("mcp:")
+    return {"ok": True, "token": token}
 
 
 # ── 搜索代理服务管理（面板开关 / 状态 / 地址）───────────────────
@@ -458,6 +539,16 @@ def api_proxy_token_generate():
     token = secrets.token_urlsafe(24)
     save_settings({"proxy_token": token})
     return {"ok": True, "token": token}
+
+
+@app.post("/api/activate")
+def api_activate():
+    """打包版单实例激活：已有实例在运行时，新实例调用本端点恢复并前置主窗口。
+
+    返回 activated=True 表示窗口已激活；False 表示当前实例无窗口（如 --server 模式）。
+    仅供新实例检测使用（见 _try_activate_existing），正常前端页面不调用。
+    """
+    return {"ok": True, "activated": _activate_window()}
 
 
 @app.post("/api/backup")
@@ -659,6 +750,53 @@ class _WindowApi:
 
         _invoke_gui(_do)
 
+    def save_backup_as(self, filename: str = ""):
+        """「另存为」备份：系统对话框（默认目录 = 程序根目录），备份直接写入所选位置。
+
+        仅桌面 WebView 可用；无窗口（--server/--mcp 模式）时返回清晰错误。
+        用户取消返回 {ok: False, cancelled: True, error: '已取消保存'}，不产生备份；
+        对话框/写入异常返回 {ok: False, error: str(e)}（仅文件名/路径，不泄露备份内容）。
+        """
+        import webview
+
+        from backup import backup_to
+        from paths import base_dir
+
+        w = _window()
+        if w is None:
+            return {"ok": False, "error": "仅桌面版支持选择备份保存位置，请运行桌面版应用"}
+        if not filename:
+            filename = time.strftime("tavily-backup-%Y%m%d-%H%M%S.zip")
+
+        def _pick():
+            return w.create_file_dialog(
+                webview.SAVE_DIALOG,
+                directory=str(base_dir()),
+                save_filename=filename,
+                file_types=("ZIP files (*.zip)",),
+            )
+
+        try:
+            result = _invoke_gui(_pick)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        # 用户取消：SAVE_DIALOG 返回 None（个别平台返回空序列）
+        if isinstance(result, (list, tuple)):
+            if not result:
+                return {"ok": False, "cancelled": True, "error": "已取消保存"}
+            selected = str(result[0])
+        elif result:
+            selected = str(result)
+        else:
+            return {"ok": False, "cancelled": True, "error": "已取消保存"}
+        if not selected.lower().endswith(".zip"):
+            selected += ".zip"
+        try:
+            dest = backup_to(selected)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "path": str(dest)}
+
 
 def _work_area() -> tuple[int, int, int, int]:
     """主屏工作区（排除任务栏）: (left, top, width, height)。
@@ -742,14 +880,36 @@ def _apply_window_icon(edge_self) -> None:
         pass
 
 
+def _force_foreground(hwnd: int) -> bool:
+    """把指定窗口恢复到前台并聚焦（单实例激活 / 托盘恢复共用）。
+
+    组合处理三个 Windows 细节：
+      - SW_RESTORE 只能恢复最小化窗口；被 SW_HIDE（关闭到托盘）的窗口需 SW_SHOW 才显示；
+      - SetForegroundWindow 受前台锁定（SPI_GETFOREGROUNDLOCKTIMEOUT，默认约 200s）限制，
+        后台进程直接调用会被忽略；模拟一次 Alt 键让系统认为本进程收到输入事件即可绕过；
+      - BringWindowToTop 兜底把窗口提到 Z 序最前。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE（恢复最小化）
+        user32.ShowWindow(hwnd, 5)   # SW_SHOW（显示被隐藏的窗口，如「关闭到托盘」）
+        # 模拟 Alt 键：绕过 Windows 前台锁定，使 SetForegroundWindow 真正生效
+        user32.keybd_event(0x12, 0, 0, 0)   # VK_MENU down
+        user32.keybd_event(0x12, 0, 2, 0)   # VK_MENU up
+        user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+        return True
+    except Exception:
+        return False
+
+
 def _tray_show() -> None:
     """托盘回调：恢复并前置主窗口。"""
     try:
         user32 = ctypes.windll.user32
         hwnd = _HWND or int(user32.GetForegroundWindow())
         if hwnd:
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-            user32.SetForegroundWindow(hwnd)
+            _force_foreground(hwnd)
     except Exception:
         pass
 
@@ -761,6 +921,19 @@ def _tray_exit() -> None:
             ctypes.windll.user32.PostMessageW(_HWND, 0x0010, 0, 0)  # WM_CLOSE
     except Exception:
         pass
+
+
+def _activate_window() -> bool:
+    """恢复并前置主窗口（打包版单实例激活用）。
+
+    仅桌面窗口模式会捕获 _HWND；server / mcp / proxy 模式恒为 0，返回 False。
+    经 _invoke_gui 调度到 GUI（WinForms）线程执行 _force_foreground，确保窗口
+    真正显示并聚焦到前台（后台线程 SetForegroundWindow 可能被系统忽略）。
+    """
+    hwnd = _HWND
+    if not hwnd:
+        return False
+    return bool(_invoke_gui(lambda: _force_foreground(hwnd)))
 
 
 def _harden_webview() -> None:
@@ -929,6 +1102,70 @@ def run_server(host: str, port: int) -> None:
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 
+# 打包版单实例检测的端口探测结果（None=未探测）：run_app 复用，避免二次阻塞探测。
+# 启动路径用 0.25s 短超时——is_port_open 的 1s 超时在端口关闭时会拖慢每次启动。
+_STARTUP_PORT_BUSY: bool | None = None
+
+
+def _port_open_fast(port: int) -> bool:
+    """快速探测本机端口是否被监听（0.25s 短超时，仅用于启动路径）。
+
+    被 Tavily 占用的回环连接瞬时成功；端口关闭时本机网络栈 connect 会阻塞到
+    超时（而非立即拒绝），is_port_open 的 1s 超时会让每次正常启动白白等 1s。
+    """
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.25)
+        try:
+            s.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+    except Exception:
+        return False
+
+
+def _try_activate_existing() -> bool:
+    """打包版单实例检测：本机已有 Tavily 面板在运行时，激活其窗口并返回 True。
+
+    仅打包版（sys.frozen）启用，避免影响开发环境多开 / --server / --mcp / --proxy。
+    流程：面板端口被占用 → POST /api/activate 确认是 Tavily 面板并触发窗口激活 →
+    成功则本进程应退出（由调用方处理），不再创建第二个窗口/服务实例。
+    """
+    global _STARTUP_PORT_BUSY
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        import json as _json
+        import urllib.request
+
+        cfg = get_settings()
+        port = int(cfg.get("port", 8000))
+        # 快速探测端口（0.25s 短超时）；结果记录供 run_app 复用，避免二次阻塞探测
+        busy = _port_open_fast(port)
+        _STARTUP_PORT_BUSY = busy
+        if not busy:
+            return False  # 端口未占用：无已有实例，正常启动
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/activate",
+            method="POST",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
+        )
+        token = (cfg.get("auth_token") or "").strip()
+        if token:
+            req.add_header("X-Auth-Token", token)
+        with urllib.request.urlopen(req, timeout=3) as r:
+            payload = _json.loads(r.read().decode("utf-8"))
+        return bool(payload.get("ok")) and bool(payload.get("activated"))
+    except Exception:
+        # 端口被其他程序占用 / 网络异常：不激活，按原逻辑继续
+        return False
+
+
 def run_app() -> None:
     """网页套壳模式（默认）：原生 WebView2 窗口内嵌控制台面板。
 
@@ -938,6 +1175,11 @@ def run_app() -> None:
     import time
     import webbrowser
 
+    # 打包版单实例：已有实例在运行则激活其窗口并静默退出，避免重复启动
+    if _try_activate_existing():
+        _quiet_exit()
+        return
+
     # 清理上次退出残留的 PyInstaller 临时目录（见 _quiet_exit）
     _cleanup_stale_mei()
 
@@ -946,8 +1188,14 @@ def run_app() -> None:
     port = int(cfg.get("port", 8000))
     url = f"http://127.0.0.1:{port}/"
 
-    # 端口已被占用（例如已有实例在运行）：直接复用，不再重复启动服务
-    port_busy = mcp_manager.is_port_open("127.0.0.1", port)
+    # 端口已被占用（例如已有实例在运行）：直接复用，不再重复启动服务。
+    # 打包版已由 _try_activate_existing 探测过（结果在 _STARTUP_PORT_BUSY），
+    # 直接复用避免第二次 1s 阻塞探测；开发版未探测则按原逻辑探测。
+    port_busy = (
+        _STARTUP_PORT_BUSY
+        if _STARTUP_PORT_BUSY is not None
+        else mcp_manager.is_port_open("127.0.0.1", port)
+    )
 
     server = None
     thread = None
@@ -984,7 +1232,7 @@ def run_app() -> None:
                 min_size=(1024, 640),
                 frameless=True,
                 easy_drag=False,  # EdgeChromium 未实现 easy_drag，由 _WindowApi 自实现
-                background_color="#0a0f1e",
+                background_color=_window_bg_color(),  # 跟随系统主题，避免加载期黑屏
                 js_api=_WindowApi(),
             )
             # 首次显示时把窗口居中于主屏工作区
@@ -1002,7 +1250,13 @@ def run_app() -> None:
                     window.events.shown += _on_shown
                 except Exception:
                     pass
-            webview.start()  # 阻塞至窗口关闭
+            # private_mode=False + storage_path：让 WebView2 使用持久化用户数据目录，
+            # 否则 localStorage（如主题模式选择）在退出后丢失。
+            from paths import runtime_dir
+            webview.start(
+                private_mode=False,
+                storage_path=str(runtime_dir() / "webview"),
+            )  # 阻塞至窗口关闭
         except Exception as e:  # WebView2 缺失或启动失败 → 回退浏览器
             print(f"[tavily] WebView 不可用（{e}），改用系统浏览器打开面板。")
             webbrowser.open(url)

@@ -6,7 +6,7 @@
 
 ## 一、打包成 Windows 应用（推荐，免安装）
 
-在项目根目录执行一键打包（需联网安装 PyInstaller）：
+在项目根目录执行一键打包（需联网安装 PyInstaller；**需安装 Node.js LTS**——v0.8.0 起构建脚本会先自动构建前端 `web/dist`）：
 
 ```bat
 scripts\build_win.bat

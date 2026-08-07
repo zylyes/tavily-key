@@ -116,7 +116,7 @@ graph LR
 
 ### GET /
 
-返回 Dashboard 首页。响应类型为 `HTMLResponse`，内容来自 `app/dashboard.html` 模板文件——该文件在模块加载时一次性读取到内存（`TPL.read_text()`），因此修改模板后需要重启服务才能生效。
+返回 Dashboard 首页。响应类型为 `HTMLResponse`，内容来自新前端构建产物 `web/dist/index.html`（Vue 3 + Vite）；该文件在每次请求时现读（`_WEB_DIST / "index.html"` 的 `read_text()`），因此前端重新构建后无需重启服务即生效。
 
 响应示例：
 
@@ -695,7 +695,7 @@ sequenceDiagram
 - **请求体格式错误**：`add`、`remove`、`deactivate`、`activate`、`health/one`、`usage-sync/one` 端点要求请求体为 JSON 对象，否则 FastAPI 返回 `422 Unprocessable Entity`。
 - **设置校验**：`POST /api/settings` 经白名单与类型/取值范围校验（如端口须在 0-65535、`mode` 须为 server/local、`mcp_transport` 须为 stdio/sse/streamable-http），非法值返回 `400 {"ok": false, "error": "..."}`，不会写入配置。
 - **不存在的 Key**：`health/one`、`usage-sync/one` 对不存在的 `masked` 返回 `ok: true` 且 `result.error = "key not found"`，对已停用的 Key 返回 `result.skipped = true`；`remove` 等端点行为取决于 `KeyPool` 对应方法的实现（可能静默忽略）。
-- **服务启动即校验资源**：`dashboard.py` 在导入时即读取 HTML 模板文件，若 `app/dashboard.html` 缺失，服务将无法启动；`/logo.png`、`/favicon.ico` 在资源缺失时返回 `404`，不影响服务运行。详细排查可参考「故障排查」文档。
+- **服务启动即校验前端资源**：`dashboard.py` 在导入时即校验新前端构建产物 `web/dist/index.html`（`_web_dist()`），若缺失模块导入直接失败（抛 `FileNotFoundError`），服务无法启动，不静默回退旧前端；`/logo.png`、`/favicon.ico` 在资源缺失时返回 `404`，不影响服务运行。详细排查可参考「故障排查」文档。
 
 ## 相关文档
 

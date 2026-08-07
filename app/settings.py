@@ -30,6 +30,7 @@ DEFAULTS: dict = {
     "start_to_tray": False,     # 启动后直接隐藏到系统托盘
     "close_to_tray": False,     # 点击关闭时最小化到系统托盘（不退出）
     "minimize_to_tray": False,  # 点击最小化时隐藏到系统托盘
+    "theme_mode": "system",     # 界面颜色模式: system | light | dark（WebView 开屏背景据此调整）
     # ── MCP 服务（供 AI Agent 调用）──────────────────────────
     "mcp_auto_start": False,  # 软件启动时是否自动启动 MCP 服务
     "mcp_transport": "sse",   # 传输方式: stdio | sse | streamable-http
@@ -171,7 +172,7 @@ _BOOL_FIELDS = (
     "mcp_auto_start", "notify_tray", "proxy_auto_start",
 )
 _STR_FIELDS = (
-    "mode", "domain", "host", "auth_token",
+    "mode", "domain", "host", "auth_token", "theme_mode",
     "mcp_transport", "mcp_host", "mcp_token", "mcp_human_id", "mcp_project_id",
     "notify_webhook", "proxy_host", "proxy_token",
 )
@@ -225,6 +226,8 @@ def validate_patch(patch: dict) -> dict:
         raise ValueError("mode must be server or local")
     if "mcp_transport" in out and out["mcp_transport"] not in ("stdio", "sse", "streamable-http"):
         raise ValueError("mcp_transport must be stdio, sse or streamable-http")
+    if "theme_mode" in out and out["theme_mode"] not in ("system", "light", "dark"):
+        raise ValueError("theme_mode must be system, light or dark")
     return out
 
 

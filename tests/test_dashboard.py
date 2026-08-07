@@ -1,4 +1,7 @@
 """Dashboard API 测试：访问鉴权中间件（对比 constant-time）与设置保存校验。"""
+import sys
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -60,6 +63,28 @@ def test_settings_accepts_valid_patch(client, monkeypatch, tmp_path):
     assert r.json()["ok"] is True
 
 
+# ── 新前端入口（web/dist）─────────────────────────────────────
+def test_index_serves_web_dist(client, monkeypatch, tmp_path):
+    """GET / 始终返回新前端 web/dist/index.html 的内容（Vue 构建产物），无旧模板回退。"""
+    dist = tmp_path / "web" / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html>new-vue-app</html>", encoding="utf-8")
+    monkeypatch.setattr(dashboard, "_WEB_DIST", dist)
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.text == "<html>new-vue-app</html>"
+    # 旧前端单页模板已移除，不存在回退路径
+    assert not hasattr(dashboard, "DASHBOARD_HTML")
+
+
+def test_web_dist_missing_raises(tmp_path, monkeypatch):
+    """web/dist 缺失（index.html 不存在）时 _web_dist() 明确抛错，不静默回退旧前端。"""
+    monkeypatch.setattr(dashboard, "__file__", str(tmp_path / "app" / "dashboard.py"))
+    (tmp_path / "web" / "dist").mkdir(parents=True)  # dist 目录存在但无 index.html
+    with pytest.raises(FileNotFoundError, match="index.html"):
+        dashboard._web_dist()
+
+
 # ── API 端点 TTL 缓存 ─────────────────────────────────────────
 def _fresh_pool(tmp_path, monkeypatch):
     """把 dashboard.pool 替换为隔离的 KeyPool 实例。"""
@@ -117,6 +142,32 @@ def test_api_mcp_status_ttl_cache_and_invalidate(client, monkeypatch):
     assert calls["n"] == 4                       # stop 端点内部 status
     client.get("/api/mcp/status")
     assert calls["n"] == 5                       # stop 后失效重查
+
+
+def test_api_mcp_status_masks_token(client, monkeypatch):
+    """/api/mcp/status 只回脱敏 mcp_token，不回明文（完整令牌由 /api/settings 提供）。"""
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"auth_token": "", "mcp_token": "supersecret123456"})
+    dashboard._api_cache.clear()
+    r = client.get("/api/mcp/status")
+    body = r.json()
+    assert body["token"] == "supe****3456"
+    assert "supersecret123456" not in body["token"]
+    assert body["token_set"] is True
+
+
+def test_api_mcp_token_generate(client, monkeypatch, tmp_path):
+    """POST /api/mcp/token/generate 生成随机访问令牌并写入设置。"""
+    import settings as settings_mod
+    monkeypatch.setattr(settings_mod, "CONFIG_PATH", tmp_path / "config.json")
+    monkeypatch.setattr(settings_mod, "_cache", None)
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"auth_token": "", "mcp_token": ""})
+    r = client.post("/api/mcp/token/generate")
+    body = r.json()
+    assert body["ok"] is True
+    assert body["token"] and len(body["token"]) >= 24
+    assert settings_mod.get_settings()["mcp_token"] == body["token"]
 
 
 def test_api_proxy_status_ttl_cache(client, monkeypatch):
@@ -359,3 +410,364 @@ def test_restore_endpoint_rejects_empty(client, monkeypatch):
     r = client.post("/api/restore", content=b"")
     assert r.status_code == 400
     assert r.json()["ok"] is False
+
+
+# ── _WindowApi.save_backup_as（桌面版「另存为」备份）────────────────
+class _FakeWindow:
+    """伪造 pywebview Window：记录 create_file_dialog 参数并返回预设结果。"""
+
+    def __init__(self):
+        self.dialog_calls: list[dict] = []
+        self.pick_result: object | None = None
+        self.dialog_error: Exception | None = None
+
+    def create_file_dialog(self, dialog_type, directory="", save_filename="", file_types=()):
+        self.dialog_calls.append({
+            "dialog_type": dialog_type,
+            "directory": directory,
+            "save_filename": save_filename,
+            "file_types": file_types,
+        })
+        if self.dialog_error is not None:
+            raise self.dialog_error
+        return self.pick_result
+
+
+def _save_backup_api(monkeypatch, win):
+    """装配 save_backup_as 测试环境：假窗口 + 假 backup_to，返回 (api, 调用记录)。"""
+    import backup as backup_mod
+
+    monkeypatch.setattr(dashboard, "_window", lambda: win)
+    calls = []
+
+    def _fake_backup_to(target=None):
+        calls.append(str(target))
+        return target or "fake.zip"
+
+    monkeypatch.setattr(backup_mod, "backup_to", _fake_backup_to)
+    return dashboard._WindowApi(), calls
+
+
+def test_save_backup_as_default_dir_is_base_dir(monkeypatch):
+    """对话框默认目录为程序根目录 base_dir()，类型为保存对话框，默认文件名带 .zip。"""
+    import webview
+    from paths import base_dir
+
+    win = _FakeWindow()
+    win.pick_result = "C:/tmp/backup.zip"
+    api, _ = _save_backup_api(monkeypatch, win)
+    r = api.save_backup_as()
+    assert r["ok"] is True
+    assert r["path"] == "C:/tmp/backup.zip"
+    call = win.dialog_calls[0]
+    assert call["dialog_type"] == webview.SAVE_DIALOG
+    assert call["directory"] == str(base_dir())
+    assert call["file_types"] == ("ZIP files (*.zip)",)
+    assert call["save_filename"].endswith(".zip")
+
+
+def test_save_backup_as_passes_selected_path_to_backup_to(monkeypatch):
+    """用户选定路径（含 .zip）原样传给 backup_to，返回该路径。"""
+    win = _FakeWindow()
+    win.pick_result = "D:/用户/我的备份/backup.zip"
+    api, calls = _save_backup_api(monkeypatch, win)
+    r = api.save_backup_as("custom-name.zip")
+    assert r["ok"] is True
+    assert calls == ["D:/用户/我的备份/backup.zip"]
+    assert r["path"] == "D:/用户/我的备份/backup.zip"
+    assert win.dialog_calls[0]["save_filename"] == "custom-name.zip"
+
+
+def test_save_backup_as_appends_zip_extension(monkeypatch):
+    """选定路径无扩展名时自动补 .zip 再传给 backup_to。"""
+    win = _FakeWindow()
+    win.pick_result = "D:/backup-folder/mybackup"
+    api, calls = _save_backup_api(monkeypatch, win)
+    r = api.save_backup_as()
+    assert r["ok"] is True
+    assert calls == ["D:/backup-folder/mybackup.zip"]
+
+
+def test_save_backup_as_cancel_no_backup(monkeypatch):
+    """用户取消对话框：返回 cancelled，不调用 backup_to、不产生备份。"""
+    win = _FakeWindow()
+    win.pick_result = None  # pywebview SAVE_DIALOG 取消返回 None
+    api, calls = _save_backup_api(monkeypatch, win)
+    r = api.save_backup_as()
+    assert r == {"ok": False, "cancelled": True, "error": "已取消保存"}
+    assert calls == []
+
+
+def test_save_backup_as_cancel_empty_list_no_backup(monkeypatch):
+    """个别平台取消返回空序列：同样视为取消，不写备份。"""
+    win = _FakeWindow()
+    win.pick_result = []
+    api, calls = _save_backup_api(monkeypatch, win)
+    r = api.save_backup_as()
+    assert r["ok"] is False and r["cancelled"] is True
+    assert calls == []
+
+
+def test_save_backup_as_dialog_error_returns_error(monkeypatch):
+    """对话框异常：返回 ok:False + 错误文案，不写备份。"""
+    win = _FakeWindow()
+    win.pick_result = None
+    win.dialog_error = RuntimeError("dialog boom")
+    api, calls = _save_backup_api(monkeypatch, win)
+    r = api.save_backup_as()
+    assert r["ok"] is False
+    assert r["error"] == "dialog boom"
+    assert calls == []
+
+
+def test_save_backup_as_backup_error_returns_error(monkeypatch):
+    """文件写入异常：返回 ok:False + 错误文案（不泄露备份内容）。"""
+    import backup as backup_mod
+
+    win = _FakeWindow()
+    win.pick_result = "C:/tmp/backup.zip"
+    api, _ = _save_backup_api(monkeypatch, win)
+
+    def _boom(target=None):
+        raise OSError("磁盘空间不足")
+
+    monkeypatch.setattr(backup_mod, "backup_to", _boom)
+    r = api.save_backup_as()
+    assert r["ok"] is False
+    assert r["error"] == "磁盘空间不足"
+
+
+def test_save_backup_as_no_window_returns_error(monkeypatch):
+    """无 WebView 窗口（--server/--mcp 模式）：返回清晰错误，不写备份。"""
+    import backup as backup_mod
+
+    monkeypatch.setattr(dashboard, "_window", lambda: None)
+    calls = []
+    monkeypatch.setattr(backup_mod, "backup_to", lambda target=None: calls.append(target) or target)
+    api = dashboard._WindowApi()
+    r = api.save_backup_as()
+    assert r["ok"] is False
+    assert "桌面版" in r["error"]
+    assert calls == []
+
+
+# ── 打包版单实例激活（/api/activate + _activate_window + _try_activate_existing）──
+def _fake_socket(connect_ok: bool, timeouts: list | None = None):
+    """mock socket.socket：connect_ok=True 连接成功，否则抛 OSError；timeouts 记录 settimeout 值。"""
+
+    class _FakeSock:
+        def __init__(self, *a, **k):
+            self.addr = None
+
+        def settimeout(self, t):
+            if timeouts is not None:
+                timeouts.append(t)
+
+        def connect(self, addr):
+            self.addr = addr
+            if not connect_ok:
+                raise OSError("refused")
+
+        def close(self):
+            pass
+
+    return _FakeSock
+
+
+def test_api_activate_returns_ok(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    monkeypatch.setattr(dashboard, "_activate_window", lambda: True)
+    r = client.post("/api/activate")
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "activated": True}
+
+
+def test_api_activate_no_window(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    monkeypatch.setattr(dashboard, "_activate_window", lambda: False)
+    r = client.post("/api/activate")
+    assert r.json() == {"ok": True, "activated": False}
+
+
+def test_api_activate_requires_token(client, monkeypatch):
+    """开启面板鉴权时 /api/activate 同样需要有效令牌。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": "sekret"})
+    r = client.post("/api/activate")
+    assert r.status_code == 401
+    r2 = client.post("/api/activate", headers={"X-Auth-Token": "sekret"})
+    assert r2.status_code == 200
+
+
+def test_activate_window_with_hwnd(monkeypatch):
+    """有窗口句柄：经 GUI 线程执行，恢复显示 + 模拟 Alt 绕过前台锁定 + 前置聚焦。"""
+    monkeypatch.setattr(dashboard, "_HWND", 12345)
+    monkeypatch.setattr(dashboard, "_invoke_gui", lambda f: f())
+
+    class _FakeUser32:
+        def __init__(self):
+            self.calls = []
+
+        def ShowWindow(self, hwnd, cmd):
+            self.calls.append(("show", hwnd, cmd))
+            return 1
+
+        def keybd_event(self, *a):
+            self.calls.append(("keybd", a))
+            return None
+
+        def SetForegroundWindow(self, hwnd):
+            self.calls.append(("fg", hwnd))
+            return 1
+
+        def BringWindowToTop(self, hwnd):
+            self.calls.append(("top", hwnd))
+            return 1
+
+    fake = _FakeUser32()
+    monkeypatch.setattr(dashboard.ctypes, "windll", type("W", (), {"user32": fake})())
+    assert dashboard._activate_window() is True
+    assert fake.calls == [
+        ("show", 12345, 9),          # SW_RESTORE（恢复最小化）
+        ("show", 12345, 5),          # SW_SHOW（显示隐藏窗口，如「关闭到托盘」）
+        ("keybd", (0x12, 0, 0, 0)),  # VK_MENU down（绕过前台锁定）
+        ("keybd", (0x12, 0, 2, 0)),  # VK_MENU up
+        ("fg", 12345),               # SetForegroundWindow
+        ("top", 12345),              # BringWindowToTop
+    ]
+
+
+def test_activate_window_no_hwnd(monkeypatch):
+    """无窗口（server/mcp/proxy 模式 _HWND=0）：返回 False，不触发任何窗口操作。"""
+    monkeypatch.setattr(dashboard, "_HWND", 0)
+    monkeypatch.setattr(
+        dashboard, "_invoke_gui", lambda f: (_ for _ in ()).throw(AssertionError("不应调用"))
+    )
+    assert dashboard._activate_window() is False
+
+
+def test_tray_show_uses_force_foreground(monkeypatch):
+    """托盘恢复复用 _force_foreground（与单实例激活同一聚焦逻辑）。"""
+    monkeypatch.setattr(dashboard, "_HWND", 777)
+    calls = []
+    monkeypatch.setattr(dashboard, "_force_foreground", lambda h: calls.append(h) or True)
+    dashboard._tray_show()
+    assert calls == [777]
+
+
+def test_try_activate_existing_not_frozen(monkeypatch):
+    """非打包版（开发环境）：恒不触发单实例检测，也不探测端口。"""
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": ""})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    assert dashboard._try_activate_existing() is False
+    assert dashboard._STARTUP_PORT_BUSY is None
+
+
+def test_try_activate_existing_port_free(monkeypatch):
+    """端口未被占用：无已有实例，返回 False 正常启动，并记录探测结果。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": ""})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    monkeypatch.setattr("socket.socket", _fake_socket(connect_ok=False))
+    assert dashboard._try_activate_existing() is False
+    assert dashboard._STARTUP_PORT_BUSY is False
+
+
+def test_try_activate_existing_activates(monkeypatch):
+    """已有实例且窗口已激活：返回 True（调用方将退出本进程）。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": ""})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    monkeypatch.setattr("socket.socket", _fake_socket(connect_ok=True))
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": true, "activated": true}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _Resp())
+    assert dashboard._try_activate_existing() is True
+
+
+def test_try_activate_existing_not_tavily(monkeypatch):
+    """端口被其他程序占用（响应非 Tavily 激活成功）：返回 False，按原逻辑继续。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": ""})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    monkeypatch.setattr("socket.socket", _fake_socket(connect_ok=True))
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": false}'
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda req, timeout=0: _Resp())
+    assert dashboard._try_activate_existing() is False
+
+
+def test_try_activate_existing_error(monkeypatch):
+    """请求异常（连接失败等）：不激活，按原逻辑继续。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": ""})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    monkeypatch.setattr("socket.socket", _fake_socket(connect_ok=True))
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError("refused"))
+    )
+    assert dashboard._try_activate_existing() is False
+
+
+def test_try_activate_existing_sends_token(monkeypatch):
+    """已开启面板鉴权：激活请求必须携带 X-Auth-Token 且指向正确端口。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": "sekret"})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    monkeypatch.setattr("socket.socket", _fake_socket(connect_ok=True))
+    seen = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"ok": true, "activated": true}'
+
+    def _fake_urlopen(req, timeout=0):
+        seen["url"] = req.full_url
+        # add_header 会把键 capitalize()（X-Auth-Token → X-auth-token），
+        # 大小写不敏感遍历以贴合实际发送行为
+        seen["token"] = next(
+            (v for k, v in dict(req.headers).items() if k.lower() == "x-auth-token"),
+            None,
+        )
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+    assert dashboard._try_activate_existing() is True
+    assert seen["url"] == "http://127.0.0.1:8000/api/activate"
+    assert seen["token"] == "sekret"
+
+
+def test_try_activate_existing_probe_short_timeout(monkeypatch):
+    """端口探测用 0.25s 短超时：is_port_open 的 1s 超时在端口关闭时会让启动白等 1s。"""
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"port": 8000, "auth_token": ""})
+    monkeypatch.setattr(dashboard, "_STARTUP_PORT_BUSY", None)
+    timeouts = []
+    monkeypatch.setattr("socket.socket", _fake_socket(connect_ok=False, timeouts=timeouts))
+    assert dashboard._try_activate_existing() is False
+    assert timeouts == [0.25]
+    assert dashboard._STARTUP_PORT_BUSY is False

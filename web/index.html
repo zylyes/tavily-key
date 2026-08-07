@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark" data-theme-mode="system">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark light" />
+  <link rel="icon" href="/favicon.ico" />
+  <title>Tavily Key Pool</title>
+  <style>
+    /* 首帧防闪烁：在 CSS/JS 加载前给 html 一个主题底色 */
+    html[data-theme="dark"] { background: #070b14; }
+    html[data-theme="light"] { background: #eef1f8; }
+  </style>
+  <script>
+    // ── 主题引导（渲染前执行，防闪烁）──────────────────────────────
+    // 协议（与旧版 dashboard.html 一致，必须原样兼容）：
+    //   localStorage.tavilyTheme ∈ {system, light, dark}，默认 system
+    //   <html data-theme="解析结果(light|dark)" data-theme-mode="原始值">
+    //   mode=system 时监听 prefers-color-scheme 变化联动。
+    (function () {
+      var KEY = 'tavilyTheme'
+      var VALID = ['system', 'light', 'dark']
+      function readMode() {
+        try {
+          var m = localStorage.getItem(KEY)
+          if (VALID.indexOf(m) !== -1) return m
+        } catch (e) {}
+        return 'system'
+      }
+      function resolve(mode) {
+        if (mode !== 'system') return mode
+        try {
+          return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        } catch (e) { return 'dark' }
+      }
+      var root = document.documentElement
+      var mode = readMode()
+      root.setAttribute('data-theme', resolve(mode))
+      root.setAttribute('data-theme-mode', mode)
+      try {
+        window.matchMedia('(prefers-color-scheme: light)').addEventListener('change', function () {
+          if (readMode() === 'system') root.setAttribute('data-theme', resolve('system'))
+        })
+      } catch (e) {}
+    })()
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

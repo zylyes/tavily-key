@@ -207,7 +207,7 @@ def cmd_backup(args):
     dest = backup_to(args.path)
     print(f"备份完成: {dest}")
     print("备份内容：config.json、tavily_keys.db(+wal)、research_keys.json、")
-    print("research_tasks_cache.json、.tavily-secret.key（恢复时解密 Key 必需）。")
+    print("research_tasks_cache.json，及存在时的 .tavily-secret.key（Fernet 加密密钥）。")
 
 
 def cmd_restore(args):

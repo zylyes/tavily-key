@@ -38,3 +38,7 @@ Thumbs.db
 .vscode/
 docs/wiki/wiki-manifest.json
 docs/memory/
+
+# ---- 前端（web/，npm 依赖与 vite 构建产物）----
+web/node_modules/
+web/dist/

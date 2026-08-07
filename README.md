@@ -26,11 +26,20 @@ pip install -r requirements.txt
 
 依赖：tavily-python、mcp、fastapi、uvicorn。
 
+> **前端构建（v0.8.0 起必需）**：Dashboard 前端已重构为 Vue 3 工程（`web/`），**源码运行需先构建** `web/dist`（git 克隆不含构建产物）：
+>
+> ```bash
+> cd web && npm ci && npm run build
+> ```
+>
+> 需要 Node.js LTS；`web/dist` 缺失时 dashboard 启动会明确报错并提示构建命令。Windows 打包（`scripts\build_win.bat`）会自动执行前端构建。
+
 ## 目录结构
 
 ```
 tavily/
-├── app/               # Python 源码 + 前端资源（cli / dashboard / mcp / 核心逻辑）
+├── app/               # Python 源码（cli / dashboard / mcp / 核心逻辑）
+├── web/               # 前端工程（Vue 3 + Vite + TS，构建产物 web/dist 由 dashboard 托管）
 ├── assets/            # 图标等静态资源
 ├── scripts/           # 构建与启动脚本（build_win.bat / run_*.sh / run_dashboard.bat）
 ├── deploy/            # 两套部署包（linux-server / windows-local）
@@ -65,7 +74,7 @@ Web UI 导入：启动 dashboard 后，点击 "Add API Keys" 粘贴 key。
 
 ## 启动 Dashboard（Web 界面）
 
-启动方式自动读取 `data/config.json`（首次启动自动生成默认配置）。
+启动方式自动读取 `data/config.json`（首次启动自动生成默认配置）。开发模式首次运行前需先构建前端（见[安装](#安装)章节）；前端热开发可用 `cd web && npm run dev`（5173 端口，`/api` 自动代理到本服务）。
 
 ```bash
 # Linux / macOS
@@ -147,6 +156,7 @@ Web 控制台右上角「**设置**」标签页可配置：
 | 监听地址 Host | `127.0.0.1` 仅本机 / `0.0.0.0` 所有网卡 |
 | 端口 | 服务监听端口 |
 | 访问令牌 | 设置后所有 `/api/*` 请求需携带 `X-Auth-Token` 头 |
+| 界面主题 | `theme_mode`：`system`（跟随 Windows 主题）/ `light` / `dark`，WebView 开屏背景同步 |
 
 「**MCP 服务**」标签页额外可配置：
 
@@ -177,6 +187,7 @@ Web 控制台右上角「**设置**」标签页可配置：
   "host": "0.0.0.0",
   "port": 8000,
   "auth_token": "",
+  "theme_mode": "system",
   "mcp_auto_start": false,
   "mcp_transport": "sse",
   "mcp_host": "0.0.0.0",
@@ -239,7 +250,7 @@ SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 
 `data/` 目录一键备份/恢复为 zip：
 
-- **备份内容**：`config.json`、`tavily_keys.db`(+wal)、`research_keys.json`、`research_tasks_cache.json`、`.tavily-secret.key`（缺它恢复后无法解密 Key；不含日志）
+- **备份内容**：`config.json`、`tavily_keys.db`(+wal)、`research_keys.json`、`research_tasks_cache.json`、`.tavily-secret.key`（存在时才备份——Windows DPAPI / 无加密后端下不生成，属正常；不含日志）
 - **CLI**：`python app/cli.py backup [路径]`（默认系统临时目录）、`python app/cli.py restore <备份.zip>`
 - **面板**：「设置」页「数据备份与恢复」卡片——下载备份 / 上传恢复（恢复自动停止 MCP 与搜索代理子进程并释放数据库连接）
 
@@ -255,6 +266,7 @@ SQLite 文件 `data/tavily_keys.db`，自动创建。含两张表：
 | 文件 | 用途 |
 | --- | --- |
 | `data/config.json` | 部署 + MCP 设置（mode/domain/host/port/auth_token/mcp_*），首次启动自动生成 |
+| `web/` | 前端工程（Vue 3 + Vite，`npm run build` 产出 `web/dist` 供 dashboard 托管） |
 | `app/settings.py` | 配置读写模块（含局域网地址推导） |
 | `app/notify.py` | 异常通知（Webhook / Windows 托盘气泡，去重节流） |
 | `app/cache.py` | 通用 TTL 缓存基础设施（KeyPool/Dashboard 接口缓存，跨进程失效） |

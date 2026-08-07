@@ -5,8 +5,9 @@
 ## 部署前准备
 
 1. 一台 Linux 服务器（Ubuntu / Debian / CentOS 均可），安装 `python3`、`python3-venv`、`pip`。
-2. 一个已备案/可访问的域名，将其 **A 记录**解析到服务器公网 IP。
-3. （推荐）安装 Nginx：`sudo apt install nginx`。
+2. **Node.js LTS**（v0.8.0 起 Dashboard 前端为 Vue 3 工程，需构建 `web/dist`；`install.sh` 会自动构建，手动部署需自行构建）。
+3. 一个已备案/可访问的域名，将其 **A 记录**解析到服务器公网 IP。
+4. （推荐）安装 Nginx：`sudo apt install nginx`。
 
 ## 一键部署
 
@@ -21,6 +22,7 @@ sudo ./install.sh --domain api.example.com --port 8000 --token 你的访问令�
 | --- | --- |
 | 复制项目 | 复制到 `/opt/tavily`（可用 `--dir` 修改） |
 | 安装依赖 | 创建 `.venv` 并安装 `requirements.txt` |
+| 构建前端 | `npm ci && npm run build` 产出 `web/dist`（Dashboard 必需，v0.8.0 起） |
 | 生成配置 | 生成 `data/config.json`（mode=server，绑定域名，监听 0.0.0.0） |
 | 安装服务 | 注册并启动 `tavily-dashboard` systemd 服务，注册 `tavily-mcp` |
 | Nginx | 生成 `/etc/nginx/conf.d/tavily.conf` 反向代理绑定域名 |
@@ -32,17 +34,23 @@ sudo ./install.sh --domain api.example.com --port 8000 --token 你的访问令�
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# 2. 生成 server 模式配置
+# 2. 构建前端（v0.8.0 起 Dashboard 必需，web/dist 缺失则服务无法启动）
+cd web
+npm ci
+npm run build
+cd ..
+
+# 3. 生成 server 模式配置
 mkdir -p data
 cp deploy/linux-server/config.server.json data/config.json
 # 编辑 data/config.json: 填写 domain、auth_token，host 保持 0.0.0.0
 
-# 3. 安装 systemd 服务
+# 4. 安装 systemd 服务
 sudo cp deploy/linux-server/tavily-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now tavily-dashboard
 
-# 4. 配置 Nginx 反向代理（绑定域名）
+# 5. 配置 Nginx 反向代理（绑定域名）
 sudo cp deploy/linux-server/nginx.conf.example /etc/nginx/conf.d/tavily.conf
 # 编辑: server_name 换成你的域名，proxy_pass 端口与 data/config.json 一致
 sudo nginx -t && sudo systemctl reload nginx

@@ -1,0 +1,116 @@
+/* ═══════════════════════════════════════════════════════════════
+   motion.css —— 过渡/动画类、入场编排（stagger）、降级策略
+   ═══════════════════════════════════════════════════════════════ */
+
+/* ── 关键帧 ─────────────────────────────────────────────── */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes stagger-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: translateY(14px) scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(24px) scale(.96); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes shimmer {
+  from { background-position: -200% 0; }
+  to { background-position: 200% 0; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .45; transform: scale(.8); }
+}
+
+/* ── 视图切换过渡（App.vue <Transition name="page">） ────── */
+.page-enter-active {
+  transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+.page-leave-active {
+  transition: opacity var(--dur-1) ease-in;
+}
+.page-enter-from { opacity: 0; transform: translateY(10px); }
+.page-leave-to { opacity: 0; }
+
+/* ── 通用淡入淡出（<Transition name="fade">） ────────────── */
+.fade-enter-active, .fade-leave-active { transition: opacity var(--dur-2) ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+
+/* ── 模态过渡（GModal，<Transition name="modal">） ───────── */
+.modal-enter-active { transition: opacity var(--dur-2) ease-out; }
+.modal-leave-active { transition: opacity var(--dur-1) ease-in; }
+.modal-enter-from, .modal-leave-to { opacity: 0; }
+.modal-enter-active .gmodal-dialog { animation: pop-in var(--dur-3) var(--ease-spring); }
+.modal-leave-active .gmodal-dialog {
+  transition: opacity var(--dur-1) ease-in, transform var(--dur-1) ease-in;
+  opacity: 0;
+  transform: translateY(8px) scale(.98);
+}
+
+/* ── Toast 过渡（GToast，<TransitionGroup name="toast">） ── */
+.toast-enter-active { animation: toast-in var(--dur-3) var(--ease-spring); }
+.toast-leave-active { transition: opacity var(--dur-2) ease-in, transform var(--dur-2) ease-in; }
+.toast-enter-from { opacity: 0; }
+.toast-leave-to { opacity: 0; transform: translateX(16px) scale(.97); }
+.toast-move { transition: transform var(--dur-2) var(--ease-out); }
+
+/* ── 下拉弹出过渡（GSelect，<Transition name="drop">） ───── */
+.drop-enter-active { transition: opacity var(--dur-1) var(--ease-out), transform var(--dur-1) var(--ease-out); }
+.drop-leave-active { transition: opacity 100ms ease-in, transform 100ms ease-in; }
+.drop-enter-from, .drop-leave-to { opacity: 0; transform: translateY(-4px) scale(.98); }
+
+/* ── 入场编排：stagger ────────────────────────────────────
+   用法 1（推荐）：父容器加 class="stagger"，直接子元素依次入场。
+   用法 2（自定义序号）：元素加 class="stagger-item" 并设 style="--i: 3"。
+   注意：视图切换过渡也会给 .view 根节点做位移，stagger 作用在
+   视图内的卡片/行上即可，不要同时加在 .view 根节点。 */
+.stagger > * { animation: stagger-in var(--dur-3) var(--ease-out) both; }
+.stagger > *:nth-child(1) { animation-delay: 20ms; }
+.stagger > *:nth-child(2) { animation-delay: 60ms; }
+.stagger > *:nth-child(3) { animation-delay: 100ms; }
+.stagger > *:nth-child(4) { animation-delay: 140ms; }
+.stagger > *:nth-child(5) { animation-delay: 180ms; }
+.stagger > *:nth-child(6) { animation-delay: 220ms; }
+.stagger > *:nth-child(7) { animation-delay: 260ms; }
+.stagger > *:nth-child(8) { animation-delay: 300ms; }
+.stagger > *:nth-child(9) { animation-delay: 340ms; }
+.stagger > *:nth-child(10) { animation-delay: 380ms; }
+.stagger > *:nth-child(11) { animation-delay: 420ms; }
+.stagger > *:nth-child(n+12) { animation-delay: 460ms; }
+
+.stagger-item {
+  animation: stagger-in var(--dur-3) var(--ease-out) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+
+/* ── 旋转加载（GButton busy / 加载图标通用） ─────────────── */
+.spin { animation: spin .8s linear infinite; }
+
+/* ── 状态点呼吸（运行中指示） ────────────────────────────── */
+.pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+
+/* ── 全局降级：减少动态偏好 ──────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .orb { animation: none !important; }
+}
