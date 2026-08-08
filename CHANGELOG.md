@@ -5,6 +5,19 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.14.0] - 2026-08-09
+
+### Added
+
+- **通知图标分级**：托盘气泡按异常类型映射图标——exhausted / high_error_rate / pool_empty → 错误图标，near_exhausted / suspected_leak → 警告图标，stale / slow → 信息图标；看门狗与更新通知分别使用 NIIF_WARNING / NIIF_INFO。
+- **wiki 文档导航重排**：按 README「Wiki 导航」顺序展示分类与文档（README 缺失时回退默认排序）。
+
+### Fixed
+
+- **通知去重失败回滚**：推送失败时回滚去重标记，托盘异常降级为 webhook 推送并记日志。
+- **托盘气泡健壮性**：`_fit_utf16` 按 UTF-16 code units 截断（emoji 等增补平面字符不再导致 ctypes 赋值超长静默失败）、icon 非法值回退 NIIF_INFO、气泡推送失败记日志。
+- **文档视图标题去重**：md 内容自带一级标题时不再重复渲染外部标题。
+
 ## [0.13.4] - 2026-08-08
 
 ### Security
@@ -614,6 +627,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.14.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.14.0
 [0.13.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.4
 [0.13.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.3
 [0.13.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.2

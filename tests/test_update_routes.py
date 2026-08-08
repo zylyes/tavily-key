@@ -99,9 +99,9 @@ def test_update_announcement_once(client, monkeypatch, tmp_path):
 def test_update_notice_pending_consume(client, monkeypatch):
     """系统通知点击标记：非空一次性返回，随后为空。"""
     monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
-    updater.mark_open_notice("0.13.4")
+    updater.mark_open_notice("0.14.0")
     r1 = client.get("/api/update/notice-pending")
-    assert r1.json()["version"] == "0.13.4"
+    assert r1.json()["version"] == "0.14.0"
     r2 = client.get("/api/update/notice-pending")
     assert r2.json()["version"] == ""
 
