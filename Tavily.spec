@@ -14,6 +14,9 @@ if not os.path.isfile('web\\dist\\index.html'):
     print('[Tavily.spec] Build aborted: the web frontend is REQUIRED (no legacy fallback).')
     raise SystemExit(1)
 datas.append(('web\\dist', 'web/dist'))
+# 内置 wiki 文档（docs/wiki）：打包后作为默认文档内嵌进 _MEIPASS；
+# 运行时若 exe 旁存在 docs/wiki 则优先使用（用户可编辑覆盖，见 wiki_docs._wiki_root）。
+datas.append(('docs\\wiki', 'docs/wiki'))
 binaries = []
 hiddenimports = ['mcp_server', 'tavily_proxy', 'backup', 'updater', 'wiki_docs',
                  'routes.admin', 'routes.keys', 'routes.logs', 'routes.research',

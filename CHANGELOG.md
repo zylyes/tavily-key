@@ -5,6 +5,12 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.13.1] - 2026-08-08
+
+### Added
+
+- **打包版内置 wiki 文档**：「文档」视图在打包版（Tavily.exe）中不再空白——`docs/wiki` 随 Tavily.spec 打包进应用（`_MEIPASS`）；运行时优先使用 exe 旁可编辑的 `docs/wiki`（用户可自定义/覆盖、升级不丢失），不存在时回退内置默认文档（`wiki_docs._wiki_root()` 动态解析开发/打包两种形态）。
+
 ## [0.13.0] - 2026-08-08
 
 ### Changed
@@ -557,6 +563,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.13.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.1
 [0.13.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.0
 [0.12.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.4
 [0.12.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.3

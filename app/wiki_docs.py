@@ -8,9 +8,23 @@
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
-_WIKI_ROOT = Path(__file__).resolve().parent.parent / "docs" / "wiki"
+
+def _wiki_root() -> Path:
+    """wiki 文档根目录。
+
+    - 开发时：项目根下的 docs/wiki；
+    - 打包后：优先用 exe 旁可编辑的 docs/wiki（用户自定义/覆盖、升级不丢），
+      不存在则回退到内置在 _MEIPASS 的默认文档（Tavily.spec 已打包 docs/wiki）。
+    """
+    if getattr(sys, "frozen", False):
+        external = Path(sys.executable).resolve().parent / "docs" / "wiki"
+        if external.is_dir():
+            return external
+        return Path(sys._MEIPASS) / "docs" / "wiki"
+    return Path(__file__).resolve().parent.parent / "docs" / "wiki"
 
 # 目录名 → 面板展示名（未列出的目录原样展示）
 _CATEGORY_LABELS = {
@@ -33,10 +47,11 @@ def _title_from_md(text: str, fallback: str) -> str:
 
 
 def _read_safe(path: str) -> str | None:
-    """读取 docs/wiki 下的 .md 文档；路径穿越 / 不存在返回 None。"""
+    """读取 wiki 下的 .md 文档；路径穿越 / 不存在返回 None。"""
+    root = _wiki_root()
     try:
-        p = (_WIKI_ROOT / path).resolve()
-        if not str(p).startswith(str(_WIKI_ROOT.resolve())):
+        p = (root / path).resolve()
+        if not str(p).startswith(str(root.resolve())):
             return None
         if p.suffix.lower() != ".md" or not p.is_file():
             return None
@@ -46,16 +61,17 @@ def _read_safe(path: str) -> str | None:
 
 
 def docs_tree() -> list[dict]:
-    """扫描 docs/wiki 返回目录树：[{category, docs: [{name, path, title}]}]。"""
-    if not _WIKI_ROOT.is_dir():
+    """扫描 wiki 返回目录树：[{category, docs: [{name, path, title}]}]。"""
+    root = _wiki_root()
+    if not root.is_dir():
         return []
     tree: list[dict] = []
-    for d in sorted(_WIKI_ROOT.iterdir()):
+    for d in sorted(root.iterdir()):
         if not d.is_dir():
             continue
         docs: list[dict] = []
         for f in sorted(d.glob("*.md")):
-            rel = f.relative_to(_WIKI_ROOT).as_posix()
+            rel = f.relative_to(root).as_posix()
             content = _read_safe(rel) or ""
             docs.append({"name": f.stem, "path": rel, "title": _title_from_md(content, f.stem)})
         if docs:
