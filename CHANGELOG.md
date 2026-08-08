@@ -5,6 +5,20 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.12.1] - 2026-08-08
+
+### Added
+
+- **MdView 支持 Markdown 表格**：面板「文档」视图与更新公告弹窗中的表格
+  （`| a | b |` + `|---|---|` 分隔行）正确渲染为表格——表头加粗、隔行底色、
+  行悬停高亮、单元格内支持行内格式（代码/加粗/链接），无数据行时仍渲染表头。
+
+### Fixed
+
+- **文档视图表格未渲染**：`MdView` 缺少 GFM 表格解析，wiki 文档中的命令表
+  （如 CLI 使用）此前显示为普通段落；新增 `tryParseTable` / `splitTableRow` /
+  `isTableSeparator` 解析器（首行表头 + 次行分隔符触发表格，兼容首尾无 `|` 的写法）。
+
 ## [0.12.0] - 2026-08-08
 
 ### Changed

@@ -3,7 +3,8 @@ import { computed } from 'vue'
 
 /* MdView —— 轻量 Markdown 渲染（零依赖，先转义 HTML 再解析，防 XSS）
    支持语法：# 标题 / 无序·有序列表 / **加粗** / *斜体* / `行内代码` /
-             ``` 代码块 / > 引用 / --- 分割线 / [链接](url) / 段落
+             ``` 代码块 / > 引用 / --- 分割线 / [链接](url) / 表格 /
+             段落
    用法：
      <MdView :text="markdown" /> */
 const props = withDefaults(defineProps<{ text?: string }>(), { text: '' })
@@ -33,6 +34,46 @@ function inline(s: string): string {
   return t.replace(/\u0000C(\d+)\u0000/g, (_m, i) => codes[Number(i)])
 }
 
+/** 拆分行内表格单元格（容忍首尾无 | 的写法；保留空单元格） */
+function splitTableRow(line: string): string[] {
+  let s = line.trim()
+  if (s.startsWith('|')) s = s.slice(1)
+  if (s.endsWith('|')) s = s.slice(0, -1)
+  return s.split('|').map((c) => c.trim())
+}
+
+/** 是否为表格分隔符行：| --- | :--: | 等（单元格为 -/: 组合） */
+function isTableSeparator(line: string): boolean {
+  if (!line.includes('|')) return false
+  const cells = splitTableRow(line)
+  return cells.length > 0 && cells.every((c) => /^:?-{1,}:?$/.test(c.trim()))
+}
+
+/** 尝试从 start 解析表格；成功返回 {html, consumed}（消费的行数），否则 null。 */
+function tryParseTable(lines: string[], start: number): { html: string; consumed: number } | null {
+  const first = lines[start].trim()
+  if (!first.includes('|')) return null
+  if (start + 1 >= lines.length) return null
+  const second = lines[start + 1].trim()
+  if (!isTableSeparator(second)) return null
+
+  const headers = splitTableRow(first)
+  let i = start + 2
+  const body: string[][] = []
+  while (i < lines.length) {
+    const t = lines[i].trim()
+    if (!t.startsWith('|')) break
+    body.push(splitTableRow(t))
+    i++
+  }
+  const rows = body.length ? body : [headers.map(() => '')] // 无数据行时仍渲染表头
+  const thead = `<thead><tr>${headers.map((h) => `<th>${inline(h)}</th>`).join('')}</tr></thead>`
+  const tbody = `<tbody>${rows
+    .map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`)
+    .join('')}</tbody>`
+  return { html: `<table>${thead}${tbody}</table>`, consumed: i - start }
+}
+
 function render(src: string): string {
   const lines = src.replace(/\r\n?/g, '\n').split('\n')
   const out: string[] = []
@@ -54,7 +95,9 @@ function render(src: string): string {
     }
   }
 
-  for (const raw of lines) {
+  let i = 0
+  while (i < lines.length) {
+    const raw = lines[i]
     const line = raw.trimEnd()
 
     // 围栏代码块 ```lang
@@ -68,10 +111,12 @@ function render(src: string): string {
         closeList()
         inCode = true
       }
+      i++
       continue
     }
     if (inCode) {
       codeBuf.push(line)
+      i++
       continue
     }
 
@@ -80,7 +125,20 @@ function render(src: string): string {
     if (!t) {
       flushPara()
       closeList()
+      i++
       continue
+    }
+
+    // 表格：首行含 | 且次行为分隔符（| --- |）时按表格解析
+    if (t.includes('|')) {
+      const table = tryParseTable(lines, i)
+      if (table) {
+        flushPara()
+        closeList()
+        out.push(table.html)
+        i += table.consumed
+        continue
+      }
     }
 
     // 标题（# ~ ####）
@@ -90,6 +148,7 @@ function render(src: string): string {
       closeList()
       const lv = h[1].length
       out.push(`<h${lv}>${inline(h[2])}</h${lv}>`)
+      i++
       continue
     }
 
@@ -98,6 +157,7 @@ function render(src: string): string {
       flushPara()
       closeList()
       out.push('<hr>')
+      i++
       continue
     }
 
@@ -106,6 +166,7 @@ function render(src: string): string {
       flushPara()
       closeList()
       out.push(`<blockquote>${inline(t.replace(/^>\s?/, ''))}</blockquote>`)
+      i++
       continue
     }
 
@@ -119,6 +180,7 @@ function render(src: string): string {
         listType = 'ul'
       }
       out.push(`<li>${inline(ul[1])}</li>`)
+      i++
       continue
     }
 
@@ -132,12 +194,14 @@ function render(src: string): string {
         listType = 'ol'
       }
       out.push(`<li>${inline(ol[1])}</li>`)
+      i++
       continue
     }
 
     // 普通段落（连续行以 <br> 合并）
     closeList()
     para.push(t)
+    i++
   }
 
   // 收尾（未闭合的代码块 / 段落 / 列表）
@@ -224,6 +288,28 @@ const html = computed(() => render(props.text))
 }
 .md-view hr { margin: 12px 0; border: none; border-top: 1px solid var(--glass-border-strong); }
 .md-view a { color: var(--accent-text); text-decoration: none; }
+/* 表格：玻璃面板风格（wiki 命令表等） */
+.md-view table {
+  margin: 8px 0;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.md-view th, .md-view td {
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+  border: 1px solid var(--glass-border);
+}
+.md-view thead th {
+  background: var(--glass-bg-2);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.md-view tbody tr:nth-child(even) { background: var(--neutral-soft); }
+.md-view tbody tr:hover { background: var(--accent-softer); }
+.md-view td code { font-size: .92em; white-space: nowrap; }
 .md-view a:hover { text-decoration: underline; }
 .md-view strong { font-weight: 650; }
 .md-view em { font-style: italic; }
