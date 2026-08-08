@@ -5,6 +5,12 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.14.1] - 2026-08-09
+
+### Fixed
+
+- **zip 目录条目误判修复**：`_safe_zip_target` 未去除目录条目尾部斜杠（如 `internal/clr/loader/`），空路径段被误判非法，导致含显式目录条目的真实打包产物（PyInstaller onedir zip）整次更新下载失败——现先归一化去除尾部斜杠再校验；新增回归测试（目录条目接受、`/` `a//b/` `../` 等仍拒绝、含目录条目 zip 完整解压）。
+
 ## [0.14.0] - 2026-08-09
 
 ### Added
@@ -627,6 +633,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.14.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.14.1
 [0.14.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.14.0
 [0.13.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.4
 [0.13.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.3

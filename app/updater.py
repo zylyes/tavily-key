@@ -534,8 +534,10 @@ def _safe_zip_target(extracted: Path, name: str) -> Path:
 
     Windows 下 `\\` 与 `/` 同为分隔符，统一按 `/` 归一化；条目含 `..`、
     绝对路径、盘符或越出 extracted 目录时抛 RuntimeError（OWASP Zip Slip 防护）。
+    zip 目录条目按规范以 `/` 结尾（如 `internal/clr/loader/`），先去除尾部
+    斜杠再拆分，否则会产生空路径段被误判为非法。
     """
-    norm = (name or "").replace("\\", "/")
+    norm = (name or "").replace("\\", "/").rstrip("/")
     parts = norm.split("/")
     if (not norm or norm.startswith("/") or ".." in parts
             or any(p in ("", ".") for p in parts)

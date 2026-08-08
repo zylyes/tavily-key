@@ -108,13 +108,13 @@ def test_is_newer_pre_release_numeric():
 # ── check_update ────────────────────────────────────────────
 def test_check_update_success(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
     r = updater.check_update(force=True)
     assert r["ok"] is True
     assert r["disabled"] is False
     assert r["update_available"] is True
     assert r["current_version"] == updater.__version__
-    assert r["latest_version"] == "0.14.1"
+    assert r["latest_version"] == "0.14.2"
     assert r["release_url"].startswith("https://github.com")
     assert r["body"] == "更新说明"
     assert r["error"] == ""
@@ -193,7 +193,7 @@ def test_handle_auto_update_notifies(monkeypatch):
     tray = _FakeTray()
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1", body="新增功能A；修复B"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2", body="新增功能A；修复B"))
     monkeypatch.setattr("notify.send_webhook",
                         lambda url, payload: sent.append((url, payload)) or True)
     calls: list[tuple] = []
@@ -212,14 +212,14 @@ def test_handle_auto_update_notifies(monkeypatch):
     assert "新增功能A" in sent[0][1]["summary"]
     assert calls == []
     # 窗口未打开时标记待展示公告（系统通知点击后前端消费）
-    assert updater.consume_open_notice() == "0.14.1"
+    assert updater.consume_open_notice() == "0.14.2"
 
 
 def test_handle_auto_update_dedupes_by_version(monkeypatch):
     """同一版本只通知一次（去重），第二次调用不再通知。"""
     tray = _FakeTray()
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
 
     updater.handle_auto_update(tray=tray, webhook="", window_open=False)
     updater.handle_auto_update(tray=tray, webhook="", window_open=False)
@@ -235,7 +235,7 @@ def test_handle_auto_update_window_open_skips_tray(monkeypatch):
     tray = _FakeTray()
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
     monkeypatch.setattr("notify.send_webhook",
                         lambda url, payload: sent.append((url, payload)) or True)
 
@@ -251,7 +251,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     """webhook 通知含更新公告摘要与版本信息。"""
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
 
     def fake_webhook(url, payload):
         sent.append((url, payload))
@@ -262,13 +262,13 @@ def test_handle_auto_update_webhook(monkeypatch):
     assert len(sent) == 1
     assert sent[0][0] == "https://example.com/hook"
     assert sent[0][1]["event"] == "update_available"
-    assert sent[0][1]["latest_version"] == "0.14.1"
+    assert sent[0][1]["latest_version"] == "0.14.2"
 
 
 def test_mark_consume_open_notice():
     """系统通知点击标记：mark 后可被 consume 一次性读取并清除。"""
-    updater.mark_open_notice("0.14.1")
-    assert updater.consume_open_notice() == "0.14.1"
+    updater.mark_open_notice("0.14.2")
+    assert updater.consume_open_notice() == "0.14.2"
     assert updater.consume_open_notice() == ""   # 已清除
     updater.mark_open_notice("")
     assert updater.consume_open_notice() == ""   # 空版本不残留
@@ -303,9 +303,9 @@ def test_asset_info_none():
 
 def test_check_update_includes_asset_and_can_auto(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
     r = updater.check_update(force=True)
-    assert r["asset_name"] == "Tavily-v0.14.1-win64.zip"
+    assert r["asset_name"] == "Tavily-v0.14.2-win64.zip"
     assert r["asset_url"].startswith("https://")
     assert r["asset_size"] == 12345
     assert r["can_auto_update"] is False  # 测试环境非打包版
@@ -707,6 +707,28 @@ def test_safe_zip_target_rejects_dot_segments():
         except RuntimeError:
             pass
 
+
+def test_safe_zip_target_allows_trailing_slash_dir_entry():
+    """目录条目（以 / 结尾，如 internal/clr/loader/）应被接受。
+
+    真实 release zip 含 PyInstaller 生成的目录条目（尾部斜杠），若误判
+    非法会导致整次更新下载失败（回归：压缩包目录路径非法）。
+    """
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp())
+    target = updater._safe_zip_target(root, "internal/clr/loader/")
+    assert target == (root / "internal/clr/loader").resolve()
+    assert target.is_relative_to(root.resolve())
+    # 尾部斜杠 + 空名 / 纯斜杠仍拒绝
+    for bad in ["", "/", "//", "a//b/", "../"]:
+        try:
+            updater._safe_zip_target(root, bad)
+            raise AssertionError(f"应拒绝 {bad!r}")
+        except RuntimeError:
+            pass
+
 def test_download_update_top_dir_metachar_rejected(monkeypatch, tmp_path):
     """顶层目录名含 cmd 元字符时拒绝（防 apply_update.bat 注入）。"""
     import zipfile
@@ -747,6 +769,38 @@ def test_download_update_picks_dir_with_exe(monkeypatch, tmp_path):
     st = updater.get_download_status()
     assert st["state"] == "done"
     assert Path(st["path"]).name == "Tavily"
+
+
+def test_download_update_accepts_zip_with_dir_entries(monkeypatch, tmp_path):
+    """含显式目录条目（如 internal/clr/loader/）的 zip 应正常解压。
+
+    回归：真实打包产物带尾部斜杠目录条目，曾被 _safe_zip_target 误判
+    「压缩包目录路径非法」导致整次更新下载失败。
+    """
+    import zipfile
+    from pathlib import Path
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily/Tavily.exe", b"fake-exe")
+            zf.writestr("Tavily/_internal/clr/loader/", b"")        # 目录条目（尾部斜杠）
+            zf.writestr("Tavily/_internal/clr/loader/coreclr.dll", b"dll")
+            zf.writestr("Tavily/_internal/docs/wiki/README.md", b"readme")
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "done"
+    exe = Path(st["path"])
+    assert exe.name == "Tavily"
+    assert (exe / "Tavily.exe").is_file()
+    assert (exe / "_internal" / "clr" / "loader").is_dir()
+    assert (exe / "_internal" / "clr" / "loader" / "coreclr.dll").is_file()
 
 
 def test_normalize_repo_rejects_illegal():
@@ -838,7 +892,7 @@ def test_handle_auto_update_dedupe_only_after_success(monkeypatch):
     """去重标记必须在推送成功之后：全渠道失败不标记，下一轮仍重试。"""
     attempts = {"tray": 0}
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
 
     class _FailingTray:
         def notify(self, title, message, icon=0):
@@ -860,7 +914,7 @@ def test_handle_auto_update_dedupe_only_after_success(monkeypatch):
     monkeypatch.setattr("notify.send_webhook", lambda url, payload: True)
     updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
                                window_open=False)
-    assert updater._notified_version == "0.14.1"
+    assert updater._notified_version == "0.14.2"
     updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
                                window_open=False)
     assert attempts["tray"] == 3                 # 标记后不再推送
@@ -971,7 +1025,7 @@ def test_handle_auto_update_respects_notify_tray(monkeypatch):
     tray = _FakeTray()
     sent: list = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg(notify_tray=False))
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.1"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.14.2"))
     monkeypatch.setattr("notify.send_webhook", lambda url, payload: sent.append(url) or True)
     updater.handle_auto_update(tray=tray, webhook="https://example.com/hook", window_open=False)
     assert tray.notifications == []
