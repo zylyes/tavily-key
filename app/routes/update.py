@@ -1,9 +1,26 @@
 """API 路由：GitHub 更新检查 / 自动更新（下载、状态、应用、公告）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 router = APIRouter()
+
+
+# 无 auth_token 时，变更类端点（download/pause/resume/cancel/apply）仅允许
+# 本机回环来源：Host 白名单只挡 DNS-rebinding/外部域名，不挡局域网设备用
+# 本机 IP 直连——这些端点能触发下载/结束进程，破坏面大，须限制来源。
+def _local_only(request: Request) -> JSONResponse | None:
+    """未设置 auth_token 时拒绝非本机来源；返回 None 表示放行。"""
+    from settings import get_settings
+
+    if (get_settings().get("auth_token") or "").strip():
+        return None  # 已设置 token：按 token 鉴权（auth_middleware）
+    client = request.client
+    host = (client.host if client else "") or ""
+    if host in ("127.0.0.1", "::1", "localhost"):
+        return None
+    return JSONResponse(status_code=403, content={"ok": False, "error": "forbidden: local only"})
 
 
 @router.get("/api/update/check")
@@ -19,8 +36,11 @@ def api_update_check(force: int = 0):
 
 
 @router.post("/api/update/download")
-def api_update_download():
+def api_update_download(request: Request):
     """后台下载最新 release 打包产物（zip），进度经 /api/update/status 轮询。"""
+    blocked = _local_only(request)
+    if blocked is not None:
+        return blocked
     from updater import start_download
 
     ok, err = start_download()
@@ -36,8 +56,11 @@ def api_update_status():
 
 
 @router.post("/api/update/pause")
-def api_update_pause():
+def api_update_pause(request: Request):
     """暂停正在进行的下载（保持连接，可继续）。"""
+    blocked = _local_only(request)
+    if blocked is not None:
+        return blocked
     from updater import pause_download
 
     ok, err = pause_download()
@@ -45,8 +68,11 @@ def api_update_pause():
 
 
 @router.post("/api/update/resume")
-def api_update_resume():
+def api_update_resume(request: Request):
     """继续已暂停的下载。"""
+    blocked = _local_only(request)
+    if blocked is not None:
+        return blocked
     from updater import resume_download
 
     ok, err = resume_download()
@@ -54,8 +80,11 @@ def api_update_resume():
 
 
 @router.post("/api/update/cancel")
-def api_update_cancel():
+def api_update_cancel(request: Request):
     """取消下载：终止后台线程并清理临时文件。"""
+    blocked = _local_only(request)
+    if blocked is not None:
+        return blocked
     from updater import cancel_download
 
     ok, err = cancel_download()
@@ -63,11 +92,14 @@ def api_update_cancel():
 
 
 @router.post("/api/update/apply")
-def api_update_apply():
+def api_update_apply(request: Request):
     """应用已下载的更新：生成重启脚本 → 结束本进程 → 部署新版并启动。
 
     调用成功后当前进程将被结束，前端提示「正在重启应用」。
     """
+    blocked = _local_only(request)
+    if blocked is not None:
+        return blocked
     from updater import apply_update
 
     return apply_update()

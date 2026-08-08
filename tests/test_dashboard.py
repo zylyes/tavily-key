@@ -3,6 +3,7 @@ import sys
 
 import dashboard
 import pytest
+import updater
 from fastapi.testclient import TestClient
 
 
@@ -939,3 +940,62 @@ def test_host_check_skipped_when_token_set(client, monkeypatch):
     r = client.get("/api/update/status", headers={"Host": "evil.example.com",
                                                   "X-Auth-Token": "sekret"})
     assert r.status_code == 200
+
+
+# ── 后台自动检查线程（_update_check_loop / _update_loop_interval）──
+def test_update_loop_interval_uses_config(monkeypatch):
+    """检查间隔按配置小时数换算（最小下限），非法/0 值安全回退。"""
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"update_check_interval_hours": 2})
+    assert dashboard._update_loop_interval() == 7200.0
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"update_check_interval_hours": 0})
+    assert dashboard._update_loop_interval() == dashboard._UPDATE_MIN_INTERVAL
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"update_check_interval_hours": "abc"})
+    assert dashboard._update_loop_interval() == 86400.0  # 非法回退默认 24h
+
+
+def test_update_check_loop_disabled_skips(monkeypatch):
+    """后台自动检查：配置关闭时循环不调用 handle_auto_update。"""
+    import threading
+    import time
+
+    calls: list = []
+    monkeypatch.setattr(dashboard, "_UPDATE_FIRST_DELAY", 0.01)
+    monkeypatch.setattr(dashboard, "_UPDATE_MIN_INTERVAL", 0.01)
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"update_check_enabled": False, "update_check_interval_hours": 24})
+    monkeypatch.setattr(updater, "handle_auto_update", lambda **k: calls.append(k))
+
+    stop = threading.Event()
+    t = threading.Thread(target=dashboard._update_check_loop, args=(stop,), daemon=True)
+    t.start()
+    time.sleep(0.06)
+    stop.set()
+    t.join(1)
+    assert calls == []
+
+
+def test_update_check_loop_calls_handle(monkeypatch):
+    """后台自动检查：开启时调用 handle_auto_update 并传递 window_open。"""
+    import threading
+    import time
+
+    calls: list = []
+    monkeypatch.setattr(dashboard, "_UPDATE_FIRST_DELAY", 0.01)
+    monkeypatch.setattr(dashboard, "_UPDATE_MIN_INTERVAL", 0.01)
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"update_check_enabled": True, "update_check_interval_hours": 24,
+                                 "notify_webhook": ""})
+    monkeypatch.setattr(dashboard, "_window_visible", lambda: False)
+    monkeypatch.setattr(updater, "handle_auto_update", lambda **k: calls.append(k))
+
+    stop = threading.Event()
+    t = threading.Thread(target=dashboard._update_check_loop, args=(stop,), daemon=True)
+    t.start()
+    time.sleep(0.06)
+    stop.set()
+    t.join(1)
+    assert len(calls) >= 1
+    assert calls[0]["window_open"] is False

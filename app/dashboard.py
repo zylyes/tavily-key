@@ -233,27 +233,36 @@ def _window_visible() -> bool:
         return False
 
 
+def _update_loop_interval() -> float:
+    """下一轮自动检查休眠秒数：按配置间隔（最小 _UPDATE_MIN_INTERVAL 防过频）。"""
+    try:
+        hours = max(int(get_settings().get("update_check_interval_hours", 24) or 0), 0)
+    except (TypeError, ValueError):
+        hours = 24
+    if hours <= 0:
+        return _UPDATE_MIN_INTERVAL   # 配置关闭自动检查：保持低频空转（循环内 continue 跳过）
+    return max(hours * 3600.0, _UPDATE_MIN_INTERVAL)
+
+
 def _update_check_loop(stop_event: threading.Event) -> None:
     """后台自动检查更新：发现新版本时通知用户。
 
     主窗口可见时仅 Webhook 推送（前端页面轮询 /api/update/check 会显示
     右下角通知，避免系统气泡打扰）；主窗口未打开（托盘后台）时推系统通知
-    （托盘气泡），点击后打开窗口并展示更新公告。
+    （托盘气泡），点击后打开窗口并展示更新公告。休眠间隔按配置
+    update_check_interval_hours（首启 _UPDATE_FIRST_DELAY，之后按间隔）。
     """
     from logging_setup import get_logger
 
     log = get_logger("updater")
     first = True
-    while not stop_event.wait(_UPDATE_FIRST_DELAY if first else _UPDATE_MIN_INTERVAL):
+    while True:
+        delay = _UPDATE_FIRST_DELAY if first else _update_loop_interval()
         first = False
+        if stop_event.wait(delay):
+            return
         try:
             if not bool(get_settings().get("update_check_enabled", True)):
-                continue  # 配置关闭自动检查
-            try:
-                hours = max(int(get_settings().get("update_check_interval_hours", 24) or 0), 0)
-            except (TypeError, ValueError):
-                hours = 24
-            if hours <= 0:
                 continue  # 配置关闭自动检查
             # 发现新版本时仅通知（带更新摘要，不再自动下载安装）
             from updater import handle_auto_update
@@ -264,7 +273,7 @@ def _update_check_loop(stop_event: threading.Event) -> None:
                 window_open=_window_visible(),
             )
         except Exception as e:  # noqa: BLE001
-            log.warning("后台更新检查异常: %s", str(e)[:200])
+            log.warning("后台更新检查异常: %s", str(e)[:300])
 
 
 app = FastAPI(title="Tavily Key Pool Dashboard", lifespan=lifespan)
