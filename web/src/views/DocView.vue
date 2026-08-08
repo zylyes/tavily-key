@@ -100,34 +100,55 @@ async function selectDoc(path: string): Promise<void> {
   overflow-y: auto;
   min-height: 0;
 }
-.docs-cat { margin-bottom: 10px; }
+.docs-cat { margin-bottom: 14px; }
+/* 分类名：accent 小方块标识 + 独立层级（与文档项形成缩进对比） */
 .docs-cat-name {
-  padding: 2px 8px 5px;
+  position: relative;
+  padding: 3px 8px 7px 20px;
   font-size: 11px;
   font-weight: 650;
+  letter-spacing: 0.04em;
   color: var(--text-3);
-  letter-spacing: 0.03em;
 }
+.docs-cat-name::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: .75;
+}
+/* 文档项：相对分类名缩进 + 左侧竖线（悬停/选中），形成内容层级 */
 .docs-item {
   display: block;
   width: 100%;
-  padding: 6px 8px;
+  padding: 6px 8px 6px 24px;
   margin-bottom: 2px;
   text-align: left;
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-2);
   background: none;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
   cursor: pointer;
-  transition: background var(--dur-1) ease, color var(--dur-1) ease;
+  transition: background var(--dur-1) ease, color var(--dur-1) ease,
+    border-color var(--dur-1) ease;
 }
-.docs-item:hover { background: var(--neutral-soft); color: var(--text); }
+.docs-item:hover {
+  background: var(--neutral-soft);
+  color: var(--text);
+  border-left-color: var(--glass-border-strong);
+}
 .docs-item.active {
   background: var(--accent-softer);
-  border-color: var(--accent-soft);
   color: var(--accent-text);
+  border-left-color: var(--accent);
 }
 
 /* 右侧内容：自适应滚动 */

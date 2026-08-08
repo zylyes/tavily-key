@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-__version__ = "0.12.2"
+__version__ = "0.12.3"
 
 # GitHub 仓库（owner/repo）。release 以 vX.Y.Z 标签发布，CHANGELOG 底部
 # 有各版本链接；可在配置 update_repo 中覆盖（见 settings.DEFAULTS）。
