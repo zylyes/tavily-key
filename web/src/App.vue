@@ -270,6 +270,11 @@ onMounted(() => {
           <GIcon name="alert" :size="14" />
           <span>下载失败，可重试</span>
         </div>
+        <!-- 正在重启应用 -->
+        <div v-else-if="updateFlow === 'applying'" class="mini-done">
+          <GIcon name="refresh" :size="14" />
+          <span>正在重启应用…</span>
+        </div>
         <!-- 默认：有新版本 -->
         <div v-else class="mini-idle">
           发现新版本 {{ update?.latest_version ?? '' }}，点击查看公告

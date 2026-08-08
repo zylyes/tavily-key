@@ -12,6 +12,7 @@ import {
   applyUpdate,
   cancelUpdateDownload,
   checkUpdate,
+  getSettings,
   getUpdateNoticePending,
   getUpdateStatus,
   pauseUpdateDownload,
@@ -35,6 +36,10 @@ export const updateFlow = ref<'idle' | 'downloading' | 'ready' | 'applying' | 'e
 export const updateDl = ref<UpdateDownloadStatus | null>(null)
 
 let updatePollTimer: number | undefined
+let autoCheckTimer: number | undefined
+/** 自动检查开关与间隔（来自设置；关闭时前端也不自动检查/弹通知） */
+let autoCheckEnabled = true
+let autoCheckHours = 24
 /** 已自动提示过右下角通知的版本（会话级去重） */
 const promptedVersions = new Set<string>()
 /** 用户通过 × 关闭过的版本（该版本本次会话不再自动弹通知） */
@@ -96,7 +101,9 @@ export async function doCheckUpdate(force = false): Promise<void> {
       toast.error(`更新检查失败：${r.update.error || '网络错误'}`)
     } else if (r.update.update_available) {
       toast.success(`发现新版本 ${r.update.latest_version}（当前 ${r.update.current_version}）`)
-      // 手动检查（主窗口打开）：直接展示公告弹窗
+      // 手动检查（主窗口打开）：直接展示公告弹窗；并登记已提示版本，
+      // 避免 10 分钟后的自动检查再弹一次右下角通知
+      if (r.update.latest_version) promptedVersions.add(r.update.latest_version)
       miniOpen.value = false
       noticeOpen.value = true
     } else {
@@ -157,7 +164,10 @@ export function closeMini(): void {
 
 // ── 自动更新下载流程（进度显示在公告弹窗/右下角通知内）──────
 export async function startDownload(): Promise<void> {
-  if (updateFlow.value !== 'idle') return
+  if (updateFlow.value !== 'idle') {
+    toast.info(updateFlow.value === 'ready' ? '更新包已就绪，可直接重启应用' : '已有下载进行中，请稍候')
+    return
+  }
   updateFlow.value = 'downloading'
   updateDl.value = null
   try {
@@ -190,6 +200,7 @@ function pollUpdateStatus(): void {
       } else if (st === 'error') {
         window.clearInterval(updatePollTimer)
         updateFlow.value = 'error'
+        toast.error(`下载失败：${r.status.error || '未知错误'}`)
       } else if (st === 'cancelled' || st === 'idle') {
         // 已取消：恢复初始状态
         window.clearInterval(updatePollTimer)
@@ -260,15 +271,56 @@ export async function doApplyUpdate(): Promise<void> {
 }
 
 // ── 全局初始化（App.vue onMounted 调用一次）────────────────
-/** 启动全局轮询：立即静默检查 + 轮询系统通知标记 + 定期自动检查。 */
-export function initUpdateNotice(): void {
+/**
+ * 启动全局更新逻辑：
+ * 1. 与后端下载状态对账（刷新页面后恢复进度/暂停/取消/完成控制）；
+ * 2. 读取设置，用 update_check_enabled 与 update_check_interval_hours 驱动自动检查
+ *    （关闭时前端也不自动检查、不弹自动通知；手动检查不受影响）；
+ * 3. 轮询系统通知点击标记（托盘/手动入口，不受开关影响）。
+ */
+export async function initUpdateNotice(): Promise<void> {
   if (started) return
   started = true
-  silentCheck()
-  // 系统通知（托盘气泡）点击后打开主窗口：轮询待展示公告标记
+  // 1) 对账后端下载状态：页面刷新/重开时恢复下载进度与控制
+  try {
+    const r = await getUpdateStatus()
+    const st = r.status.state
+    if (st === 'downloading' || st === 'paused' || st === 'starting') {
+      updateDl.value = r.status
+      updateFlow.value = 'downloading'
+      pollUpdateStatus()
+    } else if (st === 'done') {
+      updateDl.value = r.status
+      updateFlow.value = 'ready'
+    } else if (st === 'error') {
+      updateDl.value = r.status
+      updateFlow.value = 'error'
+    }
+  } catch { /* 后端状态不可用则忽略 */ }
+  // 2) 读取自动检查设置
+  await refreshAutoCheckSettings()
+  if (autoCheckEnabled) {
+    silentCheck()
+  }
+  // 3) 系统通知（托盘气泡）点击后打开主窗口：轮询待展示公告标记
   window.setInterval(pollNoticePending, 10 * 1000)
-  // 主窗口打开时的「自动检查」：发现新版本弹右下角通知
-  window.setInterval(autoCheck, 10 * 60 * 1000)
+}
+
+/** 刷新自动检查开关与间隔（设置保存后调用；关闭则停掉自动检查定时器）。 */
+export async function refreshAutoCheckSettings(): Promise<void> {
+  try {
+    const s = await getSettings()
+    autoCheckEnabled = !!s.settings.update_check_enabled
+    autoCheckHours = Math.min(8760, Math.max(1, Number(s.settings.update_check_interval_hours) || 24))
+  } catch { /* 读取失败保持当前值 */ }
+  if (autoCheckTimer !== undefined) {
+    window.clearInterval(autoCheckTimer)
+    autoCheckTimer = undefined
+  }
+  if (autoCheckEnabled) {
+    // 主窗口打开时的「自动检查」：发现新版本弹右下角通知；间隔由配置驱动（最小 1 小时）
+    autoCheckTimer = window.setInterval(autoCheck, autoCheckHours * 3600 * 1000)
+  }
 }
 
 /** 轮询系统通知点击标记：非空 → 弹出公告弹窗 */

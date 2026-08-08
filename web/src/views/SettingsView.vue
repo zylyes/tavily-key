@@ -30,6 +30,7 @@ import {
   doCheckUpdate,
   openNotice,
   openRelease,
+  refreshAutoCheckSettings,
   startDownload,
   update,
   updateBusy,
@@ -358,8 +359,9 @@ function updateHoursValue(): number {
   return v * (UNIT_HOURS[updateIntervalUnit.value] ?? 1)
 }
 
-/** 切换单位：按原单位换算后保持间隔不变（数值自动换算） */
-function onUnitChange(u: string | number): void {
+/** 切换单位：按原单位换算后保持间隔不变（数值自动换算），并立即保存，
+ *  避免“只切单位不落库”导致用户以为已保存、实际未生效。 */
+async function onUnitChange(u: string | number): Promise<void> {
   const next = String(u) as 'hour' | 'day' | 'week' | 'month'
   if (!UNIT_HOURS[next] || next === updateIntervalUnit.value) return
   const v = parseFloat(updateInterval.value.trim())
@@ -369,6 +371,7 @@ function onUnitChange(u: string | number): void {
     updateInterval.value = String(Math.round(r * 100) / 100)
   }
   updateIntervalUnit.value = next
+  await saveUpdateCfg()
 }
 
 /** 自动检查开关（update_check_enabled） */
@@ -393,6 +396,8 @@ async function saveUpdateCfg(): Promise<void> {
       update_check_interval_unit: updateIntervalUnit.value,
     })
     toast.success('更新检查设置已保存')
+    // 让全局自动检查立即按新开关/间隔调度（关闭时停止前端自动检查与通知）
+    await refreshAutoCheckSettings()
   } catch (e) {
     toast.error(`更新检查设置保存失败：${errMsg(e)}`)
   } finally {
