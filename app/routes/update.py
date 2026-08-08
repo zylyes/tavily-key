@@ -1,7 +1,7 @@
 """API 路由：GitHub 更新检查 / 自动更新（下载、状态、应用、公告）。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
@@ -24,11 +24,11 @@ def _local_only(request: Request) -> JSONResponse | None:
 
 
 @router.get("/api/update/check")
-def api_update_check(force: int = 0):
+def api_update_check(force: int = Query(0, ge=0, le=1)):
     """检查 GitHub 最新 release 并返回对比结果（force=1 强制刷新网络）。
 
     结果带进程内 TTL 缓存（间隔 = update_check_interval_hours），前端
-    「检查更新」按钮可传 force=1 拿到即时结果。
+    「检查更新」按钮可传 force=1 拿到即时结果。force 仅接受 0/1（其他值 422）。
     """
     from updater import check_update
 

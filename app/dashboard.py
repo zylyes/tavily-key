@@ -910,7 +910,7 @@ def _tray_check_update() -> None:
             handle_auto_update(
                 tray=_TRAY.get("icon"),
                 webhook=(get_settings().get("notify_webhook") or "").strip(),
-                window_open=False,   # 托盘手动检查走系统通知路径
+                window_open=_window_visible(),   # 窗口已打开则不弹系统气泡（避免双提示）
                 force=True,
             )
         except Exception:  # noqa: BLE001

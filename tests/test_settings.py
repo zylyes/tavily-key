@@ -83,6 +83,10 @@ def test_booleans_coerced():
     assert validate_patch({"autostart": 1})["autostart"] is True
     assert validate_patch({"start_to_tray": 0})["start_to_tray"] is False
     assert validate_patch({"mcp_auto_start": "yes"})["mcp_auto_start"] is True
+    # 字符串布尔显式判定：'no'/'false' 为 False（此前 bool('no')==True 陷阱）
+    assert validate_patch({"autostart": "no"})["autostart"] is False
+    assert validate_patch({"autostart": "false"})["autostart"] is False
+    assert validate_patch({"autostart": "true"})["autostart"] is True
 
 
 def test_key_strategy_passthrough():

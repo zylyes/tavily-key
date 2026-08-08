@@ -186,3 +186,10 @@ def test_update_apply_rejected_not_done(client, monkeypatch):
     r = updater.apply_update()
     assert r["ok"] is False
     assert "未就绪" in r["error"]
+
+
+def test_update_check_force_out_of_range(client, monkeypatch):
+    """force 超出 0/1 范围 → 422（入参约束）。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": ""})
+    r = client.get("/api/update/check?force=2")
+    assert r.status_code == 422

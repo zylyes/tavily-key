@@ -231,7 +231,11 @@ def validate_patch(patch: dict) -> dict:
             except (TypeError, ValueError):
                 raise ValueError(f"{k} must be a number") from None
         elif k in _BOOL_FIELDS:
-            out[k] = bool(v)
+            # 显式真值判定：字符串仅接受 true/1/yes/on/y（避免 bool("false")==True 陷阱）
+            if isinstance(v, str):
+                out[k] = v.strip().lower() in ("true", "1", "yes", "on", "y")
+            else:
+                out[k] = bool(v)
         elif k in _STR_FIELDS:
             out[k] = str(v or "").strip()
         elif k in _DICT_FIELDS:
