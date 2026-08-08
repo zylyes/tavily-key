@@ -1,5 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 
 // FastAPI 托管约定：base './' 相对路径（可挂载在任意前缀下）；
@@ -25,5 +25,9 @@ export default defineConfig({
       '/logo.png': 'http://127.0.0.1:8000',
       '/favicon.ico': 'http://127.0.0.1:8000',
     },
+  },
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.ts', 'src/**/*.spec.ts'],
   },
 })

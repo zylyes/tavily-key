@@ -40,6 +40,14 @@ import {
 } from '@/composables/useUpdateNotice'
 import SettingRow from './parts/settings/SettingRow.vue'
 import { saveBackupAs } from '@/utils/webview'
+import {
+  convertUnit,
+  displayToHours,
+  intervalToDisplay,
+  MAX_YEAR_HOURS,
+  UNIT_HOURS,
+  type IntervalUnit,
+} from '@/utils/updateInterval'
 
 const toast = useToast()
 
@@ -326,10 +334,6 @@ const updateInterval = ref('24')
 const updateIntervalUnit = ref<'hour' | 'day' | 'week' | 'month'>('hour')
 const updateCfgSaving = ref(false)
 
-/** 单位 → 小时换算（月按 30 天计） */
-const UNIT_HOURS: Record<string, number> = { hour: 1, day: 24, week: 168, month: 720 }
-/** 检查间隔上限：无论什么单位最多一年（365 天 = 8760 小时） */
-const MAX_YEAR_HOURS = 365 * 24
 const UNIT_OPTIONS: Array<{ label: string; value: string }> = [
   { label: '小时', value: 'hour' },
   { label: '日', value: 'day' },
@@ -337,39 +341,24 @@ const UNIT_OPTIONS: Array<{ label: string; value: string }> = [
   { label: '月', value: 'month' },
 ]
 
-/** 把后端小时数按单位换算为面板展示值（无法整除时回退小时单位展示；0=旧版关闭值回退默认 24） */
+/** 把后端小时数按单位换算为面板展示值（逻辑见 updateInterval.intervalToDisplay） */
 function applyUpdateInterval(hours: number, unit: string): void {
-  const safe = hours > 0 ? hours : 24
-  const u = (UNIT_HOURS[unit] ? unit : 'hour') as 'hour' | 'day' | 'week' | 'month'
-  const m = UNIT_HOURS[u]
-  const v = safe / m
-  if (!Number.isInteger(v)) {
-    updateIntervalUnit.value = 'hour'
-    updateInterval.value = String(safe)
-  } else {
-    updateIntervalUnit.value = u
-    updateInterval.value = String(v)
-  }
+  const d = intervalToDisplay(hours, unit)
+  updateIntervalUnit.value = d.unit
+  updateInterval.value = d.value
 }
 
-/** 当前输入按单位换算成小时；非法输入返回 -1 */
+/** 当前输入按单位换算成小时；非法输入返回 -1（逻辑见 updateInterval.displayToHours） */
 function updateHoursValue(): number {
-  const v = parseFloat(updateInterval.value.trim())
-  if (Number.isNaN(v) || v < 0) return -1
-  return v * (UNIT_HOURS[updateIntervalUnit.value] ?? 1)
+  return displayToHours(updateInterval.value, updateIntervalUnit.value)
 }
 
 /** 切换单位：按原单位换算后保持间隔不变（数值自动换算），并立即保存，
  *  避免“只切单位不落库”导致用户以为已保存、实际未生效。 */
 async function onUnitChange(u: string | number): Promise<void> {
-  const next = String(u) as 'hour' | 'day' | 'week' | 'month'
+  const next = String(u) as IntervalUnit
   if (!UNIT_HOURS[next] || next === updateIntervalUnit.value) return
-  const v = parseFloat(updateInterval.value.trim())
-  if (!Number.isNaN(v) && v >= 0) {
-    const hours = v * (UNIT_HOURS[updateIntervalUnit.value] ?? 1)
-    const r = hours / UNIT_HOURS[next]
-    updateInterval.value = String(Math.round(r * 100) / 100)
-  }
+  updateInterval.value = convertUnit(updateInterval.value, updateIntervalUnit.value, next)
   updateIntervalUnit.value = next
   await saveUpdateCfg()
 }
