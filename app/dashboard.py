@@ -401,6 +401,48 @@ if (_WEB_DIST / "assets").is_dir():
     app.mount("/assets", StaticFiles(directory=_WEB_DIST / "assets"), name="web-assets")
 
 # ── 访问鉴权 ───────────────────────────────────────────────────
+# 未设置 auth_token（默认）时，叠加 Host 白名单校验：拒绝带点的外部域名 Host
+# （DNS rebinding / 恶意网页把 Host 指向本机面板的攻击面），本地回环、本机
+# 局域网 IP、主机名与配置的对外域名不受影响。
+def _host_allowed(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h.startswith("["):  # IPv6 字面量（如 [::1]:8000）
+        h = h.split("]")[0].lstrip("[")
+    else:
+        h = h.split(":")[0]
+    if not h or h in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    # 裸主机名/NetBIOS 名不拦截（DNS rebinding 的攻击域名必然带点）
+    if "." not in h:
+        return True
+    if h.endswith(".local") or h.endswith(".localhost"):
+        return True
+    try:
+        from settings import lan_hostname, lan_ip
+        if h == lan_ip().lower():
+            return True
+        hn = lan_hostname().strip().lower()
+        if hn and h in (hn, hn + ".local"):
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    # 配置的对外域名（兼容带 scheme / 端口 / 路径的输入，如 https://example.com:443）
+    domain = _normalize_domain_host(get_settings().get("domain") or "")
+    return bool(domain and (h == domain or h.endswith("." + domain)))
+
+
+def _normalize_domain_host(domain: str) -> str:
+    d = (domain or "").strip().lower()
+    if "://" in d:
+        d = d.split("://", 1)[1]
+    d = d.split("/")[0]
+    if d.startswith("["):
+        d = d.split("]")[0].lstrip("[")
+    else:
+        d = d.split(":")[0]
+    return d
+
+
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
     """设置了 auth_token 时，所有 /api/* 请求都需要携带有效令牌。"""
@@ -412,6 +454,11 @@ async def auth_middleware(request: Request, call_next):
             provided = request.query_params.get("token") or ""
         if not secrets.compare_digest(provided, token):
             return JSONResponse(status_code=401, content={"ok": False, "error": "unauthorized"})
+    if not token:
+        # 未鉴权时拒绝外部域名 Host（DNS rebinding 防护；local/server 访问不受影响）
+        host = request.headers.get("host") or ""
+        if host and not _host_allowed(host):
+            return JSONResponse(status_code=403, content={"ok": False, "error": "forbidden host"})
     return await call_next(request)
 
 

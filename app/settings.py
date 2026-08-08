@@ -248,6 +248,10 @@ def validate_patch(patch: dict) -> dict:
                 out[k] = parsed
         else:
             out[k] = v
+    # 更新检查间隔专项边界：与前端一致（1 小时 ~ 1 年 = 8760 小时）；
+    # 0 仅兼容旧配置（语义=关闭自动检查），由 update_check_enabled 统一控制。
+    if "update_check_interval_hours" in out and not (0 <= out["update_check_interval_hours"] <= 8760):
+        raise ValueError("update_check_interval_hours must be in range 0-8760")
     # 枚举/交叉校验
     if "mode" in out and out["mode"] not in ("server", "local"):
         raise ValueError("mode must be server or local")

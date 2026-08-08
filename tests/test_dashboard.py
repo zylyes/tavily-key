@@ -903,3 +903,39 @@ def test_try_activate_existing_probe_short_timeout(monkeypatch):
     assert dashboard._try_activate_existing() is False
     assert timeouts == [0.25]
     assert dashboard._STARTUP_PORT_BUSY is False
+
+
+# ── Host 白名单（未设 auth_token 时的 DNS-rebinding / 外部域名防护）──
+def test_host_check_rejects_foreign_dotted_host(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": "", "domain": ""})
+    r = client.get("/api/update/status", headers={"Host": "evil.example.com"})
+    assert r.status_code == 403
+
+
+def test_host_check_allows_localhost(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": "", "domain": ""})
+    r = client.get("/api/update/status", headers={"Host": "127.0.0.1"})
+    assert r.status_code == 200
+
+
+def test_host_check_allows_bare_hostname(client, monkeypatch):
+    """裸主机名（无点，如 TestClient 默认 testserver / NetBIOS 名）不拦截。"""
+    monkeypatch.setattr(dashboard, "get_settings", lambda: {"auth_token": "", "domain": ""})
+    r = client.get("/api/update/status", headers={"Host": "testserver"})
+    assert r.status_code == 200
+
+
+def test_host_check_allows_configured_domain(client, monkeypatch):
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"auth_token": "", "domain": "https://tavily.example.com"})
+    r = client.get("/api/update/status", headers={"Host": "tavily.example.com"})
+    assert r.status_code == 200
+
+
+def test_host_check_skipped_when_token_set(client, monkeypatch):
+    """已配置 auth_token 时以令牌鉴权为准，不做 Host 校验（避免破坏自定义部署）。"""
+    monkeypatch.setattr(dashboard, "get_settings",
+                        lambda: {"auth_token": "sekret", "domain": ""})
+    r = client.get("/api/update/status", headers={"Host": "evil.example.com",
+                                                  "X-Auth-Token": "sekret"})
+    assert r.status_code == 200
