@@ -8,7 +8,10 @@ def reset_updater_state():
     """每个测试前重置 updater 模块级缓存、已通知版本与下载状态（全局状态隔离）。"""
     updater._cached_result = None
     updater._cached_ts = 0.0
+    updater._cached_is_error = False
     updater._notified_version = None
+    updater._dl_thread = None
+    updater._dl_epoch = 0
     updater._dl.update(state="idle", received=0, total=0, error="", version="",
                        path="", body="")
     updater._pause_event.clear()
@@ -342,7 +345,6 @@ def test_cancel_download_flow(monkeypatch):
 
 def test_download_file_cancel_raises(monkeypatch, tmp_path):
     """取消时 _download_file 应抛出 _DownloadCancelled 并中断写入。"""
-    from pathlib import Path
 
     class FakeResp:
         def __init__(self):
@@ -380,7 +382,6 @@ def test_download_file_cancel_raises(monkeypatch, tmp_path):
 def test_download_update_cancelled_cleans_up(monkeypatch, tmp_path):
     """取消下载后：临时目录被清理，状态回到 idle。"""
     import zipfile
-    from pathlib import Path
 
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
     monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
@@ -456,7 +457,7 @@ def test_download_update_fixes_mojibake_zip_names(monkeypatch, tmp_path):
             zf.writestr("Tavily/Tavily.exe", b"fake-exe")
             # 模拟 release zip 内文件名已是乱码（GBK 字节按 CP437 解码的结果）
             zf.writestr("Tavily/_internal/docs/wiki/CLI╩╣╙├/CLI╩╣╙├.md",
-                        "# CLI 使用".encode("utf-8"))
+                        "# CLI 使用".encode())
         return 12345
 
     monkeypatch.setattr(updater, "_download_file", fake_download)
@@ -529,3 +530,260 @@ def test_read_announcement_returns_and_removes(monkeypatch, tmp_path):
     # 一次性：读取后文件被删除
     assert not (tmp_path / "last-update.json").exists()
     assert updater.read_announcement() is None
+
+
+# ── 安全：解压路径穿越 / 资产文件名 / 资产 URL / 顶层目录白名单 ──
+
+def test_download_update_zip_slip_rejected(monkeypatch, tmp_path):
+    """Zip Slip：条目含 .. 时拒绝解压，且不写出临时目录之外、临时目录被清理。"""
+    import zipfile
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily/Tavily.exe", b"fake-exe")
+            zf.writestr("../../evil.txt", b"pwned")
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "路径" in st["error"]
+    assert not (tmp_path / "evil.txt").exists()          # 未写出临时目录外
+    assert not list(tmp_path.glob("tavily-update-*"))    # 临时目录已清理
+
+
+def test_download_update_zip_absolute_path_rejected(monkeypatch, tmp_path):
+    """Zip Slip：绝对路径（盘符）条目拒绝解压。"""
+    import zipfile
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("C:/evil.txt", b"pwned")
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "路径" in st["error"]
+
+
+def test_download_update_asset_name_traversal_rejected(monkeypatch, tmp_path):
+    """资产文件名含路径分隔符（..\）时拒绝，不逃逸临时目录。"""
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["asset_name"] = "Tavily-..\\..\\evil-win64.zip"
+        return r
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "资产文件名非法" in st["error"]
+    assert not (tmp_path / "evil-win64.zip").exists()
+
+
+def test_download_update_asset_url_http_rejected(monkeypatch, tmp_path):
+    """资产 URL 非 https 时拒绝下载。"""
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["asset_url"] = ("http://github.com/zylyes/tavily-key/releases/download/"
+                          "v1.0.0/Tavily-v1.0.0-win64.zip")
+        return r
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "仅支持 https" in st["error"]
+
+
+def test_download_update_asset_url_non_github_rejected(monkeypatch, tmp_path):
+    """资产 URL 主机非 GitHub 时拒绝下载（SSRF 封堵）。"""
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["asset_url"] = "https://evil.example.com/x.zip"
+        return r
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "非 GitHub" in st["error"]
+
+
+def test_download_update_top_dir_metachar_rejected(monkeypatch, tmp_path):
+    """顶层目录名含 cmd 元字符时拒绝（防 apply_update.bat 注入）。"""
+    import zipfile
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily & Co/Tavily.exe", b"fake-exe")
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "顶层目录名" in st["error"]
+
+
+def test_download_update_picks_dir_with_exe(monkeypatch, tmp_path):
+    """多顶层目录时优先选择含 Tavily.exe 的目录。"""
+    import zipfile
+    from pathlib import Path
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("docs/README.md", b"readme")
+            zf.writestr("Tavily/Tavily.exe", b"fake-exe")
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "done"
+    assert Path(st["path"]).name == "Tavily"
+
+
+def test_normalize_repo_rejects_illegal():
+    """非法 owner/repo（含空格等异常字符）视为未配置。"""
+    assert updater._normalize_repo("a b/c d") == ""
+    assert updater._normalize_repo("owner%20/repo") == ""
+    assert updater._normalize_repo("zylyes/tavily-key") == "zylyes/tavily-key"
+
+
+# ── 可靠性：错误清理 / 失败短缓存 / 取消竞态 / 去重时机 ──
+
+def test_download_update_size_mismatch_cleans_tmp(monkeypatch, tmp_path):
+    """下载失败（非取消）也清理临时目录。"""
+    import zipfile
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily/Tavily.exe", b"exe")
+        return 100  # 与 asset_size=12345 不符
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    assert updater.get_download_status()["state"] == "error"
+    assert not list(tmp_path.glob("tavily-update-*")), "失败后临时目录应被清理"
+
+
+def test_check_update_failure_short_ttl(monkeypatch):
+    """失败结果用短 TTL 缓存：600s 内不重试，超过后自动重试成功。"""
+    calls = {"n": 0}
+    now = [100.0]
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater.time, "monotonic", lambda: now[0])
+
+    def fetch(repo):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("boom")
+        return _release("1.0.0")
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    r1 = updater.check_update(force=True)
+    assert r1["ok"] is False
+    r2 = updater.check_update(force=False)     # 600s 内命中失败短缓存
+    assert r2["ok"] is False
+    assert calls["n"] == 1
+    now[0] += 700                              # 超过失败短缓存 → 自动重试
+    r3 = updater.check_update(force=False)
+    assert r3["ok"] is True
+    assert calls["n"] == 2
+
+
+def test_start_download_rejects_when_previous_thread_alive(monkeypatch):
+    """取消后立即重启：旧线程仍存活时拒绝，避免新旧线程互相覆盖状态。"""
+    monkeypatch.setattr(updater, "can_auto_update", lambda: True)
+
+    class _FakeThread:
+        def is_alive(self):
+            return True
+
+    updater._dl_thread = _FakeThread()
+    updater._dl.update(state="idle", received=0, total=0, error="", version="",
+                       path="", body="")
+    ok, err = updater.start_download()
+    assert ok is False
+    assert "清理" in err
+    assert updater.get_download_status()["state"] == "idle"
+
+
+def test_download_update_old_epoch_does_not_overwrite(monkeypatch):
+    """旧代际任务（被取消后新任务已启动）不覆盖新任务状态。"""
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+
+    def boom(repo):
+        raise TimeoutError("boom")
+
+    monkeypatch.setattr(updater, "_fetch_latest", boom)
+    updater._dl_epoch = 5
+    updater._dl.update(state="starting", received=0, total=0, error="", version="",
+                       path="", body="")
+    updater.download_update(gen=4)
+    assert updater.get_download_status()["state"] == "starting", "旧任务不应把状态覆盖为 error"
+
+
+def test_handle_auto_update_dedupe_only_after_success(monkeypatch):
+    """去重标记必须在推送成功之后：全渠道失败不标记，下一轮仍重试。"""
+    attempts = {"tray": 0}
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
+
+    class _FailingTray:
+        def notify(self, title, message):
+            attempts["tray"] += 1
+            raise RuntimeError("tray broken")
+
+    def boom(url, payload):
+        raise RuntimeError("webhook down")
+
+    monkeypatch.setattr("notify.send_webhook", boom)
+    updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
+                               window_open=False)
+    updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
+                               window_open=False)
+    assert attempts["tray"] == 2                 # 未去重：每次都尝试推送
+    assert updater._notified_version is None
+
+    # webhook 成功 → 标记去重；此后不再推送
+    monkeypatch.setattr("notify.send_webhook", lambda url, payload: True)
+    updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
+                               window_open=False)
+    assert updater._notified_version == "0.13.4"
+    updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
+                               window_open=False)
+    assert attempts["tray"] == 3                 # 标记后不再推送

@@ -26,12 +26,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -47,10 +49,21 @@ _API_URL = "https://api.github.com/repos/{repo}/releases/latest"
 _TIMEOUT = 10.0
 _DOWNLOAD_TIMEOUT = 120.0   # 下载大 zip 的读写超时（秒）
 _USER_AGENT = f"tavily-key-pool/{__version__} (update-check)"
+# 更新检查失败结果的短缓存（秒）：避免一次瞬时网络故障导致整个间隔内不重试
+_FAIL_CACHE_TTL = 600.0
+# 资产文件名白名单（仅 basename；路径分隔符/.. 一律拒绝，防路径穿越）
+_ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$")
+# update_repo 归一化后的 owner/repo 白名单（防止异常字符进入 URL）
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+# cmd 元字符：顶层目录名含这些字符时拒绝解压（防 bat 注入，纵深防御）
+_CMD_METACHARS = set("&|^<>%!")
+# 资产下载地址允许的主机后缀（github.com 及其 CDN）
+_ALLOWED_ASSET_HOST_SUFFIXES = ("github.com", "githubusercontent.com")
 
 _lock = threading.Lock()
 _cached_ts = 0.0      # time.monotonic 上次真实检查时间
 _cached_result: dict | None = None
+_cached_is_error = False   # 最近一次缓存结果是否为失败（失败用短 TTL，见 _FAIL_CACHE_TTL）
 # 后台自动检查已通知过的版本（按版本去重，避免每次检查都重复推送）
 _notified_version: str | None = None
 
@@ -62,6 +75,10 @@ _dl: dict = {"state": "idle", "received": 0, "total": 0, "error": "", "version":
 # 下载控制：暂停（set=暂停，保持连接不读取）与取消（set=取消）
 _pause_event = threading.Event()
 _cancel_event = threading.Event()
+# 下载线程与代际号：start_download 在旧线程仍存活时拒绝重启；worker 写入
+# 最终状态前校验代际，避免被取消的旧线程覆盖新任务的状态。
+_dl_thread: threading.Thread | None = None
+_dl_epoch = 0
 
 
 class _DownloadCancelled(Exception):
@@ -128,7 +145,10 @@ def _normalize_repo(repo: str) -> str:
     s = s.strip("/").removesuffix(".git").strip("/")
     parts = s.split("/")
     if len(parts) == 2 and parts[0] and parts[1]:
-        return f"{parts[0]}/{parts[1]}"
+        repo = f"{parts[0]}/{parts[1]}"
+        # 白名单校验：仅允许字母数字与 ._-，非法输入视为未配置（禁用更新检查）
+        if _REPO_RE.fullmatch(repo):
+            return repo
     return ""
 
 
@@ -211,12 +231,16 @@ def check_update(force: bool = False) -> dict:
             "asset_name": "", "asset_url": "", "asset_size": 0,
         }
 
-    global _cached_ts, _cached_result
+    global _cached_ts, _cached_result, _cached_is_error
     interval_h = _check_interval_hours()
     with _lock:
         now = time.monotonic()
         if not force and _cached_result is not None:
-            if interval_h > 0 and now - _cached_ts < interval_h * 3600:
+            if _cached_is_error:
+                # 失败结果用短缓存：瞬时网络故障不会导致整个间隔内不再重试
+                if now - _cached_ts < _FAIL_CACHE_TTL:
+                    return dict(_cached_result)
+            elif interval_h > 0 and now - _cached_ts < interval_h * 3600:
                 return dict(_cached_result)
 
     try:
@@ -236,6 +260,7 @@ def check_update(force: bool = False) -> dict:
         with _lock:
             _cached_result = result
             _cached_ts = time.monotonic()
+            _cached_is_error = True
         return dict(result)
 
     result = {
@@ -250,6 +275,7 @@ def check_update(force: bool = False) -> dict:
     with _lock:
         _cached_result = result
         _cached_ts = time.monotonic()
+        _cached_is_error = False
     _log.info(
         "更新检查完成：当前 %s，最新 %s（%s）",
         __version__, info["latest_version"] or "?",
@@ -279,18 +305,21 @@ def handle_auto_update(tray=None, webhook: str = "", window_open: bool = True,
     with _lock:
         if latest == _notified_version:
             return result
-        _notified_version = latest
     body = result.get("body") or ""
     summary = body[:120] + ("…" if len(body) > 120 else "")
     title = f"Tavily Key Pool 有新版本 {latest}"
     message = (f"当前版本 {__version__}，发现新版本 {latest}。点击查看更新公告。")
+    # 去重标记必须在“至少一个渠道确实推送成功”之后设置：若所有渠道都推送
+    # 失败则不标记，下一轮自动检查会重试，避免用户永远收不到更新提醒。
+    sent = False
     # 系统通知（托盘气泡）：仅主窗口未打开时推送，点击后打开窗口显示公告
     if not window_open and tray is not None:
         try:
             tray.notify(title, message)
             mark_open_notice(latest)
-        except Exception:  # noqa: BLE001
-            pass
+            sent = True
+        except Exception as e:  # noqa: BLE001
+            _log.warning("更新通知（托盘气泡）推送失败：%s", str(e)[:200])
     # webhook 照常推送（不受窗口状态影响）
     if webhook:
         from notify import send_webhook
@@ -300,13 +329,19 @@ def handle_auto_update(tray=None, webhook: str = "", window_open: bool = True,
                 "current_version": __version__, "latest_version": latest,
                 "release_url": result.get("release_url", ""),
                 "summary": summary,
+                "title": title,
+                "message": message,
             }
-            payload.setdefault("title", title)
-            payload.setdefault("message", message)
-            send_webhook(webhook, payload)
-        except Exception:  # noqa: BLE001
-            pass
-    _log.info("发现新版本 %s，已通知用户（含更新公告摘要）", latest)
+            if send_webhook(webhook, payload):
+                sent = True
+        except Exception as e:  # noqa: BLE001
+            _log.warning("更新通知（webhook）推送失败：%s", str(e)[:200])
+    if sent:
+        with _lock:
+            _notified_version = latest
+        _log.info("发现新版本 %s，已通知用户（含更新公告摘要）", latest)
+    else:
+        _log.info("发现新版本 %s，但无可用的通知渠道或推送失败（未标记去重，下轮重试）", latest)
     return result
 
 
@@ -351,17 +386,26 @@ def start_download() -> tuple[bool, str]:
     """启动后台下载线程，返回 (ok, error)。仅打包版可用。
 
     面板手动触发：下载完成后由用户在面板点「重启应用」应用更新。
+    取消后立即重启会被拒绝（旧线程仍在清理），避免新旧线程互相覆盖状态。
     """
+    global _dl_thread, _dl_epoch
     if not can_auto_update():
         return False, "仅打包版（Tavily.exe）支持自动更新"
     with _dl_lock:
         if _dl["state"] in ("downloading", "starting", "paused"):
             return False, "已有下载进行中，请稍候"
+        if _dl_thread is not None and _dl_thread.is_alive():
+            return False, "正在清理上次下载，请稍候"
+        _dl_epoch += 1
+        gen = _dl_epoch
+        _set_dl(state="starting", received=0, total=0, error="", version="", path="",
+                body="")
     _pause_event.clear()
     _cancel_event.clear()
-    _set_dl(state="starting", received=0, total=0, error="", version="", path="",
-            body="")
-    threading.Thread(target=download_update, daemon=True, name="tavily-update-dl").start()
+    t = threading.Thread(target=download_update, args=(gen,), daemon=True,
+                         name="tavily-update-dl")
+    _dl_thread = t
+    t.start()
     return True, ""
 
 
@@ -447,13 +491,46 @@ def _fix_zip_name(name: str) -> str:
     return name
 
 
-def download_update() -> None:
+def _safe_zip_target(extracted: Path, name: str) -> Path:
+    """校验 zip 条目名并返回安全解压目标（拒绝路径穿越/绝对路径/盘符）。
+
+    Windows 下 `\\` 与 `/` 同为分隔符，统一按 `/` 归一化；条目含 `..`、
+    绝对路径、盘符或越出 extracted 目录时抛 RuntimeError（OWASP Zip Slip 防护）。
+    """
+    norm = (name or "").replace("\\", "/")
+    parts = norm.split("/")
+    if (not norm or norm.startswith("/") or ".." in parts
+            or any(p in ("", ".") for p in parts[:-1])
+            or re.match(r"^[A-Za-z]:", norm)):
+        raise RuntimeError(f"压缩包条目路径非法：{name!r}")
+    root = extracted.resolve()
+    target = (extracted / norm).resolve()
+    if target != root and not target.is_relative_to(root):
+        raise RuntimeError(f"压缩包条目越界：{name!r}")
+    return target
+
+
+def _validate_asset_url(url: str) -> None:
+    """资产下载地址白名单：仅允许 https 且主机属于 github.com / GitHub CDN。"""
+    u = urllib.parse.urlsplit(url or "")
+    host = (u.hostname or "").lower()
+    if u.scheme != "https" or not host:
+        raise RuntimeError("资产下载地址非法：仅支持 https")
+    if not (host == "github.com" or host.endswith(_ALLOWED_ASSET_HOST_SUFFIXES)):
+        raise RuntimeError("资产下载地址非法：非 GitHub 域名")
+
+
+def download_update(gen: int | None = None) -> None:
     """后台线程主体：下载最新打包 zip → 校验 → 解压到临时目录。
 
     结果写入模块状态 _dl（done 时 path 指向含 Tavily.exe 的新版目录）。
     任何异常写入 error 状态，不抛给调用线程；用户取消时清理临时目录
-    并回到 idle。
+    并回到 idle。`gen` 为代际号：若调用时模块代际已推进（旧任务被取消后
+    新任务已启动），本次结果丢弃且不覆盖 _dl，仅清理自身临时目录。
     """
+    global _dl_epoch
+    if gen is None:
+        gen = _dl_epoch
     tmp: Path | None = None
     try:
         info = check_update(force=True)
@@ -466,9 +543,18 @@ def download_update() -> None:
         version = info.get("latest_version") or ""
         body = info.get("body") or ""
 
-        tmp = Path(tempfile.gettempdir()) / f"tavily-update-{int(time.time())}"
+        # 代际校验：取消后立即重启时，旧线程在此退出，不再写任何状态
+        if gen != _dl_epoch:
+            return
+        # 资产文件名白名单（仅 basename，防路径穿越）
+        asset_name = (info.get("asset_name") or "").strip()
+        if not asset_name or Path(asset_name).name != asset_name or not _ASSET_NAME_RE.fullmatch(asset_name):
+            raise RuntimeError("最新 release 资产文件名非法")
+        _validate_asset_url(info.get("asset_url") or "")
+
+        tmp = Path(tempfile.gettempdir()) / f"tavily-update-{time.time_ns()}"
         tmp.mkdir(parents=True, exist_ok=True)
-        zip_path = tmp / (info.get("asset_name") or "tavily-update.zip")
+        zip_path = tmp / asset_name
         _set_dl(state="downloading", received=0, total=int(info.get("asset_size") or 0),
                 error="", version=version, body=body)
         _log.info("开始下载更新包 %s（%s 字节）", zip_path.name, info.get("asset_size"))
@@ -486,35 +572,50 @@ def download_update() -> None:
             extracted.mkdir(parents=True, exist_ok=True)
             # 手动逐条解压并修复 GBK 文件名乱码（zipfile.extractall 会把
             # 无 UTF-8 标志的中文名按 CP437 解出乱码文件名，导致内置 wiki
-            # 文档目录名/文件名损坏）。
+            # 文档目录名/文件名损坏）。每条目先做路径安全校验（防 Zip Slip）。
             for info in zf.infolist():
                 fixed = _fix_zip_name(info.filename)
-                target = extracted / fixed
+                target = _safe_zip_target(extracted, fixed)
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(info) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
-        # 定位顶层目录（zip 内可能再套一层 Tavily/）
-        top = extracted
-        for child in extracted.iterdir():
-            if child.is_dir():
-                top = child
-                break
-        if not (top / "Tavily.exe").is_file():
+        # 定位顶层目录：优先选含 Tavily.exe 的目录；zip 根直接放 Tavily.exe 也可
+        top = next((c for c in extracted.iterdir() if c.is_dir() and (c / "Tavily.exe").is_file()),
+                   None)
+        if top is None:
+            top = extracted if (extracted / "Tavily.exe").is_file() else None
+        if top is None:
             raise RuntimeError("压缩包内未找到 Tavily.exe，无法自动更新")
+        # 顶层目录名白名单：含 cmd 元字符时拒绝（防 apply_update.bat 注入，纵深防御）
+        if top != extracted and any(ch in top.name for ch in _CMD_METACHARS):
+            raise RuntimeError("压缩包顶层目录名包含非法字符，无法自动更新")
+        if gen != _dl_epoch:
+            _log.info("下载线程已过期（新任务已启动），丢弃本次结果")
+            shutil.rmtree(tmp, ignore_errors=True)
+            return
         _set_dl(state="done", received=n, total=n, path=str(top), version=version, body=body)
         _log.info("更新包下载并解压完成：%s", top)
     except _DownloadCancelled:
         _log.info("自动更新下载已取消，清理临时文件")
-        _set_dl(state="idle", received=0, total=0, error="", version="", path="", body="")
+        if gen == _dl_epoch:
+            _set_dl(state="idle", received=0, total=0, error="", version="", path="", body="")
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
         err = str(e)[:300]
         _log.error("自动更新下载失败：%s", err)
-        _set_dl(state="error", error=err)
+        if gen == _dl_epoch:
+            _set_dl(state="error", error=err)
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _bat_escape(s: str) -> str:
+    """bat 内变量赋值转义：`%` 在 cmd 中触发变量展开，双写为 `%%` 保留字面值。"""
+    return str(s).replace("%", "%%")
 
 
 def _write_update_script(new_dir: str) -> Path:
@@ -527,12 +628,12 @@ def _write_update_script(new_dir: str) -> Path:
     base = base_dir()
     log_path = runtime_dir() / "update_apply.log"
     bat = runtime_dir() / "apply_update.bat"
-    # 路径统一转义：cmd 中 &()^ 等需转义，简单场景用引号包裹即可
+    # 路径统一转义：% 双写避免变量展开；cmd 元字符由解压阶段的白名单提前拦截
     content = f"""@echo off
 chcp 65001 >nul
-set "BASE={base}"
-set "NEW={new_dir}"
-set "LOG={log_path}"
+set "BASE={_bat_escape(base)}"
+set "NEW={_bat_escape(new_dir)}"
+set "LOG={_bat_escape(log_path)}"
 echo [%date% %time%] ==== apply update start ==== >> "%LOG%"
 rem 等待当前实例退出（面板/子进程均为 Tavily.exe）
 taskkill /IM Tavily.exe /F >> "%LOG%" 2>&1
