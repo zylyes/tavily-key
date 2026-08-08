@@ -209,6 +209,8 @@ def test_update_check_fields():
         validate_patch({"update_check_interval_hours": -1})
     with pytest.raises(ValueError):
         validate_patch({"update_check_interval_hours": "abc"})
+    with pytest.raises(ValueError):
+        validate_patch({"update_check_interval_hours": 24.5})   # 拒绝 float 静默截断为 24
     # 上限与前端一致：最多 1 年（8760 小时），0 仅兼容旧配置
     assert validate_patch({"update_check_interval_hours": 8760})["update_check_interval_hours"] == 8760
     with pytest.raises(ValueError):

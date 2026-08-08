@@ -658,6 +658,52 @@ def test_download_update_asset_url_non_github_rejected(monkeypatch, tmp_path):
     assert st["state"] == "error"
     assert "非 GitHub" in st["error"]
 
+def test_download_update_asset_url_github_subdomain_rejected(monkeypatch, tmp_path):
+    """资产 URL 为 *.github.com 子域（非资产 CDN）时拒绝——白名单精确匹配而非宽松后缀。"""
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["asset_url"] = "https://api.github.com/repos/a/b/releases/download/v1.0.0/a.zip"
+        return r
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "非 GitHub 域名" in st["error"]
+
+
+def test_download_update_asset_url_evil_suffix_rejected(monkeypatch, tmp_path):
+    """资产 URL 以 evilgithubusercontent.com 结尾时拒绝——带点后缀防宽松匹配。"""
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["asset_url"] = "https://evilgithubusercontent.com/a.zip"
+        return r
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "非 GitHub 域名" in st["error"]
+
+
+def test_safe_zip_target_rejects_dot_segments():
+    """条目 '.' / 'a/.'（点段）拒绝——避免解压目标落到目录本身。"""
+    import tempfile
+    from pathlib import Path
+
+    root = Path(tempfile.mkdtemp())
+    for bad in [".", "a/.", "./a", ".\\a", "a/b/."]:
+        try:
+            updater._safe_zip_target(root, bad)
+            raise AssertionError(f"应拒绝 {bad!r}")
+        except RuntimeError:
+            pass
 
 def test_download_update_top_dir_metachar_rejected(monkeypatch, tmp_path):
     """顶层目录名含 cmd 元字符时拒绝（防 apply_update.bat 注入）。"""
@@ -847,7 +893,7 @@ def test_start_download_cleans_previous_tmp(monkeypatch, tmp_path):
     ok, err = updater.start_download()
     assert ok is True
     assert not old_tmp.exists()                      # 旧临时目录已清理
-    assert updater.get_download_status()["tmp"] == ""
+    assert updater._dl["tmp"] == ""                  # 内部 tmp 已重置（API 不再暴露该字段）
 
 
 def test_download_update_cancel_before_check(monkeypatch):

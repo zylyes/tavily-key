@@ -57,8 +57,9 @@ _ASSET_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 # cmd 元字符：顶层目录名含这些字符时拒绝解压（防 bat 注入，纵深防御）
 _CMD_METACHARS = set("&|^<>%!")
-# 资产下载地址允许的主机后缀（github.com 及其 CDN）
-_ALLOWED_ASSET_HOST_SUFFIXES = ("github.com", "githubusercontent.com")
+# 资产下载地址允许的主机：github.com 精确匹配 + GitHub 资产 CDN（带点后缀，
+# 避免 *.github.com 等宽松匹配放行非资产子域）
+_ALLOWED_ASSET_HOST_SUFFIXES = (".githubusercontent.com",)
 
 _lock = threading.Lock()
 _cached_ts = 0.0      # time.monotonic 上次真实检查时间
@@ -401,9 +402,11 @@ def _set_dl(**kw) -> None:
 
 
 def get_download_status() -> dict:
-    """返回当前下载状态（供面板轮询）。"""
+    """返回当前下载状态（供面板轮询；内部 tmp 路径不外泄）。"""
     with _dl_lock:
-        return dict(_dl)
+        st = dict(_dl)
+    st.pop("tmp", None)
+    return st
 
 
 def start_download() -> tuple[bool, str]:
@@ -534,7 +537,7 @@ def _safe_zip_target(extracted: Path, name: str) -> Path:
     norm = (name or "").replace("\\", "/")
     parts = norm.split("/")
     if (not norm or norm.startswith("/") or ".." in parts
-            or any(p in ("", ".") for p in parts[:-1])
+            or any(p in ("", ".") for p in parts)
             or re.match(r"^[A-Za-z]:", norm)):
         raise RuntimeError(f"压缩包条目路径非法：{name!r}")
     root = extracted.resolve()
@@ -545,11 +548,12 @@ def _safe_zip_target(extracted: Path, name: str) -> Path:
 
 
 def _validate_asset_url(url: str) -> None:
-    """资产下载地址白名单：仅允许 https 且主机属于 github.com / GitHub CDN。"""
+    """资产下载地址白名单：仅允许 https 且主机为 github.com 或其资产 CDN。"""
     u = urllib.parse.urlsplit(url or "")
     host = (u.hostname or "").lower()
     if u.scheme != "https" or not host:
         raise RuntimeError("资产下载地址非法：仅支持 https")
+    # github.com 精确匹配；CDN 用带点后缀（.githubusercontent.com）防宽松匹配
     if not (host == "github.com" or host.endswith(_ALLOWED_ASSET_HOST_SUFFIXES)):
         raise RuntimeError("资产下载地址非法：非 GitHub 域名")
 
@@ -646,7 +650,8 @@ def download_update(gen: int | None = None) -> None:
     except _DownloadCancelled:
         _log.info("自动更新下载已取消，清理临时文件")
         if gen == _dl_epoch:
-            _set_dl(state="idle", received=0, total=0, error="", version="", path="", body="")
+            _set_dl(state="idle", received=0, total=0, error="", version="", path="",
+                    body="", tmp="")
         if tmp is not None:
             shutil.rmtree(tmp, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
@@ -658,7 +663,7 @@ def download_update(gen: int | None = None) -> None:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _bat_escape(s: str) -> str:
+def _bat_escape(s: object) -> str:
     """bat 内变量赋值转义：`%` 在 cmd 中触发变量展开，双写为 `%%` 保留字面值。"""
     return str(s).replace("%", "%%")
 

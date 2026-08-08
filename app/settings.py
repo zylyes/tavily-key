@@ -218,6 +218,8 @@ def validate_patch(patch: dict) -> dict:
                 raise ValueError(f"{k} must be in range 0-536870912")
             out[k] = n
         elif k in _INT_FIELDS:
+            if isinstance(v, float) and not v.is_integer():
+                raise ValueError(f"{k} must be an integer")   # 拒绝 24.5 静默截断为 24
             try:
                 n = int(v)
             except (TypeError, ValueError):

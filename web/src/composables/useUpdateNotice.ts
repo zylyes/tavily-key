@@ -125,11 +125,6 @@ async function silentCheck(): Promise<void> {
   } catch { /* 静默：检查失败不打扰 */ }
 }
 
-/** 自动轮询检查：发现新版本 → 右下角通知（按版本去重 + 已关闭版本不再弹） */
-async function autoCheck(): Promise<void> {
-  await silentCheck()
-}
-
 function maybePromptMini(info: UpdateInfo | null): void {
   if (!info || !info.update_available) return
   const v = info.latest_version || ''
@@ -319,7 +314,7 @@ export async function refreshAutoCheckSettings(): Promise<void> {
   }
   if (autoCheckEnabled) {
     // 主窗口打开时的「自动检查」：发现新版本弹右下角通知；间隔由配置驱动（最小 1 小时）
-    autoCheckTimer = window.setInterval(autoCheck, autoCheckHours * 3600 * 1000)
+    autoCheckTimer = window.setInterval(silentCheck, autoCheckHours * 3600 * 1000)
   }
 }
 
