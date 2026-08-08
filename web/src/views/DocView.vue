@@ -14,6 +14,9 @@ const { data: treeResp } = usePolling(getDocsTree, { interval: 60000 })
 const tree = computed<DocCategory[]>(() => treeResp.value?.tree ?? [])
 const totalDocs = computed(() => tree.value.reduce((n, c) => n + c.docs.length, 0))
 
+// md 内容自带一级标题时不再渲染外部标题（避免标题显示两次）
+const docHasH1 = computed(() => /^#\s+/m.test(doc.value?.content ?? ''))
+
 const activePath = ref('')
 const doc = ref<WikiDoc | null>(null)
 const loadingDoc = ref(false)
@@ -75,7 +78,7 @@ async function selectDoc(path: string): Promise<void> {
         <Skeleton v-if="loadingDoc" :lines="6" />
         <EmptyState v-else-if="docError" icon="alert" title="文档加载失败" :desc="docError" />
         <template v-else-if="doc">
-          <h2 class="docs-title">{{ doc.title }}</h2>
+          <h2 v-if="!docHasH1" class="docs-title">{{ doc.title }}</h2>
           <MdView :text="doc.content" />
         </template>
         <div v-else class="u-dim docs-empty">从左侧选择文档查看</div>

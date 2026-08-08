@@ -17,6 +17,7 @@ import time
 from key_pool import KeyPool
 from logging_setup import get_logger
 from settings import get_settings
+from tray import NIIF_ERROR, NIIF_INFO, NIIF_WARNING
 
 _log = get_logger("notify")
 
@@ -38,6 +39,17 @@ FLAG_LABELS = {
     "pool_empty": "全部 Key 不可用",
 }
 
+# 通知类型 → 托盘气泡图标（NIIF_*）；未列出的 flag 回退 NIIF_INFO
+FLAG_ICONS = {
+    "exhausted": NIIF_ERROR,
+    "high_error_rate": NIIF_ERROR,
+    "pool_empty": NIIF_ERROR,
+    "near_exhausted": NIIF_WARNING,
+    "suspected_leak": NIIF_WARNING,
+    "stale": NIIF_INFO,
+    "slow": NIIF_INFO,
+}
+
 
 def _mark_notified(key: tuple[str, str], window: float) -> bool:
     """若未在窗口内通知过则标记并返回 True（本次应通知）。"""
@@ -56,6 +68,12 @@ def _mark_notified(key: tuple[str, str], window: float) -> bool:
         return True
 
 
+def _forget_notified(key: tuple[str, str]) -> None:
+    """推送失败时回滚去重标记，保证下一轮检测会重试（与 updater 语义一致）。"""
+    with _lock:
+        _notified.pop(key, None)
+
+
 def send_webhook(url: str, payload: dict) -> bool:
     """POST JSON 到 Webhook URL（urllib，短超时，失败仅记日志）。"""
     if not url:
@@ -71,15 +89,18 @@ def send_webhook(url: str, payload: dict) -> bool:
         return False
 
 
-def _notify_one(tray, webhook: str, title: str, message: str, payload: dict) -> bool:
-    """按配置推送单个通知（托盘 + webhook），返回是否至少推送了一个渠道。"""
+def _notify_one(tray, webhook: str, title: str, message: str, payload: dict, icon: int = NIIF_INFO) -> bool:
+    """按配置推送单个通知（托盘 + webhook），返回是否至少推送了一个渠道。
+
+    icon: 托盘气泡图标（NIIF_*）；托盘失败时降级到 webhook 并记日志。
+    """
     sent = False
     if tray is not None:
         try:
-            tray.notify(title, message)
+            tray.notify(title, message, icon=icon)
             sent = True
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            _log.warning("托盘通知异常（降级到 webhook）: %s", str(e)[:200])
     if webhook:
         payload.setdefault("title", title)
         payload.setdefault("message", message)
@@ -106,9 +127,17 @@ def check_and_notify(pool: KeyPool, tray=None) -> list[dict]:
             key = ("__pool__", "pool_empty")
             if _mark_notified(key, _POOL_EMPTY_DEDUPE):
                 msg = "Key 池中所有 Key 均不可用（耗尽/停用），MCP 调用将全部失败！"
-                _notify_one(tray, webhook, "Tavily Key 池耗尽", msg,
-                            {"type": "anomaly", "masked": "__pool__", "flag": "pool_empty", "reasons": [msg]})
-                notified.append({"masked": "__pool__", "flags": ["pool_empty"], "reason": msg})
+                if _notify_one(
+                    tray,
+                    webhook,
+                    "Tavily Key 池耗尽",
+                    msg,
+                    {"type": "anomaly", "masked": "__pool__", "flag": "pool_empty", "reasons": [msg]},
+                    icon=FLAG_ICONS["pool_empty"],
+                ):
+                    notified.append({"masked": "__pool__", "flags": ["pool_empty"], "reason": msg})
+                else:
+                    _forget_notified(key)
 
     for a in anomalies:
         for flag in a["flags"]:
@@ -127,8 +156,10 @@ def check_and_notify(pool: KeyPool, tray=None) -> list[dict]:
                 "reasons": reasons,
                 "usage_pct": a.get("usage_pct"),
             }
-            _notify_one(tray, webhook, title, message, payload)
-            notified.append({"masked": a["masked"], "flags": [flag], "reason": reason})
+            if _notify_one(tray, webhook, title, message, payload, icon=FLAG_ICONS.get(flag, NIIF_INFO)):
+                notified.append({"masked": a["masked"], "flags": [flag], "reason": reason})
+            else:
+                _forget_notified(key)
 
     if notified:
         _log.info("异常通知 %d 条", len(notified))

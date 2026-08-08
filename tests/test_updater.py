@@ -1,6 +1,7 @@
 """app/updater.py GitHub 更新检查单元测试。"""
 import pytest
 import updater
+from tray import NIIF_INFO
 
 
 @pytest.fixture(autouse=True)
@@ -181,10 +182,10 @@ def test_check_update_interval_zero_always_refetches(monkeypatch):
 # ── handle_auto_update（发现新版本仅通知，按版本去重）────────
 class _FakeTray:
     def __init__(self):
-        self.notifications: list[tuple[str, str]] = []
+        self.notifications: list[tuple[str, str, int]] = []
 
-    def notify(self, title, message):
-        self.notifications.append((title, message))
+    def notify(self, title, message, icon=0):
+        self.notifications.append((title, message, icon))
 
 
 def test_handle_auto_update_notifies(monkeypatch):
@@ -205,6 +206,7 @@ def test_handle_auto_update_notifies(monkeypatch):
     # 托盘已通知、webhook 带更新公告摘要、不触发下载
     assert len(tray.notifications) == 1
     assert "有新版本" in tray.notifications[0][0]
+    assert tray.notifications[0][2] == NIIF_INFO   # 更新通知使用信息类图标
     assert len(sent) == 1
     assert sent[0][1]["event"] == "update_available"
     assert "新增功能A" in sent[0][1]["summary"]
@@ -839,7 +841,7 @@ def test_handle_auto_update_dedupe_only_after_success(monkeypatch):
     monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.5"))
 
     class _FailingTray:
-        def notify(self, title, message):
+        def notify(self, title, message, icon=0):
             attempts["tray"] += 1
             raise RuntimeError("tray broken")
 

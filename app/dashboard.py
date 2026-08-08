@@ -27,7 +27,7 @@ from settings import (
     cache_ttls,
     get_settings,
 )
-from tray import TrayIcon
+from tray import NIIF_WARNING, TrayIcon
 
 
 @asynccontextmanager
@@ -148,7 +148,7 @@ def _service_watchdog_loop(stop_event: threading.Event) -> None:
         try:
             tray = _TRAY.get("icon")
             if tray is not None:
-                tray.notify(title, message)
+                tray.notify(title, message, icon=NIIF_WARNING)
         except Exception:  # noqa: BLE001
             pass
         try:

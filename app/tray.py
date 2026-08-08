@@ -12,6 +12,10 @@ import os
 import threading
 from collections.abc import Callable
 
+from logging_setup import get_logger
+
+_log = get_logger("tray")
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -146,6 +150,21 @@ ID_EXIT = 2
 _CLASS_NAME = "TavilyTrayHostWindow"
 
 
+def _fit_utf16(text: str, max_units: int) -> str:
+    """按 UTF-16 code units 截断（WCHAR 数组容量按 UTF-16 计）。
+
+    emoji 等增补平面字符占 2 个 code unit，若按 Python 字符数截断会让
+    ctypes 赋给 WCHAR 数组时超长抛 ValueError，导致通知静默丢失。
+    """
+    s = str(text)
+    if len(s.encode("utf-16-le")) // 2 <= max_units:
+        return s
+    cut = s[:max_units]
+    while len(cut.encode("utf-16-le")) // 2 > max_units:
+        cut = cut[:-1]
+    return cut
+
+
 class TrayIcon:
     """系统托盘图标。
 
@@ -202,23 +221,26 @@ class TrayIcon:
     def notify(self, title: str, message: str, icon: int = NIIF_INFO) -> None:
         """显示托盘气泡通知（NIF_INFO 气球提示）。未运行/非 Windows 时为空操作。
 
-        icon: NIIF_NONE / NIIF_INFO / NIIF_WARNING / NIIF_ERROR。
-        可从任意线程调用（Shell_NotifyIconW 本身线程安全）。
+        icon: NIIF_NONE / NIIF_INFO / NIIF_WARNING / NIIF_ERROR，非法值回退
+        NIIF_INFO。可从任意线程调用（Shell_NotifyIconW 本身线程安全）。
         """
         if os.name != "nt" or self._nid is None or not self._hwnd:
             return
+        if icon not in (NIIF_NONE, NIIF_INFO, NIIF_WARNING, NIIF_ERROR):
+            icon = NIIF_INFO
         try:
             nid = NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
             nid.hWnd = self._hwnd
             nid.uID = 1
             nid.uFlags = NIF_INFO
-            nid.szInfoTitle = str(title)[:63]
-            nid.szInfo = str(message)[:255]
+            nid.szInfoTitle = _fit_utf16(title, 63)
+            nid.szInfo = _fit_utf16(message, 255)
             nid.dwInfoFlags = icon
-            _shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid))
-        except Exception:  # noqa: BLE001
-            pass
+            if not _shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid)):
+                _log.warning("Shell_NotifyIconW 推送气泡失败: %s", str(title)[:60])
+        except Exception as e:  # noqa: BLE001
+            _log.warning("托盘气泡通知异常: %s", str(e)[:200])
 
     # ── 内部实现 ─────────────────────────────────────────────
     def _run(self) -> None:

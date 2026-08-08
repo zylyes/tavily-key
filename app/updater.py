@@ -40,6 +40,7 @@ from pathlib import Path
 
 from logging_setup import get_logger
 from settings import get_settings
+from tray import NIIF_INFO
 from version import __version__
 
 _log = get_logger("updater")
@@ -340,7 +341,7 @@ def handle_auto_update(tray=None, webhook: str = "", window_open: bool = True,
     # 系统通知（托盘气泡）：仅主窗口未打开且配置 notify_tray 开启时推送
     if not window_open and tray is not None and bool(get_settings().get("notify_tray", True)):
         try:
-            tray.notify(title, message)
+            tray.notify(title, message, icon=NIIF_INFO)
             mark_open_notice(latest)
             sent = True
         except Exception as e:  # noqa: BLE001

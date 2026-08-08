@@ -77,11 +77,56 @@ def _read_safe(path: str) -> str | None:
         return None
 
 
+def _nav_order() -> dict[str, list[str]] | None:
+    """解析 wiki README.md 的「Wiki 导航」，返回 {分类目录名: [文档文件名]} 顺序。
+
+    - 分类与文档的展示顺序以 README 导航为准（作者维护的期望顺序，如
+      「架构设计」分类下「架构设计.md」总览文档排第一）；
+    - README 缺失 / 无 `## 分类` 结构时返回 None，调用方回退默认排序。
+    """
+    readme = _wiki_root() / "README.md"
+    try:
+        text = readme.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    order: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        m_cat = re.match(r"^##\s+(.+?)\s*$", line)
+        if m_cat:
+            current = m_cat.group(1).strip()
+            order.setdefault(current, [])
+            continue
+        if current is None:
+            continue
+        m_doc = re.match(r"^-\s+\[[^\]]*\]\(([^)]+)\)", line)
+        if m_doc:
+            rel = m_doc.group(1).strip()
+            if rel.endswith(".md") and "/" in rel:
+                order[current].append(Path(rel).name)
+    return order or None
+
+
+def _apply_nav_order(tree: list[dict], nav: dict[str, list[str]]) -> list[dict]:
+    """按 README 导航顺序重排分类与分类内文档；未列出的保持原序追加到末尾。"""
+    cat_rank = {name: i for i, name in enumerate(nav)}
+    for c in tree:
+        names = nav.get(c["_dir"])
+        if names:
+            rank = {Path(n).stem: i for i, n in enumerate(names)}
+            c["docs"].sort(key=lambda d: rank.get(d["name"], len(rank)))
+    tree.sort(key=lambda c: cat_rank.get(c["_dir"], len(cat_rank)))
+    for c in tree:
+        c.pop("_dir", None)
+    return tree
+
+
 def docs_tree() -> list[dict]:
     """扫描 wiki 返回目录树：[{category, docs: [{name, path, title}]}]。"""
     root = _wiki_root()
     if not root.is_dir():
         return []
+    nav = _nav_order()
     tree: list[dict] = []
     for d in sorted(root.iterdir()):
         if not d.is_dir():
@@ -97,7 +142,9 @@ def docs_tree() -> list[dict]:
             # 先修复乱码目录名再查展示标签（保证 'CLI╩╣╙├' → 'CLI使用' → 'CLI 使用'）
             real_name = _fix_mojibake(d.name)
             tree.append({"category": _CATEGORY_LABELS.get(real_name, real_name),
-                         "docs": docs})
+                         "_dir": real_name, "docs": docs})
+    if nav is not None:
+        tree = _apply_nav_order(tree, nav)
     return tree
 
 
