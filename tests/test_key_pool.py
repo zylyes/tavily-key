@@ -162,44 +162,6 @@ def test_project_stats_aggregates(pool):
     assert stats == {"p-a": 2, "p-b": 1}
 
 
-def test_exhaustion_eta(pool):
-    """按近 N 天日均消耗估算额度耗尽天数。"""
-    pool.add_key(KEY1)
-    conn = pool._get_conn()
-    now = key_pool.time.time()
-    # 近 7 天每天 10 积分 → 日均 10；剩余额度 500 → 预计 50 天
-    for i in range(7):
-        conn.execute(
-            "INSERT INTO request_log (key_masked, endpoint, credits_consumed, success, created_at) VALUES (?,?,?,?,?)",
-            (MASK1, "search", 10, 1, now - i * 86400),
-        )
-    conn.execute(
-        "UPDATE api_keys SET credits_used=500, credits_limit=1000 WHERE masked=?",
-        (MASK1,),
-    )
-    conn.commit()
-    eta = pool.exhaustion_eta(days=7)
-    assert len(eta) == 1
-    assert eta[0]["masked"] == MASK1
-    assert eta[0]["remaining"] == 500
-    assert eta[0]["daily_avg"] == pytest.approx(10.0)
-    assert eta[0]["eta_days"] == pytest.approx(50.0)
-
-
-def test_exhaustion_eta_no_usage(pool):
-    """无消耗记录时 eta_days 为 None（无法估算）。"""
-    pool.add_key(KEY1)
-    conn = pool._get_conn()
-    conn.execute(
-        "UPDATE api_keys SET credits_used=100, credits_limit=1000 WHERE masked=?",
-        (MASK1,),
-    )
-    conn.commit()
-    eta = pool.exhaustion_eta(days=7)
-    assert eta and eta[0]["eta_days"] is None
-    assert eta[0]["remaining"] == 900
-
-
 # ── 健康检查防误伤 ─────────────────────────────────────────────
 class _FakeAuthErrorClient:
     def search(self, *a, **k):

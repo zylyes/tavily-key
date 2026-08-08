@@ -1,4 +1,4 @@
-"""API 路由：用量聚合 / 趋势 / 额度耗尽预测 / 项目列表。"""
+"""API 路由：用量聚合 / 趋势 / 项目列表。"""
 from __future__ import annotations
 
 from fastapi import APIRouter
@@ -21,15 +21,6 @@ def api_usage_trend(days: int = 7, source: str = "", project: str = ""):
 
     days = max(1, min(int(days), 90))
     return {"ok": True, "trend": pool.get_usage_trend(days, source.strip(), project.strip())}
-
-
-@router.get("/api/usage/eta")
-def api_usage_eta(days: int = 7):
-    """按近 N 天本地日均消耗估算各 active key 的额度耗尽时间（供面板展示）。"""
-    from dashboard import pool
-
-    days = max(1, min(int(days), 90))
-    return {"ok": True, "eta": pool.exhaustion_eta(days)}
 
 
 @router.get("/api/projects")

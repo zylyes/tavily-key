@@ -442,16 +442,6 @@ export const getUsageTrend = (days = 7, source = '', project = '') =>
     `/api/usage/trend?days=${encodeURIComponent(days)}&source=${encodeURIComponent(source)}`
       + `&project=${encodeURIComponent(project)}`)
 
-/** GET /api/usage/eta?days= —— 按近 N 天日均消耗估算各 active key 额度耗尽时间 */
-export interface UsageEtaItem {
-  masked: string
-  remaining: number
-  daily_avg: number
-  eta_days: number | null
-}
-export const getUsageEta = (days = 7) =>
-  request<{ ok: true; eta: UsageEtaItem[] }>(`/api/usage/eta?days=${encodeURIComponent(days)}`)
-
 /** GET /api/projects —— 请求日志中出现过的项目 ID（面板筛选下拉） */
 export const getProjects = () =>
   request<{ ok: true; projects: string[] }>('/api/projects')

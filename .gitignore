@@ -39,6 +39,7 @@ _*.png
 Thumbs.db
 .idea/
 .vscode/
+.qoder/
 docs/wiki/wiki-manifest.json
 docs/memory/
 

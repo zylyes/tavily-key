@@ -5,6 +5,14 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.13.0] - 2026-08-08
+
+### Changed
+
+- **去除用量耗尽预测**：Key 列表额度列不再显示「约 N 天后耗尽」估算（近 7 天
+  日均消耗估算无实际意义）；同步移除 `GET /api/usage/eta` 接口、
+  `KeyPool.exhaustion_eta()` 方法及前端相关轮询/展示代码。
+
 ## [0.12.4] - 2026-08-08
 
 ### Changed
@@ -549,6 +557,14 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.13.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.0
+[0.12.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.4
+[0.12.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.3
+[0.12.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.2
+[0.12.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.1
+[0.12.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.0
+[0.11.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.11.0
+[0.10.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.10.0
 [0.9.5]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.5
 [0.9.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.4
 [0.9.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.9.3

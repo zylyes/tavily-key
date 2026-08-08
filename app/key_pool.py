@@ -1114,40 +1114,6 @@ class KeyPool:
         ).fetchall()
         return [r["project_id"] for r in rows]
 
-    def exhaustion_eta(self, days: int = 7) -> list[dict]:
-        """按近 N 天本地日均消耗估算每个 active key 的额度耗尽时间。
-
-        基于 request_log 成功请求的 credits_consumed 聚合（research 等接口本地
-        记 0、损耗以官方 /usage 为准，故 research 占比高的 key 估算偏保守）。
-        返回 [{masked, remaining, daily_avg, eta_days}]：
-        - remaining：剩余额度（effective_limit − credits_used，<=0 视为已耗尽）
-        - daily_avg：近 N 天日均消耗（无成功请求记录为 0）
-        - eta_days：预计耗尽天数（remaining / daily_avg；无消耗或未同步时为 None）
-        """
-        days = max(1, min(int(days), 90))
-        since = time.time() - days * 86400
-        conn = self._get_conn()
-        rows = conn.execute(
-            "SELECT key_masked, SUM(credits_consumed) AS credits FROM request_log "
-            "WHERE created_at >= ? AND success = 1 GROUP BY key_masked",
-            (since,),
-        ).fetchall()
-        burn = {r["key_masked"]: float(r["credits"] or 0) / days for r in rows}
-        out: list[dict] = []
-        for k in self.list_keys():
-            if not k.is_active:
-                continue
-            remaining = max(0, k.effective_limit - k.credits_used)
-            daily = burn.get(k.masked, 0.0)
-            eta = (remaining / daily) if (daily > 0 and remaining > 0) else None
-            out.append({
-                "masked": k.masked,
-                "remaining": remaining,
-                "daily_avg": round(daily, 2),
-                "eta_days": round(eta, 1) if eta is not None else None,
-            })
-        return out
-
     def query_logs(self, endpoint: str = "", key_masked: str = "", status: str = "",
                    since: float = 0.0, until: float = 0.0, source: str = "",
                    project_id: str = "", limit: int = 200, offset: int = 0) -> tuple[list[dict], int]:
