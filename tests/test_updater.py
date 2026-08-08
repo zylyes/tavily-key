@@ -85,6 +85,24 @@ def test_is_newer():
     assert updater._is_newer("0.9.2-beta.3", "0.9.2-beta.2")
 
 
+def test_is_newer_pre_release_numeric():
+    """pre-release 后缀数字段按数值比较（beta.10 > beta.9），标签按优先级。"""
+    # 数值位数：此前字符串比较会把 beta.10 判为小于 beta.9（更新通知静默丢失）
+    assert updater._is_newer("0.9.2-beta.10", "0.9.2-beta.9")
+    assert updater._is_newer("0.9.2-beta.9", "0.9.2-beta.8")
+    assert not updater._is_newer("0.9.2-beta.9", "0.9.2-beta.10")
+    # 标签优先级：alpha < beta < rc（跨标签数值不参与）
+    assert updater._is_newer("0.9.2-rc.1", "0.9.2-beta.9")
+    assert updater._is_newer("0.9.2-beta.1", "0.9.2-alpha.9")
+    assert not updater._is_newer("0.9.2-alpha.9", "0.9.2-beta.1")
+    # 正式版 > 任何 pre-release
+    assert updater._is_newer("0.9.2", "0.9.2-rc.99")
+    assert not updater._is_newer("0.9.2-rc.99", "0.9.2")
+    # 无数字后缀（beta）视为 beta.0
+    assert updater._is_newer("0.9.2-beta.1", "0.9.2-beta")
+    assert not updater._is_newer("0.9.2-beta", "0.9.2-beta.1")
+
+
 # ── check_update ────────────────────────────────────────────
 def test_check_update_success(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())

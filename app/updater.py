@@ -115,15 +115,32 @@ def _version_tuple(v: str) -> tuple:
     return (nums[0], nums[1], nums[2], pre)
 
 
+# pre-release 后缀类别优先级（PEP 440 简化）：dev < alpha < beta < rc < 正式版
+_PRE_ORDER = {"dev": -1, "alpha": 0, "a": 0, "beta": 1, "b": 1,
+              "rc": 2, "pre": 2, "preview": 2}
+
+
+def _pre_key(pre: str) -> tuple:
+    """把 pre-release 后缀（如 'beta.2'）解析为可比较键：(类别序, 数字列表)。
+
+    'beta.10' > 'beta.9'（数字按数值比较而非字符串）；无后缀（正式版）最高。
+    未知标签回退 beta 级（与旧行为一致）。
+    """
+    if not pre:
+        return (len(_PRE_ORDER) + 1, [0])   # 正式版 > 任何 pre-release
+    m = re.match(r"^([a-zA-Z]+)\.?(.*)$", pre)
+    label = (m.group(1) if m else "").lower()
+    nums = [int(x) for x in re.findall(r"\d+", m.group(2) if m else "")]
+    return (_PRE_ORDER.get(label, 1), nums or [0])
+
+
 def _is_newer(latest: str, current: str) -> bool:
     """latest 是否比 current 新（语义化比较，pre-release 低于正式版）。"""
     lt, ct = _version_tuple(latest), _version_tuple(current)
     if lt[:3] != ct[:3]:
         return lt[:3] > ct[:3]
-    # 数字部分相同：正式版（无 pre）> 有 pre 后缀
-    if bool(lt[3]) != bool(ct[3]):
-        return not lt[3]
-    return lt[3] > ct[3]
+    # 数字部分相同：按 pre 后缀键比较（无后缀 = 正式版，级别最高）
+    return _pre_key(lt[3]) > _pre_key(ct[3])
 
 
 def _version_type() -> str:
