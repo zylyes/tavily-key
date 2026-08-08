@@ -82,9 +82,14 @@ if not exist "web\dist\index.html" (
 )
 echo.
 
-rem -- Stop any running Tavily.exe (a running instance locks the output exe
-rem    so PyInstaller cannot overwrite it; the app must be closed to rebuild).
-taskkill /IM Tavily.exe /F >nul 2>nul
+rem -- Stop Tavily.exe only when it runs FROM the build output folder
+rem    (out\dist\Tavily\Tavily.exe): a running instance locks the output
+rem    exe so PyInstaller cannot overwrite it. Tavily.exe instances
+rem    installed or run from other locations are left untouched.
+rem    Matching is done by executable path (case-insensitive prefix check
+rem    against the build output dir), not by image name alone.
+set "BUILD_APP_DIR=%CD%\out\dist\Tavily"
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"name='Tavily.exe'\" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith($env:BUILD_APP_DIR.ToLower()) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>nul
 rem -- Wait briefly so the killed process releases its file handles.
 ping -n 3 127.0.0.1 >nul 2>nul
 rem -- Fresh work dir: out\build (PyInstaller intermediate files).

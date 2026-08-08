@@ -5,6 +5,21 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.13.2] - 2026-08-08
+
+### Added
+
+- **下载控制（暂停 / 继续 / 取消）**：打包版自动更新下载支持暂停（保持连接、可继续）、继续、取消（终止后台线程并清理临时文件）——`updater` 新增 `pause_download` / `resume_download` / `cancel_download` 与 `_pause_event` / `_cancel_event` 控制，新增 `POST /api/update/pause`、`/resume`、`/cancel` 端点（下载状态新增 `paused` / `cancelled`），前端「关于与更新」下载进度条配套暂停 / 继续 / 取消按钮。
+- **更新公告弹窗内嵌下载进度 + 最小化悬浮通知**：「立即更新」改为点击直接开始下载（移除确认弹窗），下载进度展示在更新公告弹窗内；弹窗可最小化为右下角悬浮通知（点击恢复），下载完成后提供「重启应用」。
+
+### Changed
+
+- **构建脚本按路径杀进程**：`build_win.bat` 仅终止从构建输出目录（`out\dist\Tavily`）运行的 Tavily.exe 实例（按可执行文件路径前缀匹配），不再按进程名误杀其他位置安装/运行的实例。
+
+### Fixed
+
+- 更新下载取消测试改用临时目录（原相对路径 `dest.zip` 会在项目根残留文件）。
+
 ## [0.13.1] - 2026-08-08
 
 ### Added
@@ -563,6 +578,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.13.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.2
 [0.13.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.1
 [0.13.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.0
 [0.12.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.12.4

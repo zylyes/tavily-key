@@ -16,6 +16,7 @@ export const ICONS: Record<string, string> = {
 
   // 窗口控制
   minus: '<path d="M5 12h14"/>',
+  minimize: '<path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/>',
   maximize: '<rect x="5" y="5" width="14" height="14" rx="2"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
 
@@ -39,6 +40,7 @@ export const ICONS: Record<string, string> = {
   collapse: '<path d="M11 5l-7 7 7 7"/><path d="M20 5l-7 7 7 7"/>',
   expand: '<path d="M13 5l7 7-7 7"/><path d="M4 5l7 7-7 7"/>',
   play: '<path d="M6 4.5v15l13-7.5z"/>',
+  pause: '<path d="M8 5v14M16 5v14"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   alert: '<path d="M12 3l10 18H2z"/><path d="M12 10v4M12 17.5h.01"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 7.5h.01"/>',

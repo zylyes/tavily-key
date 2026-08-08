@@ -11,6 +11,8 @@ def reset_updater_state():
     updater._notified_version = None
     updater._dl.update(state="idle", received=0, total=0, error="", version="",
                        path="", body="")
+    updater._pause_event.clear()
+    updater._cancel_event.clear()
     yield
 
 
@@ -82,13 +84,13 @@ def test_is_newer():
 # ── check_update ────────────────────────────────────────────
 def test_check_update_success(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.2"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
     r = updater.check_update(force=True)
     assert r["ok"] is True
     assert r["disabled"] is False
     assert r["update_available"] is True
     assert r["current_version"] == updater.__version__
-    assert r["latest_version"] == "0.13.2"
+    assert r["latest_version"] == "0.13.3"
     assert r["release_url"].startswith("https://github.com")
     assert r["body"] == "更新说明"
     assert r["error"] == ""
@@ -167,7 +169,7 @@ def test_handle_auto_update_notifies(monkeypatch):
     tray = _FakeTray()
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.2", body="新增功能A；修复B"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3", body="新增功能A；修复B"))
     monkeypatch.setattr("notify.send_webhook",
                         lambda url, payload: sent.append((url, payload)) or True)
     calls: list[tuple] = []
@@ -189,7 +191,7 @@ def test_handle_auto_update_dedupes_by_version(monkeypatch):
     """同一版本只通知一次（去重），第二次调用不再通知。"""
     tray = _FakeTray()
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.2"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
 
     updater.handle_auto_update(tray=tray, webhook="")
     updater.handle_auto_update(tray=tray, webhook="")
@@ -204,7 +206,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     """webhook 通知含更新公告摘要与版本信息。"""
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.2"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
 
     def fake_webhook(url, payload):
         sent.append((url, payload))
@@ -215,7 +217,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     assert len(sent) == 1
     assert sent[0][0] == "https://example.com/hook"
     assert sent[0][1]["event"] == "update_available"
-    assert sent[0][1]["latest_version"] == "0.13.2"
+    assert sent[0][1]["latest_version"] == "0.13.3"
 
 
 # ── 自动更新：资产解析 / 下载 / 应用 ─────────────────────────
@@ -237,9 +239,9 @@ def test_asset_info_none():
 
 def test_check_update_includes_asset_and_can_auto(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.2"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
     r = updater.check_update(force=True)
-    assert r["asset_name"] == "Tavily-v0.13.2-win64.zip"
+    assert r["asset_name"] == "Tavily-v0.13.3-win64.zip"
     assert r["asset_url"].startswith("https://")
     assert r["asset_size"] == 12345
     assert r["can_auto_update"] is False  # 测试环境非打包版
@@ -264,6 +266,116 @@ def test_start_download_rejected_not_frozen(monkeypatch):
     ok, err = updater.start_download()
     assert ok is False
     assert "打包版" in err
+
+
+# ── 暂停 / 继续 / 取消 ──────────────────────────────────────
+def test_pause_resume_rejected_when_idle():
+    ok, err = updater.pause_download()
+    assert ok is False and "下载" in err
+    ok, err = updater.resume_download()
+    assert ok is False and "下载" in err
+    ok, err = updater.cancel_download()
+    assert ok is False and "下载" in err
+
+
+def test_pause_resume_flow(monkeypatch):
+    monkeypatch.setattr(updater, "can_auto_update", lambda: True)
+    updater._dl.update(state="downloading", received=10, total=100)
+    ok, _ = updater.pause_download()
+    assert ok is True
+    assert updater._pause_event.is_set()
+    assert updater.get_download_status()["state"] == "paused"
+    # 已暂停时重复暂停应失败
+    ok, _ = updater.pause_download()
+    assert ok is False
+    ok, _ = updater.resume_download()
+    assert ok is True
+    assert not updater._pause_event.is_set()
+    assert updater.get_download_status()["state"] == "downloading"
+    # 已继续时重复继续应失败
+    ok, _ = updater.resume_download()
+    assert ok is False
+
+
+def test_cancel_download_flow(monkeypatch):
+    monkeypatch.setattr(updater, "can_auto_update", lambda: True)
+    updater._dl.update(state="paused", received=10, total=100)
+    ok, _ = updater.cancel_download()
+    assert ok is True
+    assert updater._cancel_event.is_set()
+    assert not updater._pause_event.is_set()
+    assert updater.get_download_status()["state"] == "cancelled"
+    # 已取消后再次取消应失败（state 已变为 cancelled）
+    ok, _ = updater.cancel_download()
+    assert ok is False
+
+
+def test_download_file_cancel_raises(monkeypatch, tmp_path):
+    """取消时 _download_file 应抛出 _DownloadCancelled 并中断写入。"""
+    from pathlib import Path
+
+    class FakeResp:
+        def __init__(self):
+            self.headers = {"Content-Length": "100"}
+            self._calls = 0
+            self._closed = False
+
+        def read(self, size):
+            self._calls += 1
+            if self._calls == 1:
+                return b"x" * size
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self._closed = True
+            return False
+
+    def fake_urlopen(req, timeout):
+        return FakeResp()
+
+    monkeypatch.setattr(updater.urllib.request, "urlopen", fake_urlopen)
+    # 首次 read 后设置取消：下一次循环检测到取消 → 抛异常
+    def fake_set_dl(**kw):
+        if kw.get("received"):
+            updater._cancel_event.set()
+
+    monkeypatch.setattr(updater, "_set_dl", fake_set_dl)
+    with pytest.raises(updater._DownloadCancelled):
+        updater._download_file("https://example.com/x.zip", tmp_path / "dest.zip")
+
+
+def test_download_update_cancelled_cleans_up(monkeypatch, tmp_path):
+    """取消下载后：临时目录被清理，状态回到 idle。"""
+    import zipfile
+    from pathlib import Path
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily/Tavily.exe", b"fake-exe")
+        updater._cancel_event.set()   # 下载中途取消
+        raise updater._DownloadCancelled()
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "idle"
+    # 临时目录已被清理
+    assert not list(tmp_path.glob("tavily-update-*"))
+
+
+def test_start_download_rejects_when_paused(monkeypatch):
+    monkeypatch.setattr(updater, "can_auto_update", lambda: True)
+    updater._dl.update(state="paused", received=10, total=100)
+    ok, err = updater.start_download()
+    assert ok is False
+    assert "下载进行中" in err
 
 
 def test_download_update_success(monkeypatch, tmp_path):

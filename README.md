@@ -12,7 +12,7 @@
 - **网络搜索代理（Tavily 兼容 REST）**：`/search`、`/extract`、`/crawl`、`/map`、`/research`（含 `GET /research/{id}`）官方端点形态，Cherry Studio 等客户端以「自定义 API 地址 + 密钥」直连 Key 池，错误按官方风格映射（401/432/429/503）
 - **Research 增强**：异步任务（wait / status）、流式输出、结构化输出（output_schema）、报告长度与来源数控制
 - **数据备份与恢复**：CLI 与面板一键备份/恢复 `data/`（配置、Key 池、加密密钥、research 缓存），恢复前自动保留 `.pre-restore` 副本，绝不静默覆盖
-- **GitHub 更新检查与自动更新**：从 GitHub 获取最新 release 并与本地版本对比，面板「设置 → 关于与更新」一键检查（结果 toast 提示）/ 后台按周期自动检查（发现新版本托盘 + Webhook 通知）/ CLI `update-check`；**打包版（Tavily.exe）支持一键自动更新**——下载打包产物 → 校验 → 备份旧版 → 替换并重启，data/ 运行数据不丢失；自动检查开关与间隔可配置
+- **GitHub 更新检查与自动更新**：从 GitHub 获取最新 release 并与本地版本对比，面板「设置 → 关于与更新」一键检查（结果 toast 提示）/ 后台按周期自动检查（发现新版本托盘 + Webhook 通知）/ CLI `update-check`；**打包版（Tavily.exe）支持一键自动更新**——下载打包产物 → 校验 → 备份旧版 → 替换并重启，data/ 运行数据不丢失；下载进度展示在更新公告弹窗内，支持暂停 / 继续 / 取消与最小化悬浮通知；自动检查开关与间隔可配置
 - **定时自动同步官方用量**：`usage_auto_sync_hours` 按周期自动调用官方 `/usage` 同步（默认 6h，0=关闭），免费套餐月度额度重置后 exhausted Key 自动恢复，无需手动「更新用量」
 - **Research 任务一键重试**：任务看板失败/错误任务可按提交时原参数一键重试（新 request_id），无需重新填写
 - **面板内置文档**：侧边栏「文档」视图在线浏览 `docs/wiki`（左侧目录树 + Markdown 渲染：表格、代码块语法高亮、防 XSS 转义），无需外部打开文档；打包版内置默认文档，exe 旁放置可编辑的 `docs/wiki` 可自定义覆盖

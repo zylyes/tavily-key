@@ -99,9 +99,12 @@ watch(
         >
           <header v-if="title || closable" class="gmodal-head">
             <h3 class="gmodal-title">{{ title }}</h3>
-            <button v-if="closable" class="gmodal-x" aria-label="关闭" @click="close">
-              <GIcon name="x" :size="14" />
-            </button>
+            <div class="gmodal-head-actions">
+              <slot name="head-actions" />
+              <button v-if="closable" class="gmodal-x" aria-label="关闭" @click="close">
+                <GIcon name="x" :size="14" />
+              </button>
+            </div>
           </header>
           <div class="gmodal-body">
             <slot />
@@ -150,6 +153,11 @@ watch(
   padding: 16px 18px 0;
 }
 .gmodal-title { font-size: 14px; }
+.gmodal-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 .gmodal-x {
   display: flex;
   align-items: center;

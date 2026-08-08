@@ -601,10 +601,10 @@ export const checkUpdate = (force = false) =>
   request<{ ok: true; update: UpdateInfo }>(
     `/api/update/check${force ? '?force=1' : ''}`)
 
-// ── 自动更新（下载 / 状态 / 应用，仅打包版）──────────────────
+// ── 自动更新（下载 / 状态 / 暂停 / 取消 / 应用，仅打包版）──────
 /** GET /api/update/status —— updater.get_download_status() */
 export interface UpdateDownloadStatus {
-  state: 'idle' | 'starting' | 'downloading' | 'done' | 'error'
+  state: 'idle' | 'starting' | 'downloading' | 'paused' | 'done' | 'error' | 'cancelled'
   received: number             // 已下载字节
   total: number                // 总字节（未知为 0）
   error: string
@@ -619,6 +619,18 @@ export const startUpdateDownload = () =>
 /** GET /api/update/status —— 轮询下载进度 */
 export const getUpdateStatus = () =>
   request<{ ok: true; status: UpdateDownloadStatus }>('/api/update/status')
+
+/** POST /api/update/pause —— 暂停下载（保持连接，可继续） */
+export const pauseUpdateDownload = () =>
+  request<{ ok: boolean; error?: string }>('/api/update/pause', jsonInit('POST'))
+
+/** POST /api/update/resume —— 继续已暂停的下载 */
+export const resumeUpdateDownload = () =>
+  request<{ ok: boolean; error?: string }>('/api/update/resume', jsonInit('POST'))
+
+/** POST /api/update/cancel —— 取消下载并清理临时文件 */
+export const cancelUpdateDownload = () =>
+  request<{ ok: boolean; error?: string }>('/api/update/cancel', jsonInit('POST'))
 
 /** POST /api/update/apply —— 应用更新并重启（调用后当前进程将结束） */
 export const applyUpdate = () =>

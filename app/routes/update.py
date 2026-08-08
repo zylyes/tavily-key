@@ -29,10 +29,37 @@ def api_update_download():
 
 @router.get("/api/update/status")
 def api_update_status():
-    """下载进度：idle/starting/downloading/done/error + 已接收/总字节数。"""
+    """下载进度：idle/starting/downloading/paused/done/error/cancelled + 已接收/总字节数。"""
     from updater import get_download_status
 
     return {"ok": True, "status": get_download_status()}
+
+
+@router.post("/api/update/pause")
+def api_update_pause():
+    """暂停正在进行的下载（保持连接，可继续）。"""
+    from updater import pause_download
+
+    ok, err = pause_download()
+    return {"ok": ok, "error": err}
+
+
+@router.post("/api/update/resume")
+def api_update_resume():
+    """继续已暂停的下载。"""
+    from updater import resume_download
+
+    ok, err = resume_download()
+    return {"ok": ok, "error": err}
+
+
+@router.post("/api/update/cancel")
+def api_update_cancel():
+    """取消下载：终止后台线程并清理临时文件。"""
+    from updater import cancel_download
+
+    ok, err = cancel_download()
+    return {"ok": ok, "error": err}
 
 
 @router.post("/api/update/apply")

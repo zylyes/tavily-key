@@ -54,10 +54,17 @@ _cached_result: dict | None = None
 _notified_version: str | None = None
 
 # ── 自动下载状态（面板轮询）──────────────────────────────────
-# state: idle | starting | downloading | done | error
+# state: idle | starting | downloading | paused | done | error | cancelled
 _dl_lock = threading.Lock()
 _dl: dict = {"state": "idle", "received": 0, "total": 0, "error": "", "version": "", "path": "",
              "body": ""}
+# 下载控制：暂停（set=暂停，保持连接不读取）与取消（set=取消）
+_pause_event = threading.Event()
+_cancel_event = threading.Event()
+
+
+class _DownloadCancelled(Exception):
+    """内部信号：下载被用户取消（调用方负责清理并回到 idle）。"""
 
 
 def _version_tuple(v: str) -> tuple:
@@ -323,22 +330,70 @@ def start_download() -> tuple[bool, str]:
     if not can_auto_update():
         return False, "仅打包版（Tavily.exe）支持自动更新"
     with _dl_lock:
-        if _dl["state"] in ("downloading", "starting"):
+        if _dl["state"] in ("downloading", "starting", "paused"):
             return False, "已有下载进行中，请稍候"
+    _pause_event.clear()
+    _cancel_event.clear()
     _set_dl(state="starting", received=0, total=0, error="", version="", path="",
             body="")
     threading.Thread(target=download_update, daemon=True, name="tavily-update-dl").start()
     return True, ""
 
 
+def pause_download() -> tuple[bool, str]:
+    """暂停正在进行的下载（保持连接不读取数据，可继续）。"""
+    with _dl_lock:
+        st = _dl["state"]
+    if st != "downloading":
+        return False, "当前没有正在进行的下载"
+    _pause_event.set()
+    _set_dl(state="paused")
+    _log.info("下载已暂停")
+    return True, ""
+
+
+def resume_download() -> tuple[bool, str]:
+    """继续已暂停的下载。"""
+    with _dl_lock:
+        st = _dl["state"]
+    if st != "paused":
+        return False, "当前没有已暂停的下载"
+    _pause_event.clear()
+    _set_dl(state="downloading")
+    _log.info("下载已继续")
+    return True, ""
+
+
+def cancel_download() -> tuple[bool, str]:
+    """取消下载：通知后台线程终止并清理临时文件，回到 idle。"""
+    with _dl_lock:
+        st = _dl["state"]
+    if st not in ("downloading", "paused", "starting"):
+        return False, "当前没有可取消的下载"
+    _cancel_event.set()
+    _pause_event.clear()   # 解除暂停，让下载循环立即退出
+    _set_dl(state="cancelled", error="")
+    _log.info("下载已取消")
+    return True, ""
+
+
 def _download_file(url: str, dest: Path) -> int:
-    """分块下载 url 到 dest，返回字节数；进度写入模块状态。"""
+    """分块下载 url 到 dest，返回字节数；进度写入模块状态。
+
+    支持暂停（_pause_event）与取消（_cancel_event）：暂停时保持连接
+    不读取数据；取消时抛 _DownloadCancelled 由调用方清理。
+    """
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=_DOWNLOAD_TIMEOUT) as resp:
         total = int(resp.headers.get("Content-Length") or 0)
         received = 0
         with open(dest, "wb") as f:
             while True:
+                # 暂停：等待恢复或取消
+                while _pause_event.is_set() and not _cancel_event.is_set():
+                    time.sleep(0.2)
+                if _cancel_event.is_set():
+                    raise _DownloadCancelled()
                 chunk = resp.read(65536)
                 if not chunk:
                     break
@@ -352,14 +407,18 @@ def download_update() -> None:
     """后台线程主体：下载最新打包 zip → 校验 → 解压到临时目录。
 
     结果写入模块状态 _dl（done 时 path 指向含 Tavily.exe 的新版目录）。
-    任何异常写入 error 状态，不抛给调用线程。
+    任何异常写入 error 状态，不抛给调用线程；用户取消时清理临时目录
+    并回到 idle。
     """
+    tmp: Path | None = None
     try:
         info = check_update(force=True)
         if not info.get("ok"):
             raise RuntimeError(info.get("error") or "更新检查失败")
         if not info.get("asset_url"):
             raise RuntimeError("最新 release 未附带 Windows 打包产物（Tavily-*-win64.zip）")
+        if _cancel_event.is_set():
+            raise _DownloadCancelled()
         version = info.get("latest_version") or ""
         body = info.get("body") or ""
 
@@ -391,6 +450,12 @@ def download_update() -> None:
             raise RuntimeError("压缩包内未找到 Tavily.exe，无法自动更新")
         _set_dl(state="done", received=n, total=n, path=str(top), version=version, body=body)
         _log.info("更新包下载并解压完成：%s", top)
+    except _DownloadCancelled:
+        _log.info("自动更新下载已取消，清理临时文件")
+        _set_dl(state="idle", received=0, total=0, error="", version="", path="", body="")
+        if tmp is not None:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
         err = str(e)[:300]
         _log.error("自动更新下载失败：%s", err)
