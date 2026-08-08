@@ -5,6 +5,31 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.13.4] - 2026-08-08
+
+### Security
+
+- **更新链路安全加固**：资产文件名 / 仓库 / 下载 URL 白名单（仅 github.com 与资产 CDN 后缀，封堵 SSRF）、Zip Slip 防护（解压路径归一化拒绝越界）、下载 SHA-256 digest 完整性校验、重启脚本命令注入防护（元字符拒绝 + `%` 转义）、升级失败自动回滚（backup-old 保留至下次正常启动再清理）。
+- **Host 白名单中间件**：未设置访问令牌时默认拦截带点的外部域名 Host（DNS-rebinding 防护）；本机 / 局域网 IP、主机名、裸主机名与配置域名正常放行，**局域网访问不受影响**；设置令牌后走令牌鉴权。
+- **更新变更端点本机来源校验**：`/api/update/download|pause|resume|cancel|apply` 无令牌时仅接受回环来源（局域网远程调用返回 403）；只读端点（check/status/announcement/notice-pending）不受限。
+
+### Fixed
+
+- **start_download 死锁**：`_set_dl` 在持锁内再次获取非重入锁导致同线程死锁（改为锁内直接更新状态），新增代际号 `_dl_epoch` 防止被取消的旧线程覆盖新任务状态。
+- **pre-release 版本数字段按数值比较**（`beta.10 > beta.9`，修复更新通知静默丢失）。
+- **GBK 中文 zip 条目名乱码**：无 UTF-8 标志的中文文件名被按 CP437 解码损坏（更新后内置 wiki 中文目录名错乱），`_fix_zip_name` 逆映射还原。
+- **配置布尔显式判定**：字符串仅接受 true/1/yes/on/y 为真（修复 `bool("false")==True` 陷阱）；`force` 参数仅接受 0/1。
+- 检查失败改用 600s 短缓存（此前失败按整间隔缓存，瞬时网络故障导致整个间隔不重试）；缓存按仓库失效；通知去重标记仅在所有渠道推送成功后设置；`done` 态重复下载前清理旧临时目录；间隔配置越界（0~8760）与 `24.5` 小数拒绝并返回 400。
+
+### Changed
+
+- **后台自动检查按配置驱动**：按 `update_check_interval_hours`（下限 300s）与 `update_check_enabled` 开关执行；托盘「检查更新」按窗口状态走通知路径。
+- **前端下载状态恢复与自动检查驱动**：刷新 / 重开页面后与后端对账恢复下载状态（继续轮询 / 可重启 / 可取消），自动检查由开关与间隔配置驱动（前端 clamp 1h~8760h），手动检查登记去重避免自动检查重复弹通知。
+
+### 工程与测试
+
+- **前端 vitest 接入**：新增 `npm test`（vitest + jsdom + @vue/test-utils），覆盖更新功能前端逻辑 40 例（useUpdateNotice 25 + updateInterval 15）；后端测试新增 49 例（含 update 路由边界用例）至 379 全绿。
+
 ## [0.13.3] - 2026-08-08
 
 ### Added
@@ -589,6 +614,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.13.4]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.4
 [0.13.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.3
 [0.13.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.2
 [0.13.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.1
