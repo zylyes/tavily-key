@@ -9,6 +9,7 @@ def reset_updater_state():
     updater._cached_result = None
     updater._cached_ts = 0.0
     updater._cached_is_error = False
+    updater._cached_repo = ""
     updater._notified_version = None
     updater._dl_thread = None
     updater._dl_epoch = 0
@@ -279,13 +280,23 @@ def test_asset_info_picks_win64_zip():
         {"name": "source.zip", "browser_download_url": "https://x/s.zip", "size": 1},
     ]}
     a = updater._asset_info(data)
-    assert a == {"asset_name": "Tavily-v1.0.0-win64.zip",
-                 "asset_url": "https://x/z.zip", "asset_size": 12345}
+    assert a["asset_name"] == "Tavily-v1.0.0-win64.zip"
+    assert a["asset_url"] == "https://x/z.zip"
+    assert a["asset_size"] == 12345
+    assert a["digest"] == ""   # 数据未提供 digest
+
+
+def test_asset_info_picks_digest():
+    data = {"assets": [
+        {"name": "Tavily-v1.0.0-win64.zip", "browser_download_url": "https://x/z.zip",
+         "size": 12345, "digest": "sha256:abcd"},
+    ]}
+    assert updater._asset_info(data)["digest"] == "sha256:abcd"
 
 
 def test_asset_info_none():
-    assert updater._asset_info({"assets": []}) == {"asset_name": "", "asset_url": "", "asset_size": 0}
-    assert updater._asset_info({}) == {"asset_name": "", "asset_url": "", "asset_size": 0}
+    assert updater._asset_info({"assets": []}) == {"asset_name": "", "asset_url": "", "asset_size": 0, "digest": ""}
+    assert updater._asset_info({}) == {"asset_name": "", "asset_url": "", "asset_size": 0, "digest": ""}
 
 
 def test_check_update_includes_asset_and_can_auto(monkeypatch):
@@ -805,3 +816,171 @@ def test_handle_auto_update_dedupe_only_after_success(monkeypatch):
     updater.handle_auto_update(tray=_FailingTray(), webhook="https://hook.invalid/",
                                window_open=False)
     assert attempts["tray"] == 3                 # 标记后不再推送
+
+
+# ── P2：缓存按仓库失效 / done 态清理 / SHA-256 / notify_tray / 取消前置 / 清理与回滚 ──
+def test_check_update_cache_keyed_by_repo(monkeypatch):
+    """切换 update_repo 后旧缓存失效，重新请求网络。"""
+    calls: list[str] = []
+    current = ["a/b"]
+    monkeypatch.setattr(updater, "get_settings",
+                        lambda: {"update_repo": current[0], "update_check_interval_hours": 24})
+    monkeypatch.setattr(updater, "_fetch_latest",
+                        lambda repo: calls.append(repo) or _release("1.0.0"))
+    updater.check_update(force=False)
+    updater.check_update(force=False)      # 命中缓存
+    assert len(calls) == 1
+    current[0] = "c/d"
+    updater.check_update(force=False)      # repo 变化 → 重新请求
+    assert len(calls) == 2
+
+
+def test_start_download_cleans_previous_tmp(monkeypatch, tmp_path):
+    """done 态重复下载：先清理上次临时目录再启动新任务。"""
+    old_tmp = tmp_path / "tavily-update-old"
+    old_tmp.mkdir()
+    (old_tmp / "x").write_bytes(b"x")
+    monkeypatch.setattr(updater, "can_auto_update", lambda: True)
+    monkeypatch.setattr(updater, "download_update", lambda gen=None: None)
+    updater._dl.update(state="done", received=100, total=100, error="", version="1.0.0",
+                       path=str(old_tmp / "extracted" / "Tavily"), body="", tmp=str(old_tmp))
+    ok, err = updater.start_download()
+    assert ok is True
+    assert not old_tmp.exists()                      # 旧临时目录已清理
+    assert updater.get_download_status()["tmp"] == ""
+
+
+def test_download_update_cancel_before_check(monkeypatch):
+    """starting 阶段取消：在网络请求前即退出，无需等待。"""
+    called: list = []
+    monkeypatch.setattr(updater, "_fetch_latest",
+                        lambda repo: called.append(repo) or _release("1.0.0"))
+    updater._cancel_event.set()
+    updater.download_update()
+    assert called == []
+    assert updater.get_download_status()["state"] == "idle"
+
+
+def test_download_update_digest_mismatch(monkeypatch, tmp_path):
+    """SHA-256 digest 不匹配时拒绝（内容可能被篡改）。"""
+    import zipfile
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["digest"] = "sha256:" + "0" * 64
+        return r
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily/Tavily.exe", b"fake-exe")
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "error"
+    assert "SHA-256" in st["error"]
+
+
+def test_download_update_digest_match(monkeypatch, tmp_path):
+    """digest 正确时通过完整性校验并完成解压。"""
+    import hashlib
+    import io
+    import zipfile
+
+    # 固定内容 + 固定时间戳生成 zip 字节，保证摘要稳定
+    zinfo = zipfile.ZipInfo("Tavily/Tavily.exe", date_time=(2026, 1, 1, 0, 0, 0))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(zinfo, b"fake-exe")
+    payload = buf.getvalue()
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fetch(repo):
+        r = _release("1.0.0")
+        r["digest"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+        return r
+
+    def fake_download(url, dest):
+        dest.write_bytes(payload)
+        return 12345
+
+    monkeypatch.setattr(updater, "_fetch_latest", fetch)
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    assert updater.get_download_status()["state"] == "done"
+
+
+def test_handle_auto_update_respects_notify_tray(monkeypatch):
+    """配置 notify_tray=False 时，窗口未打开也不弹托盘气泡（webhook 不受影响）。"""
+    tray = _FakeTray()
+    sent: list = []
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg(notify_tray=False))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
+    monkeypatch.setattr("notify.send_webhook", lambda url, payload: sent.append(url) or True)
+    updater.handle_auto_update(tray=tray, webhook="https://example.com/hook", window_open=False)
+    assert tray.notifications == []
+    assert len(sent) == 1
+    assert updater.consume_open_notice() == ""
+
+
+def test_bat_escape():
+    """bat 内 % 双写为 %% 避免变量展开。"""
+    assert updater._bat_escape("C:/Program Files/%x%") == "C:/Program Files/%%x%%"
+    assert updater._bat_escape("no-percent") == "no-percent"
+    assert updater._bat_escape("") == ""
+
+
+def test_cleanup_after_update_keeps_backup_when_pending(monkeypatch, tmp_path):
+    """存在 update-pending.json（上次更新未确认）→ 保留 backup-old、删除标记。"""
+    base = tmp_path / "base"
+    (base / "backup-old").mkdir(parents=True)
+    (base / "backup-old" / "Tavily.exe").write_bytes(b"old")
+    (tmp_path / "update-pending.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr("paths.base_dir", lambda: base)
+    monkeypatch.setattr("paths.runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
+    updater.cleanup_after_update()
+    assert (base / "backup-old").exists()
+    assert not (tmp_path / "update-pending.json").exists()
+
+
+def test_cleanup_after_update_removes_backup_without_pending(monkeypatch, tmp_path):
+    """无 update-pending.json（正常启动）→ 清理 backup-old。"""
+    base = tmp_path / "base"
+    (base / "backup-old").mkdir(parents=True)
+    monkeypatch.setattr("paths.base_dir", lambda: base)
+    monkeypatch.setattr("paths.runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path / "tmp"))
+    updater.cleanup_after_update()
+    assert not (base / "backup-old").exists()
+
+
+def test_apply_update_success_writes_files(monkeypatch, tmp_path):
+    """apply 成功：写入 update-pending.json（回滚标记）与 last-update.json（公告），并启动 bat。"""
+    import json as _json
+
+    monkeypatch.setattr(updater, "can_auto_update", lambda: True)
+    monkeypatch.setattr("paths.runtime_dir", lambda: tmp_path)
+    monkeypatch.setattr("mcp_manager.stop", lambda: None)
+    monkeypatch.setattr("proxy_manager.stop", lambda: None)
+    new_dir = tmp_path / "new"
+    new_dir.mkdir(parents=True)
+    updater._dl.update(state="done", received=100, total=100, error="",
+                       version="1.0.0", path=str(new_dir), body="说明")
+    spawned: list = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: spawned.append(args))
+    r = updater.apply_update()
+    assert r["ok"] is True
+    assert (tmp_path / "update-pending.json").exists()
+    assert (tmp_path / "last-update.json").exists()
+    ann = _json.loads((tmp_path / "last-update.json").read_text(encoding="utf-8"))
+    assert ann["version"] == "1.0.0"
+    assert spawned and spawned[0][:2] == ["cmd", "/c"]

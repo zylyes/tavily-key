@@ -64,6 +64,7 @@ _lock = threading.Lock()
 _cached_ts = 0.0      # time.monotonic 上次真实检查时间
 _cached_result: dict | None = None
 _cached_is_error = False   # 最近一次缓存结果是否为失败（失败用短 TTL，见 _FAIL_CACHE_TTL）
+_cached_repo = ""     # 缓存对应的 update_repo（切换仓库后缓存失效）
 # 后台自动检查已通知过的版本（按版本去重，避免每次检查都重复推送）
 _notified_version: str | None = None
 
@@ -71,7 +72,7 @@ _notified_version: str | None = None
 # state: idle | starting | downloading | paused | done | error | cancelled
 _dl_lock = threading.Lock()
 _dl: dict = {"state": "idle", "received": 0, "total": 0, "error": "", "version": "", "path": "",
-             "body": ""}
+             "body": "", "tmp": ""}
 # 下载控制：暂停（set=暂停，保持连接不读取）与取消（set=取消）
 _pause_event = threading.Event()
 _cancel_event = threading.Event()
@@ -178,7 +179,10 @@ def _check_interval_hours() -> int:
 
 
 def _asset_info(data: dict) -> dict:
-    """从 release JSON 中挑出 Windows 打包产物（Tavily-*-win64.zip）。"""
+    """从 release JSON 中挑出 Windows 打包产物（Tavily-*-win64.zip）。
+
+    digest 为 GitHub 提供的 SHA-256（形如 'sha256:<hex>'），下载后用于完整性校验。
+    """
     for a in data.get("assets") or []:
         name = (a.get("name") or "").lower()
         if name.startswith("tavily-") and name.endswith("-win64.zip"):
@@ -186,8 +190,9 @@ def _asset_info(data: dict) -> dict:
                 "asset_name": a.get("name") or "",
                 "asset_url": a.get("browser_download_url") or "",
                 "asset_size": int(a.get("size") or 0),
+                "digest": a.get("digest") or "",
             }
-    return {"asset_name": "", "asset_url": "", "asset_size": 0}
+    return {"asset_name": "", "asset_url": "", "asset_size": 0, "digest": ""}
 
 
 def _fetch_latest(repo: str) -> dict:
@@ -248,11 +253,11 @@ def check_update(force: bool = False) -> dict:
             "asset_name": "", "asset_url": "", "asset_size": 0,
         }
 
-    global _cached_ts, _cached_result, _cached_is_error
+    global _cached_ts, _cached_result, _cached_is_error, _cached_repo
     interval_h = _check_interval_hours()
     with _lock:
         now = time.monotonic()
-        if not force and _cached_result is not None:
+        if not force and _cached_result is not None and _cached_repo == repo:
             if _cached_is_error:
                 # 失败结果用短缓存：瞬时网络故障不会导致整个间隔内不再重试
                 if now - _cached_ts < _FAIL_CACHE_TTL:
@@ -278,6 +283,7 @@ def check_update(force: bool = False) -> dict:
             _cached_result = result
             _cached_ts = time.monotonic()
             _cached_is_error = True
+            _cached_repo = repo
         return dict(result)
 
     result = {
@@ -293,6 +299,7 @@ def check_update(force: bool = False) -> dict:
         _cached_result = result
         _cached_ts = time.monotonic()
         _cached_is_error = False
+        _cached_repo = repo
     _log.info(
         "更新检查完成：当前 %s，最新 %s（%s）",
         __version__, info["latest_version"] or "?",
@@ -329,8 +336,8 @@ def handle_auto_update(tray=None, webhook: str = "", window_open: bool = True,
     # 去重标记必须在“至少一个渠道确实推送成功”之后设置：若所有渠道都推送
     # 失败则不标记，下一轮自动检查会重试，避免用户永远收不到更新提醒。
     sent = False
-    # 系统通知（托盘气泡）：仅主窗口未打开时推送，点击后打开窗口显示公告
-    if not window_open and tray is not None:
+    # 系统通知（托盘气泡）：仅主窗口未打开且配置 notify_tray 开启时推送
+    if not window_open and tray is not None and bool(get_settings().get("notify_tray", True)):
         try:
             tray.notify(title, message)
             mark_open_notice(latest)
@@ -413,12 +420,22 @@ def start_download() -> tuple[bool, str]:
             return False, "已有下载进行中，请稍候"
         if _dl_thread is not None and _dl_thread.is_alive():
             return False, "正在清理上次下载，请稍候"
+        old_tmp = _dl.get("tmp") or ""
         _dl_epoch += 1
         gen = _dl_epoch
-        _set_dl(state="starting", received=0, total=0, error="", version="", path="",
-                body="")
+        # 已在锁内：直接更新（_set_dl 会再次获取同一把非重入锁 → 同线程死锁）
+        _dl.update(state="starting", received=0, total=0, error="", version="", path="",
+                   body="", tmp="")
     _pause_event.clear()
     _cancel_event.clear()
+    if old_tmp:
+        # done 态重复下载：先清理上次的临时目录，避免磁盘累积
+        try:
+            import shutil
+            shutil.rmtree(old_tmp, ignore_errors=True)
+            _log.info("已清理上次下载的临时目录：%s", old_tmp[:200])
+        except Exception:  # noqa: BLE001
+            _log.warning("清理上次下载临时目录失败：%s", old_tmp[:200])
     t = threading.Thread(target=download_update, args=(gen,), daemon=True,
                          name="tavily-update-dl")
     _dl_thread = t
@@ -550,6 +567,8 @@ def download_update(gen: int | None = None) -> None:
         gen = _dl_epoch
     tmp: Path | None = None
     try:
+        if _cancel_event.is_set():
+            raise _DownloadCancelled()   # starting 阶段取消：无需等待网络请求返回
         info = check_update(force=True)
         if not info.get("ok"):
             raise RuntimeError(info.get("error") or "更新检查失败")
@@ -573,13 +592,22 @@ def download_update(gen: int | None = None) -> None:
         tmp.mkdir(parents=True, exist_ok=True)
         zip_path = tmp / asset_name
         _set_dl(state="downloading", received=0, total=int(info.get("asset_size") or 0),
-                error="", version=version, body=body)
+                error="", version=version, body=body, tmp=str(tmp))
         _log.info("开始下载更新包 %s（%s 字节）", zip_path.name, info.get("asset_size"))
         n = _download_file(info["asset_url"], zip_path)
         # 大小校验（GitHub 提供 size）
         expected = int(info.get("asset_size") or 0)
         if expected and n != expected:
             raise RuntimeError(f"下载文件大小不符：{n} ≠ {expected}")
+        # SHA-256 完整性校验（GitHub 提供 digest，如 'sha256:<hex>'）
+        digest = (info.get("digest") or "").strip()
+        if digest:
+            import hashlib
+            expected_digest = digest.removeprefix("sha256:").lower()
+            if expected_digest:
+                actual = hashlib.sha256(zip_path.read_bytes()).hexdigest()
+                if actual != expected_digest:
+                    raise RuntimeError("下载文件 SHA-256 校验失败（内容可能被篡改）")
         # zip 完整性校验
         with zipfile.ZipFile(zip_path) as zf:
             bad = zf.testzip()
@@ -765,23 +793,25 @@ def cleanup_after_update() -> None:
     """新版本启动时清理：旧版备份（backup-old）与过期临时更新目录。
 
     dashboard 启动（lifespan / run_app）调用一次，幂等。
+    语义：update-pending.json 是 apply_update 写入的「应用未确认」标记——若存在
+    （本次启动源于一次自动更新），【保留 backup-old】作为新版本首个启动周期的
+    回滚依据，并删除标记；下次正常启动（无标记）再清理 backup-old。
     """
     try:
         from paths import base_dir, runtime_dir
 
         base = base_dir()
         bak = base / "backup-old"
-        if bak.exists():
+        pending = runtime_dir() / "update-pending.json"
+        keep_backup = False
+        if pending.exists():
+            pending.unlink(missing_ok=True)
+            keep_backup = True
+            _log.info("检测到更新残留标记：本次保留 backup-old 作为回滚依据（下次启动清理）")
+        if not keep_backup and bak.exists():
             import shutil
             shutil.rmtree(bak, ignore_errors=True)
             _log.info("已清理旧版本备份：%s", bak)
-        # 清理 data/update-pending.json（已应用）
-        try:
-            p = runtime_dir() / "update-pending.json"
-            if p.exists():
-                p.unlink()
-        except OSError:
-            pass
         # 清理临时下载目录（超过 1 天）
         try:
             tmp_root = Path(tempfile.gettempdir())
