@@ -15,7 +15,10 @@ if not os.path.isfile('web\\dist\\index.html'):
     raise SystemExit(1)
 datas.append(('web\\dist', 'web/dist'))
 binaries = []
-hiddenimports = ['mcp_server', 'tavily_proxy', 'backup', 'updater', 'wiki_docs', 'uvicorn.loops.auto', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
+hiddenimports = ['mcp_server', 'tavily_proxy', 'backup', 'updater', 'wiki_docs',
+                 'routes.admin', 'routes.keys', 'routes.logs', 'routes.research',
+                 'routes.services', 'routes.update', 'routes.usage',
+                 'uvicorn.loops.auto', 'uvicorn.loops.asyncio', 'uvicorn.protocols.http.auto', 'uvicorn.protocols.http.h11_impl', 'uvicorn.protocols.websockets.auto', 'uvicorn.lifespan.on']
 hiddenimports += collect_submodules('mcp.server')
 hiddenimports += collect_submodules('mcp.shared')
 hiddenimports += collect_submodules('mcp.transport')

@@ -5,6 +5,21 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.12.0] - 2026-08-08
+
+### Changed
+
+- **API 路由按业务域拆分（架构重构）**：`dashboard.py`（约 1390 行）的 HTTP
+  端点按域迁至新的 `app/routes/` 包——`keys`（Key 池/健康/异常/用量同步）、
+  `usage`（聚合/趋势/耗尽预测/项目）、`research`（任务看板/重试/内置文档）、
+  `logs`（日志查询/清理/导出/审计）、`services`（MCP/搜索代理/单实例激活）、
+  `admin`（设置/自启/备份恢复）、`update`（GitHub 更新）七个模块各定义
+  `APIRouter`，由 `dashboard.py` 统一注册并保留窗口/托盘/后台线程/启动入口。
+  - 端点函数**运行时**从 `dashboard` 读取共享状态（`pool` / `_api_cache` /
+    辅助函数），保持测试对 `dashboard.*` 的 monkeypatch 兼容（320 测试全绿）；
+  - `Tavily.spec` 打包 `routes` 包；
+  - **行为无任何变化**，仅为可维护性重构。
+
 ## [0.11.0] - 2026-08-08
 
 ### Added

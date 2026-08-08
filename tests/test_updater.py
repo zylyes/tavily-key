@@ -82,13 +82,13 @@ def test_is_newer():
 # ── check_update ────────────────────────────────────────────
 def test_check_update_success(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.12.0"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.0"))
     r = updater.check_update(force=True)
     assert r["ok"] is True
     assert r["disabled"] is False
     assert r["update_available"] is True
     assert r["current_version"] == updater.__version__
-    assert r["latest_version"] == "0.12.0"
+    assert r["latest_version"] == "0.13.0"
     assert r["release_url"].startswith("https://github.com")
     assert r["body"] == "更新说明"
     assert r["error"] == ""
@@ -167,7 +167,7 @@ def test_handle_auto_update_notifies(monkeypatch):
     tray = _FakeTray()
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.12.0", body="新增功能A；修复B"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.0", body="新增功能A；修复B"))
     monkeypatch.setattr("notify.send_webhook",
                         lambda url, payload: sent.append((url, payload)) or True)
     calls: list[tuple] = []
@@ -189,7 +189,7 @@ def test_handle_auto_update_dedupes_by_version(monkeypatch):
     """同一版本只通知一次（去重），第二次调用不再通知。"""
     tray = _FakeTray()
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.12.0"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.0"))
 
     updater.handle_auto_update(tray=tray, webhook="")
     updater.handle_auto_update(tray=tray, webhook="")
@@ -204,7 +204,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     """webhook 通知含更新公告摘要与版本信息。"""
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.12.0"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.0"))
 
     def fake_webhook(url, payload):
         sent.append((url, payload))
@@ -215,7 +215,7 @@ def test_handle_auto_update_webhook(monkeypatch):
     assert len(sent) == 1
     assert sent[0][0] == "https://example.com/hook"
     assert sent[0][1]["event"] == "update_available"
-    assert sent[0][1]["latest_version"] == "0.12.0"
+    assert sent[0][1]["latest_version"] == "0.13.0"
 
 
 # ── 自动更新：资产解析 / 下载 / 应用 ─────────────────────────
@@ -237,9 +237,9 @@ def test_asset_info_none():
 
 def test_check_update_includes_asset_and_can_auto(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.12.0"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.0"))
     r = updater.check_update(force=True)
-    assert r["asset_name"] == "Tavily-v0.12.0-win64.zip"
+    assert r["asset_name"] == "Tavily-v0.13.0-win64.zip"
     assert r["asset_url"].startswith("https://")
     assert r["asset_size"] == 12345
     assert r["can_auto_update"] is False  # 测试环境非打包版
