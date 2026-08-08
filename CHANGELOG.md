@@ -5,6 +5,17 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.13.3] - 2026-08-08
+
+### Added
+
+- **托盘菜单「检查更新」**：托盘右键菜单新增「检查更新」（强制刷新网络）；主窗口未打开时以系统通知（托盘气泡）提示新版本，点击气泡自动打开主窗口并弹出更新公告（新增 `GET /api/update/notice-pending` 一次性标记端点，前端轮询消费）。
+- **前端全局更新公告模块**：新增 `useUpdateNotice` composable（模块级单例）统一管理公告弹窗 / 右下角悬浮通知 / 下载进度状态，从设置页移至 App 壳层全局可用；右下角通知支持按版本去重与「× 彻底关闭」（本次会话不再自动弹出）。
+
+### Changed
+
+- **更新通知按主窗口状态区分**：主窗口可见时发现新版本仅 Webhook 推送 + 前端右下角悬浮通知（不再弹系统托盘气泡打扰）；主窗口未打开（托盘后台）时推送托盘气泡（`handle_auto_update` 新增 `window_open` / `force` 参数）。
+
 ## [0.13.2] - 2026-08-08
 
 ### Added
@@ -578,6 +589,7 @@
 - `_classify_error` 扩展为 auth / quota / rate / other 四类
 - 数据库 schema 新增 `is_exhausted`、`plan`、`plan_usage`、`plan_limit`、`usage_synced_at`、`request_id` 列（自动迁移兼容旧库）
 
+[0.13.3]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.3
 [0.13.2]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.2
 [0.13.1]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.1
 [0.13.0]: https://github.com/zylyes/tavily-key/releases/tag/v0.13.0

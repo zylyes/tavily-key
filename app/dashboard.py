@@ -223,8 +223,23 @@ _UPDATE_FIRST_DELAY = 60.0       # 秒：启动后多久进行首次检查
 _UPDATE_MIN_INTERVAL = 300.0     # 秒：检查间隔下限（配置为 1h 时用 3600）
 
 
+def _window_visible() -> bool:
+    """主窗口当前是否可见（打开状态）；无窗口模式（--server/--mcp/--proxy）返回 False。"""
+    if not _HWND:
+        return False
+    try:
+        return bool(ctypes.windll.user32.IsWindowVisible(_HWND))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _update_check_loop(stop_event: threading.Event) -> None:
-    """后台自动检查更新：发现新版本推托盘/Webhook 通知。"""
+    """后台自动检查更新：发现新版本时通知用户。
+
+    主窗口可见时仅 Webhook 推送（前端页面轮询 /api/update/check 会显示
+    右下角通知，避免系统气泡打扰）；主窗口未打开（托盘后台）时推系统通知
+    （托盘气泡），点击后打开窗口并展示更新公告。
+    """
     from logging_setup import get_logger
 
     log = get_logger("updater")
@@ -246,6 +261,7 @@ def _update_check_loop(stop_event: threading.Event) -> None:
             handle_auto_update(
                 tray=_TRAY.get("icon"),
                 webhook=(get_settings().get("notify_webhook") or "").strip(),
+                window_open=_window_visible(),
             )
         except Exception as e:  # noqa: BLE001
             log.warning("后台更新检查异常: %s", str(e)[:200])
@@ -816,6 +832,36 @@ def _tray_show() -> None:
         pass
 
 
+def _tray_balloon_click() -> None:
+    """托盘气泡（系统通知）点击：打开主窗口并让前端展示更新公告。
+
+    气泡由 updater.handle_auto_update 在窗口未打开时弹出；点击后打开窗口，
+    前端轮询 /api/update/notice-pending 消费标记并弹出公告弹窗。
+    """
+    try:
+        _tray_show()
+        from updater import _notified_version, mark_open_notice
+        mark_open_notice(_notified_version or "")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _tray_check_update() -> None:
+    """托盘菜单「检查更新」：手动检查并弹系统通知（点击后打开窗口显示公告）。"""
+    def _run():
+        try:
+            from updater import handle_auto_update
+            handle_auto_update(
+                tray=_TRAY.get("icon"),
+                webhook=(get_settings().get("notify_webhook") or "").strip(),
+                window_open=False,   # 托盘手动检查走系统通知路径
+                force=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
 def _tray_exit() -> None:
     """托盘回调：退出菜单 → 关闭主窗口（走正常退出流程）。"""
     try:
@@ -1161,10 +1207,12 @@ def run_app() -> None:
                 _window_icon_path(),
                 on_show=_tray_show,
                 on_exit=_tray_exit,
+                on_balloon_click=_tray_balloon_click,
                 items=[
                     (1001, "切换 MCP 服务", _tray_toggle_mcp),
                     (1002, "切换搜索代理", _tray_toggle_proxy),
                     (1003, "立即同步用量", _tray_sync_usage),
+                    (1004, "检查更新", _tray_check_update),
                 ],
             )
             tray_icon.start()

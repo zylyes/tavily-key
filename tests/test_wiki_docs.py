@@ -42,3 +42,35 @@ def test_get_doc_rejects_non_md():
     """非 .md 文件被拒绝。"""
     assert wiki_docs.get_doc("wiki-manifest.json") is None
     assert wiki_docs.get_doc("") is None
+
+
+def test_fix_mojibake_restores_chinese_name():
+    """GBK 文件名被按 CP437 解码的乱码可逆映射还原。"""
+    assert wiki_docs._fix_mojibake("CLI╩╣╙├") == "CLI使用"
+    assert wiki_docs._fix_mojibake("Web┐╪╓╞╠¿") == "Web控制台"
+    assert wiki_docs._fix_mojibake("┐∞╦┘┐¬╩╝") == "快速开始"
+    assert wiki_docs._fix_mojibake("║╦╨─╣ª─▄") == "核心功能"
+    # 正常名/非中文名原样返回
+    assert wiki_docs._fix_mojibake("核心功能") == "核心功能"
+    assert wiki_docs._fix_mojibake("README.md") == "README.md"
+    assert wiki_docs._fix_mojibake("") == ""
+
+
+def test_docs_tree_fixes_mojibake_category(monkeypatch, tmp_path):
+    """乱码目录/文件名在目录树中显示正确中文名，path 仍按磁盘真实名可读。"""
+    root = tmp_path / "wiki"
+    moji_dir = "CLI╩╣╙├"
+    (root / moji_dir).mkdir(parents=True)
+    (root / moji_dir / "CLI╩╣╙├.md").write_text("# CLI 使用\n正文内容", encoding="utf-8")
+    monkeypatch.setattr(wiki_docs, "_wiki_root", lambda: root)
+    tree = wiki_docs.docs_tree()
+    assert len(tree) == 1
+    cat = tree[0]
+    # 分类名先修复乱码再映射展示标签
+    assert cat["category"] == "CLI 使用"
+    assert cat["docs"][0]["name"] == "CLI使用"
+    assert cat["docs"][0]["title"] == "CLI 使用"
+    # path 指向磁盘真实乱码名，能正常读取内容
+    doc = wiki_docs.get_doc(cat["docs"][0]["path"])
+    assert doc is not None
+    assert "正文内容" in doc["content"]

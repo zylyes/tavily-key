@@ -15,27 +15,28 @@ import Skeleton from '@/components/Skeleton.vue'
 import { useToast } from '@/composables/useToast'
 import {
   ApiError,
-  applyUpdate,
   backupData,
-  cancelUpdateDownload,
-  checkUpdate,
   exportAuditZip,
   getAutostart,
   getSettings,
-  getUpdateStatus,
-  pauseUpdateDownload,
-  resumeUpdateDownload,
   restoreData,
   saveBlob,
   saveSettings,
   setAutostart,
-  startUpdateDownload,
   type Settings,
   type SettingsPatch,
-  type UpdateDownloadStatus,
-  type UpdateInfo,
 } from '@/api/client'
-import MdView from '@/components/MdView.vue'
+import {
+  doCheckUpdate,
+  openNotice,
+  openRelease,
+  startDownload,
+  update,
+  updateBusy,
+  updateFlow,
+  versionType,
+  versionTypeLabel,
+} from '@/composables/useUpdateNotice'
 import SettingRow from './parts/settings/SettingRow.vue'
 import { saveBackupAs } from '@/utils/webview'
 
@@ -311,10 +312,6 @@ onMounted(async () => {
     applySettings(s.settings)
     publicUrl.value = s.public_url
     if (a) autostart.value = a.enabled
-    // 静默加载最近一次更新检查结果（有缓存则展示，无缓存不触发网络请求）
-    checkUpdate(false)
-      .then((r) => { update.value = r.update })
-      .catch(() => { /* 静默：检查失败不打扰设置页 */ })
   } catch (e) {
     toast.error(`设置加载失败：${errMsg(e)}`)
   } finally {
@@ -322,22 +319,11 @@ onMounted(async () => {
   }
 })
 
-// ── GitHub 更新检查 ──────────────────────────────────────────
-const update = ref<UpdateInfo | null>(null)
-const updateBusy = ref(false)
+// ── 更新检查设置（开关 / 间隔；检查与通知逻辑在 useUpdateNotice 全局共享）──
 const updateEnabled = ref(true)
 const updateInterval = ref('24')
 const updateIntervalUnit = ref<'hour' | 'day' | 'week' | 'month'>('hour')
 const updateCfgSaving = ref(false)
-
-/** 版本类型（beta/正式版）：后端 version_type 优先，回退本地判断（含 - 或 beta/alpha/rc/pre 后缀） */
-const versionType = computed<'stable' | 'beta'>(() => {
-  const vt = update.value?.version_type
-  if (vt === 'beta' || vt === 'stable') return vt
-  const v = update.value?.current_version ?? ''
-  return /[-+](beta|alpha|rc|pre|dev)/i.test(v) || v.includes('-') ? 'beta' : 'stable'
-})
-const versionTypeLabel = computed(() => (versionType.value === 'beta' ? 'Beta 版' : '正式版'))
 
 /** 单位 → 小时换算（月按 30 天计） */
 const UNIT_HOURS: Record<string, number> = { hour: 1, day: 24, week: 168, month: 720 }
@@ -385,38 +371,6 @@ function onUnitChange(u: string | number): void {
   updateIntervalUnit.value = next
 }
 
-async function doCheckUpdate(force = false): Promise<void> {
-  if (updateBusy.value) return
-  updateBusy.value = true
-  try {
-    const r = await checkUpdate(force)
-    update.value = r.update
-    if (r.update.disabled) {
-      toast.info('更新检查已禁用（GitHub 仓库未配置）')
-    } else if (!r.update.ok) {
-      toast.error(`更新检查失败：${r.update.error || '网络错误'}`)
-    } else if (r.update.update_available) {
-      toast.success(`发现新版本 ${r.update.latest_version}（当前 ${r.update.current_version}）`)
-    } else {
-      toast.success(`已是最新版本 ${r.update.current_version}`)
-    }
-  } catch (e) {
-    toast.error(`更新检查失败：${errMsg(e)}`)
-  } finally {
-    updateBusy.value = false
-  }
-}
-
-/** 打开 GitHub 链接：桌面版经 pywebview 桥接用系统浏览器打开，浏览器模式 window.open */
-function openRelease(url: string): void {
-  if (!url) return
-  if (window.pywebview?.api?.open_external) {
-    window.pywebview.api.open_external(url)
-  } else {
-    window.open(url, '_blank', 'noopener')
-  }
-}
-
 /** 自动检查开关（update_check_enabled） */
 async function onUpdateEnabledChange(v: boolean): Promise<void> {
   updateEnabled.value = v
@@ -444,154 +398,6 @@ async function saveUpdateCfg(): Promise<void> {
   } finally {
     updateCfgSaving.value = false
   }
-}
-
-// ── 自动更新流程（直接下载，进度显示在更新公告弹窗内，仅打包版）──
-const updateFlow = ref<'idle' | 'downloading' | 'ready' | 'applying' | 'error'>('idle')
-const updateDl = ref<UpdateDownloadStatus | null>(null)
-const noticeOpen = ref(false)
-/** 更新公告最小化后的右下角悬浮通知 */
-const miniOpen = ref(false)
-let updatePollTimer: number | undefined
-
-/** 点击「立即更新」：直接开始后台下载，并在更新公告弹窗内展示进度 */
-async function startDownload(): Promise<void> {
-  if (updateFlow.value !== 'idle') return
-  updateFlow.value = 'downloading'
-  updateDl.value = null
-  try {
-    const r = await startUpdateDownload()
-    if (!r.ok) {
-      toast.error(`开始下载失败：${r.error || '未知错误'}`)
-      updateFlow.value = 'idle'
-      return
-    }
-    noticeOpen.value = true
-    miniOpen.value = false
-    pollUpdateStatus()
-  } catch (e) {
-    toast.error(`开始下载失败：${errMsg(e)}`)
-    updateFlow.value = 'idle'
-  }
-}
-
-/** 最小化公告弹窗为右下角悬浮通知 */
-function minimizeNotice(): void {
-  noticeOpen.value = false
-  miniOpen.value = true
-}
-
-/** 点击通知重新打开公告弹窗 */
-function restoreNotice(): void {
-  miniOpen.value = false
-  noticeOpen.value = true
-}
-
-/** 关闭右下角通知（下载若进行中不受影响） */
-function closeMini(): void {
-  miniOpen.value = false
-}
-
-function pollUpdateStatus(): void {
-  window.clearInterval(updatePollTimer)
-  updatePollTimer = window.setInterval(async () => {
-    try {
-      const r = await getUpdateStatus()
-      updateDl.value = r.status
-      const st = r.status.state
-      if (st === 'done') {
-        window.clearInterval(updatePollTimer)
-        updateFlow.value = 'ready'
-        toast.success(`新版 ${r.status.version} 已下载完成，可重启应用`)
-      } else if (st === 'error') {
-        window.clearInterval(updatePollTimer)
-        updateFlow.value = 'error'
-      } else if (st === 'cancelled' || st === 'idle') {
-        // 已取消：恢复初始状态
-        window.clearInterval(updatePollTimer)
-        updateFlow.value = 'idle'
-        updateDl.value = null
-      }
-      // starting / downloading / paused 继续轮询
-    } catch {
-      /* 轮询失败忽略，等待下一次 */
-    }
-  }, 800)
-}
-
-/** 暂停 / 继续下载 */
-async function togglePause(): Promise<void> {
-  const paused = updateDl.value?.state === 'paused'
-  try {
-    const r = paused ? await resumeUpdateDownload() : await pauseUpdateDownload()
-    if (!r.ok) {
-      toast.error(`${paused ? '继续' : '暂停'}失败：${r.error || '未知错误'}`)
-    }
-  } catch (e) {
-    toast.error(`${paused ? '继续' : '暂停'}失败：${errMsg(e)}`)
-  }
-}
-
-/** 取消下载并清理 */
-async function cancelDownload(): Promise<void> {
-  try {
-    const r = await cancelUpdateDownload()
-    if (!r.ok) {
-      toast.error(`取消失败：${r.error || '未知错误'}`)
-      return
-    }
-    window.clearInterval(updatePollTimer)
-    updateFlow.value = 'idle'
-    updateDl.value = null
-    toast.info('已取消下载')
-  } catch (e) {
-    toast.error(`取消失败：${errMsg(e)}`)
-  }
-}
-
-/** 下载失败后重试 */
-async function retryDownload(): Promise<void> {
-  updateFlow.value = 'idle'
-  updateDl.value = null
-  await startDownload()
-}
-
-/** 应用更新并重启应用（调用后当前进程将被结束） */
-async function doApplyUpdate(): Promise<void> {
-  if (updateFlow.value !== 'ready') return
-  updateFlow.value = 'applying'
-  try {
-    const r = await applyUpdate()
-    if (!r.ok) {
-      toast.error(`应用更新失败：${r.error || '未知错误'}`)
-      updateFlow.value = 'ready'
-      return
-    }
-    toast.info('正在重启应用，请稍候…', 6000)
-    // 进程即将被结束，页面将断开
-  } catch (e) {
-    toast.error(`应用更新失败：${errMsg(e)}`)
-    updateFlow.value = 'ready'
-  }
-}
-
-function fmtBytes(n: number): string {
-  if (!n) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB']
-  let i = 0
-  let v = n
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024
-    i++
-  }
-  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`
-}
-
-/** 下载进度百分比（总字节未知时返回 -1） */
-function updatePct(): number {
-  const s = updateDl.value
-  if (!s || !s.total) return -1
-  return Math.min(100, Math.round((s.received / s.total) * 100))
 }
 </script>
 
@@ -831,213 +637,16 @@ function updatePct(): number {
           </div>
         </div>
 
-        <!-- 发现新版本：更新公告（点击弹窗查看，支持 Markdown） -->
+        <!-- 发现新版本：更新公告（点击弹窗查看，支持 Markdown；弹窗在 App.vue 全局渲染） -->
         <template v-if="update?.update_available">
           <SettingRow label="更新公告" :hint="`${update.current_version} → ${update.latest_version}`">
-            <GButton size="sm" :disabled="!update.body" @click="noticeOpen = true">
+            <GButton size="sm" :disabled="!update.body" @click="openNotice">
               <GIcon name="eye" :size="13" />查看更新公告
             </GButton>
           </SettingRow>
         </template>
       </GlassCard>
     </div>
-
-    <!-- 更新公告弹窗（Markdown 渲染；点击「立即更新」直接下载并在下方显示进度） -->
-    <GModal v-model:open="noticeOpen" title="更新公告" width="600px">
-      <template #head-actions>
-        <button class="announce-min" aria-label="最小化到右下角通知" @click="minimizeNotice">
-          <GIcon name="minimize" :size="13" />
-        </button>
-      </template>
-      <div class="announce-dialog">
-        <div class="announce-versions">
-          <span class="u-mono announce-ver">{{ update?.current_version ?? '—' }}</span>
-          <span class="announce-arrow">→</span>
-          <span class="u-mono announce-ver announce-ver-new">{{ update?.latest_version ?? '' }}</span>
-          <span class="announce-tag" :class="versionType === 'beta' ? 'is-beta' : ''">
-            {{ versionTypeLabel }}
-          </span>
-        </div>
-        <div class="announce-body">
-          <MdView v-if="update?.body" :text="update.body" />
-          <p v-else class="u-dim">无更新说明，可前往 GitHub 查看发布页</p>
-        </div>
-
-        <!-- 下载进度（公告下方，取代设置页进度条） -->
-        <template
-          v-if="updateFlow === 'downloading' || updateFlow === 'ready' || updateFlow === 'error'"
-        >
-          <div v-if="updateFlow === 'downloading'" class="announce-progress">
-            <div class="announce-progress-head">
-              <span class="announce-progress-title">
-                {{ updateDl?.state === 'paused' ? '下载已暂停' : '正在下载更新包' }}
-              </span>
-              <span class="u-mono u-dim announce-progress-pct">
-                {{ updatePct() >= 0 ? `${updatePct()}%` : '…' }}
-              </span>
-            </div>
-            <div class="update-progress announce-progress-bar">
-              <div
-                class="update-progress-fill"
-                :style="{ width: updatePct() >= 0 ? updatePct() + '%' : '8%' }"
-              />
-            </div>
-            <div class="announce-progress-meta">
-              <span class="u-mono u-dim">
-                {{ fmtBytes(updateDl?.received ?? 0) }} / {{ fmtBytes(updateDl?.total ?? 0) }}
-              </span>
-              <span v-if="updateDl?.state === 'paused'" class="u-dim">
-                已暂停，点击「继续」恢复下载
-              </span>
-            </div>
-          </div>
-          <div v-else-if="updateFlow === 'ready'" class="announce-progress announce-progress-done">
-            <GIcon name="check" :size="15" />
-            <span>
-              新版 <b class="u-mono">{{ updateDl?.version || '' }}</b> 已下载完成，
-              点击「重启应用」完成更新
-            </span>
-          </div>
-          <div v-else-if="updateFlow === 'error'" class="announce-progress announce-progress-error">
-            <GIcon name="alert" :size="15" />
-            <span>
-              下载失败：{{ updateDl?.error || '未知错误' }}，可重试或前往 GitHub 手动下载
-            </span>
-          </div>
-        </template>
-      </div>
-      <template #footer>
-        <!-- 下载中 / 已暂停：暂停/继续 + 取消 -->
-        <template v-if="updateFlow === 'downloading'">
-          <GButton size="sm" @click="togglePause">
-            <GIcon :name="updateDl?.state === 'paused' ? 'play' : 'pause'" :size="13" />
-            {{ updateDl?.state === 'paused' ? '继续' : '暂停' }}
-          </GButton>
-          <GButton size="sm" variant="danger" @click="cancelDownload">
-            <GIcon name="x" :size="13" />取消下载
-          </GButton>
-        </template>
-        <!-- 下载完成：重启应用 -->
-        <template v-else-if="updateFlow === 'ready' || updateFlow === 'applying'">
-          <GButton
-            size="sm"
-            variant="primary"
-            :busy="updateFlow === 'applying'"
-            @click="doApplyUpdate"
-          >
-            <GIcon name="refresh" :size="13" />重启应用
-          </GButton>
-        </template>
-        <!-- 下载失败：重试 / 关闭 -->
-        <template v-else-if="updateFlow === 'error'">
-          <GButton size="sm" variant="primary" @click="retryDownload">
-            <GIcon name="refresh" :size="13" />重试
-          </GButton>
-          <GButton size="sm" @click="noticeOpen = false">关闭</GButton>
-        </template>
-        <!-- 默认：前往 GitHub + 立即更新 -->
-        <template v-else>
-          <GButton size="sm" @click="openRelease(update?.release_url || '')">
-            <GIcon name="external" :size="13" />前往 GitHub
-          </GButton>
-          <GButton
-            v-if="update?.can_auto_update"
-            size="sm"
-            variant="primary"
-            @click="startDownload"
-          >
-            <GIcon name="download" :size="13" />立即更新
-          </GButton>
-          <GButton v-else size="sm" variant="primary" @click="noticeOpen = false">知道了</GButton>
-        </template>
-      </template>
-    </GModal>
-
-    <!-- 更新公告最小化通知（右下角悬浮，类似通知；下载中显示进度） -->
-    <Teleport to="body">
-      <Transition name="mini-pop">
-        <div v-if="miniOpen" class="mini-notice" role="status" aria-live="polite">
-          <div class="mini-notice-head">
-            <span class="mini-notice-title">
-              <GIcon name="zap" :size="13" />更新公告
-            </span>
-            <button class="mini-notice-x" aria-label="关闭通知" @click="closeMini">
-              <GIcon name="x" :size="12" />
-            </button>
-          </div>
-          <button class="mini-notice-body" @click="restoreNotice">
-            <div class="mini-notice-versions">
-              <span class="u-mono mini-ver">{{ update?.current_version ?? '—' }}</span>
-              <span class="mini-arrow">→</span>
-              <span class="u-mono mini-ver mini-ver-new">{{ update?.latest_version ?? '' }}</span>
-              <span class="mini-tag" :class="versionType === 'beta' ? 'is-beta' : ''">
-                {{ versionTypeLabel }}
-              </span>
-            </div>
-            <!-- 下载中 / 已暂停：进度条 -->
-            <template v-if="updateFlow === 'downloading'">
-              <div class="mini-progress">
-                <div class="mini-progress-bar">
-                  <div
-                    class="mini-progress-fill"
-                    :style="{ width: updatePct() >= 0 ? updatePct() + '%' : '8%' }"
-                  />
-                </div>
-                <span class="u-mono mini-pct">
-                  {{ updatePct() >= 0 ? `${updatePct()}%` : '…' }}
-                </span>
-              </div>
-              <div class="mini-meta">
-                <span class="u-mono u-dim">
-                  {{ fmtBytes(updateDl?.received ?? 0) }} / {{ fmtBytes(updateDl?.total ?? 0) }}
-                </span>
-                <span v-if="updateDl?.state === 'paused'" class="u-dim">已暂停</span>
-              </div>
-            </template>
-            <!-- 下载完成 -->
-            <div v-else-if="updateFlow === 'ready'" class="mini-done">
-              <GIcon name="check" :size="14" />
-              <span>新版 {{ updateDl?.version || '' }} 已下载完成</span>
-            </div>
-            <!-- 下载失败 -->
-            <div v-else-if="updateFlow === 'error'" class="mini-error">
-              <GIcon name="alert" :size="14" />
-              <span>下载失败，可重试</span>
-            </div>
-            <!-- 默认：有新版本 -->
-            <div v-else class="mini-idle">
-              发现新版本 {{ update?.latest_version ?? '' }}，点击查看公告
-            </div>
-          </button>
-          <!-- 操作按钮（下载中 / 完成 / 失败） -->
-          <div
-            v-if="updateFlow === 'downloading' || updateFlow === 'ready' || updateFlow === 'error'"
-            class="mini-actions"
-          >
-            <template v-if="updateFlow === 'downloading'">
-              <GButton size="sm" text @click.stop="togglePause">
-                <GIcon :name="updateDl?.state === 'paused' ? 'play' : 'pause'" :size="12" />
-                {{ updateDl?.state === 'paused' ? '继续' : '暂停' }}
-              </GButton>
-              <GButton size="sm" text @click.stop="cancelDownload">
-                <GIcon name="x" :size="12" />取消
-              </GButton>
-            </template>
-            <GButton
-              v-else-if="updateFlow === 'ready'"
-              size="sm"
-              variant="primary"
-              @click.stop="doApplyUpdate"
-            >
-              <GIcon name="refresh" :size="12" />重启应用
-            </GButton>
-            <GButton v-else-if="updateFlow === 'error'" size="sm" text @click.stop="retryDownload">
-              <GIcon name="refresh" :size="12" />重试
-            </GButton>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
 
     <!-- 恢复强确认 -->
     <GModal v-model:open="restoreConfirm" title="恢复备份" width="480px">
@@ -1164,275 +773,5 @@ function updatePct(): number {
   font-size: 12px;
   line-height: 1.8;
   color: var(--text-2);
-}
-
-/* ── 自动更新：下载进度 / 确认弹窗 / 更新摘要 ── */
-.update-progress {
-  position: relative;
-  width: 180px;
-  height: 8px;
-  border-radius: 99px;
-  background: var(--bg-3);
-  overflow: hidden;
-}
-.update-progress-fill {
-  height: 100%;
-  border-radius: 99px;
-  background: var(--info);
-  transition: width .3s ease;
-}
-.update-pct {
-  min-width: 52px;
-  font-size: 11px;
-  text-align: right;
-}
-</style>
-
-<!-- 更新公告弹窗（GModal Teleport 到 body，需全局） -->
-<style>
-.announce-dialog { display: flex; flex-direction: column; gap: 12px; }
-.announce-versions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 13px;
-}
-.announce-ver { color: var(--text); }
-.announce-ver-new { color: var(--accent-text); font-weight: 650; }
-.announce-arrow { color: var(--text-3); }
-.announce-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  font-size: 10.5px;
-  line-height: 1.5;
-  border-radius: var(--r-pill);
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-softer);
-}
-.announce-tag.is-beta {
-  color: var(--warn);
-  background: var(--warn-soft);
-  border-color: transparent;
-}
-.announce-body {
-  max-height: 46vh;
-  overflow: auto;
-  background:
-    linear-gradient(180deg, var(--glass-hi) 0%, transparent 120px),
-    var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--r-ctrl);
-  padding: 12px 14px;
-}
-
-/* 公告弹窗内：下载进度 / 就绪 / 失败（GModal Teleport 到 body，需全局） */
-.announce-progress {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--glass-border);
-  border-radius: var(--r-ctrl);
-  background: var(--glass-bg);
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-}
-.announce-progress-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-}
-.announce-progress-title { font-weight: 550; }
-.announce-progress-pct { font-size: 11px; }
-.announce-progress-bar {
-  width: 100%;
-  height: 8px;
-  border-radius: 99px;
-  background: var(--bg-3);
-  overflow: hidden;
-}
-.announce-progress-bar .update-progress-fill {
-  height: 100%;
-  border-radius: 99px;
-  background: var(--info);
-  transition: width .3s ease;
-}
-.announce-progress-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-}
-.announce-progress-done,
-.announce-progress-error {
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-}
-.announce-progress-done { color: var(--success); }
-.announce-progress-error { color: var(--danger); }
-
-/* 公告弹窗标题栏：最小化按钮（随 GModal Teleport 到 body，需全局） */
-.announce-min {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--r-sm);
-  color: var(--text-3);
-  transition: background var(--dur-1) ease, color var(--dur-1) ease;
-}
-.announce-min:hover { background: var(--neutral-soft); color: var(--text); }
-
-/* 更新公告最小化通知（右下角悬浮，Teleport 到 body，需全局） */
-.mini-notice {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: var(--z-toast);
-  width: 272px;
-  display: flex;
-  flex-direction: column;
-  background:
-    linear-gradient(180deg, var(--glass-hi) 0%, transparent 90px),
-    var(--glass-bg-2);
-  backdrop-filter: blur(24px) saturate(1.5);
-  -webkit-backdrop-filter: blur(24px) saturate(1.5);
-  border: 1px solid var(--glass-border-strong);
-  border-radius: var(--r-card);
-  box-shadow: var(--shadow-pop);
-  overflow: hidden;
-}
-.mini-notice-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 10px 0;
-}
-.mini-notice-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--accent-text);
-}
-.mini-notice-x {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--r-sm);
-  color: var(--text-3);
-  transition: background var(--dur-1) ease, color var(--dur-1) ease;
-}
-.mini-notice-x:hover { background: var(--neutral-soft); color: var(--text); }
-.mini-notice-body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 12px 10px;
-  text-align: left;
-}
-.mini-notice-body:hover .mini-notice-versions { opacity: .85; }
-.mini-notice-versions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  transition: opacity var(--dur-1) ease;
-}
-.mini-ver { color: var(--text); }
-.mini-ver-new { color: var(--accent-text); font-weight: 650; }
-.mini-arrow { color: var(--text-3); }
-.mini-tag {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  font-size: 10px;
-  line-height: 1.5;
-  border-radius: var(--r-pill);
-  color: var(--accent-text);
-  background: var(--accent-soft);
-  border: 1px solid var(--accent-softer);
-}
-.mini-tag.is-beta {
-  color: var(--warn);
-  background: var(--warn-soft);
-  border-color: transparent;
-}
-.mini-progress {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.mini-progress-bar {
-  flex: 1;
-  height: 7px;
-  border-radius: 99px;
-  background: var(--bg-3);
-  overflow: hidden;
-}
-.mini-progress-fill {
-  height: 100%;
-  border-radius: 99px;
-  background: var(--info);
-  transition: width .3s ease;
-}
-.mini-pct {
-  min-width: 36px;
-  font-size: 11px;
-  text-align: right;
-}
-.mini-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 10.5px;
-}
-.mini-done,
-.mini-error,
-.mini-idle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-  line-height: 1.5;
-}
-.mini-done { color: var(--success); }
-.mini-error { color: var(--danger); }
-.mini-idle { color: var(--text-2); }
-.mini-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  padding: 0 10px 10px;
-}
-.mini-actions .g-btn { min-height: 26px; padding: 0 10px; font-size: 11.5px; }
-
-/* 通知出入场动画 */
-.mini-pop-enter-active {
-  transition: transform .28s cubic-bezier(.2, .8, .2, 1), opacity .22s ease;
-}
-.mini-pop-leave-active {
-  transition: transform .2s ease, opacity .18s ease;
-}
-.mini-pop-enter-from,
-.mini-pop-leave-to {
-  transform: translateY(16px) scale(.96);
-  opacity: 0;
 }
 </style>

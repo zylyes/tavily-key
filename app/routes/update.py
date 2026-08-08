@@ -82,3 +82,15 @@ def api_update_announcement():
     from updater import read_announcement
 
     return {"ok": True, "announcement": read_announcement()}
+
+
+@router.get("/api/update/notice-pending")
+def api_update_notice_pending():
+    """读取系统通知（托盘气泡）点击后待展示公告的标记（一次性读取后清除）。
+
+    主窗口未打开时自动/手动检查到新版本 → 系统通知 → 用户点击后打开主窗口，
+    前端轮询本端点，非空 version 表示应弹出更新公告弹窗。
+    """
+    from updater import consume_open_notice
+
+    return {"ok": True, "version": consume_open_notice()}

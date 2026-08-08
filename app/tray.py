@@ -120,6 +120,8 @@ WM_DESTROY = 0x0002
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 WM_RBUTTONUP = 0x0205
+# 托盘气泡（balloon）被点击：Shell_NotifyIcon 回调 lParam 的低位为 WM_APP+19
+NIN_BALLOONUSERCLICK = 0x0400 + 19
 
 NIM_ADD = 0x00000000
 NIM_MODIFY = 0x00000001
@@ -153,10 +155,13 @@ class TrayIcon:
         on_exit:   退出应用的回调（在托盘线程内执行）
     """
 
-    def __init__(self, icon_path, on_show=None, on_exit=None, items=None):
+    def __init__(self, icon_path, on_show=None, on_exit=None, items=None,
+                 on_balloon_click=None):
         self._icon_path = str(icon_path)
         self._on_show = on_show or (lambda: None)
         self._on_exit = on_exit or (lambda: None)
+        # 托盘气泡（系统通知）被点击：打开主窗口并展示更新公告等
+        self._on_balloon_click = on_balloon_click or (lambda: None)
         # 自定义菜单项：[(item_id, label, callback)]，item_id 从 1000 起（避开
         # ID_SHOW/ID_EXIT）。回调在托盘线程内执行，长耗时操作请自行开线程。
         self._items = list(items or [])
@@ -291,6 +296,8 @@ class TrayIcon:
                 code = lp & 0xFFFF
                 if code in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
                     self._safe(self._on_show)
+                elif code == NIN_BALLOONUSERCLICK:
+                    self._safe(self._on_balloon_click)
                 elif code == WM_RBUTTONUP:
                     self._popup_menu(hwnd)
             elif msg == WM_COMMAND:

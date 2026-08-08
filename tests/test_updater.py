@@ -13,6 +13,7 @@ def reset_updater_state():
                        path="", body="")
     updater._pause_event.clear()
     updater._cancel_event.clear()
+    updater._pending_open_notice = ""
     yield
 
 
@@ -84,13 +85,13 @@ def test_is_newer():
 # ── check_update ────────────────────────────────────────────
 def test_check_update_success(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
     r = updater.check_update(force=True)
     assert r["ok"] is True
     assert r["disabled"] is False
     assert r["update_available"] is True
     assert r["current_version"] == updater.__version__
-    assert r["latest_version"] == "0.13.3"
+    assert r["latest_version"] == "0.13.4"
     assert r["release_url"].startswith("https://github.com")
     assert r["body"] == "更新说明"
     assert r["error"] == ""
@@ -165,18 +166,19 @@ class _FakeTray:
 
 
 def test_handle_auto_update_notifies(monkeypatch):
-    """发现新版本仅通知（托盘 + webhook 附带公告摘要），不触发下载。"""
+    """发现新版本仅通知（窗口未打开时托盘 + webhook 附带公告摘要），不触发下载。"""
     tray = _FakeTray()
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3", body="新增功能A；修复B"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4", body="新增功能A；修复B"))
     monkeypatch.setattr("notify.send_webhook",
                         lambda url, payload: sent.append((url, payload)) or True)
     calls: list[tuple] = []
     monkeypatch.setattr(updater, "start_download",
                         lambda: calls.append(()) or (True, ""))
 
-    r = updater.handle_auto_update(tray=tray, webhook="https://example.com/hook")
+    r = updater.handle_auto_update(tray=tray, webhook="https://example.com/hook",
+                                   window_open=False)
     assert r["update_available"] is True
     # 托盘已通知、webhook 带更新公告摘要、不触发下载
     assert len(tray.notifications) == 1
@@ -185,28 +187,47 @@ def test_handle_auto_update_notifies(monkeypatch):
     assert sent[0][1]["event"] == "update_available"
     assert "新增功能A" in sent[0][1]["summary"]
     assert calls == []
+    # 窗口未打开时标记待展示公告（系统通知点击后前端消费）
+    assert updater.consume_open_notice() == "0.13.4"
 
 
 def test_handle_auto_update_dedupes_by_version(monkeypatch):
     """同一版本只通知一次（去重），第二次调用不再通知。"""
     tray = _FakeTray()
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
 
-    updater.handle_auto_update(tray=tray, webhook="")
-    updater.handle_auto_update(tray=tray, webhook="")
+    updater.handle_auto_update(tray=tray, webhook="", window_open=False)
+    updater.handle_auto_update(tray=tray, webhook="", window_open=False)
     assert len(tray.notifications) == 1
     # 已是本地版本 → 不通知
     monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release(updater.__version__))
-    updater.handle_auto_update(tray=tray, webhook="")
+    updater.handle_auto_update(tray=tray, webhook="", window_open=False)
     assert len(tray.notifications) == 1
+
+
+def test_handle_auto_update_window_open_skips_tray(monkeypatch):
+    """主窗口打开时自动检查到新版本：不弹系统托盘气泡（前端轮询显示右下角通知），webhook 照常。"""
+    tray = _FakeTray()
+    sent: list[tuple] = []
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
+    monkeypatch.setattr("notify.send_webhook",
+                        lambda url, payload: sent.append((url, payload)) or True)
+
+    r = updater.handle_auto_update(tray=tray, webhook="https://example.com/hook",
+                                   window_open=True)
+    assert r["update_available"] is True
+    assert tray.notifications == []          # 窗口打开 → 不弹系统通知
+    assert len(sent) == 1                     # webhook 不受影响
+    assert updater.consume_open_notice() == ""   # 不标记待展示公告
 
 
 def test_handle_auto_update_webhook(monkeypatch):
     """webhook 通知含更新公告摘要与版本信息。"""
     sent: list[tuple] = []
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
 
     def fake_webhook(url, payload):
         sent.append((url, payload))
@@ -217,7 +238,16 @@ def test_handle_auto_update_webhook(monkeypatch):
     assert len(sent) == 1
     assert sent[0][0] == "https://example.com/hook"
     assert sent[0][1]["event"] == "update_available"
-    assert sent[0][1]["latest_version"] == "0.13.3"
+    assert sent[0][1]["latest_version"] == "0.13.4"
+
+
+def test_mark_consume_open_notice():
+    """系统通知点击标记：mark 后可被 consume 一次性读取并清除。"""
+    updater.mark_open_notice("0.13.4")
+    assert updater.consume_open_notice() == "0.13.4"
+    assert updater.consume_open_notice() == ""   # 已清除
+    updater.mark_open_notice("")
+    assert updater.consume_open_notice() == ""   # 空版本不残留
 
 
 # ── 自动更新：资产解析 / 下载 / 应用 ─────────────────────────
@@ -239,9 +269,9 @@ def test_asset_info_none():
 
 def test_check_update_includes_asset_and_can_auto(monkeypatch):
     monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
-    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.3"))
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("0.13.4"))
     r = updater.check_update(force=True)
-    assert r["asset_name"] == "Tavily-v0.13.3-win64.zip"
+    assert r["asset_name"] == "Tavily-v0.13.4-win64.zip"
     assert r["asset_url"].startswith("https://")
     assert r["asset_size"] == 12345
     assert r["can_auto_update"] is False  # 测试环境非打包版
@@ -399,6 +429,45 @@ def test_download_update_success(monkeypatch, tmp_path):
     assert st["version"] == "1.0.0"
     assert (Path(st["path"]) / "Tavily.exe").is_file()
     assert (Path(st["path"]) / "_internal").is_dir()
+
+
+def test_fix_zip_name_restores_gbk_chinese():
+    """GBK 文件名被按 CP437 解码的乱码可逆映射还原。"""
+    assert updater._fix_zip_name("CLI╩╣╙├") == "CLI使用"
+    assert updater._fix_zip_name("Web┐╪╓╞╠¿") == "Web控制台"
+    assert updater._fix_zip_name("║╦╨─╣ª─▄/Key┬╓╤»╙δ╜í┐╡╝∞▓Θ.md") == "核心功能/Key轮询与健康检查.md"
+    # 正常名/非乱码名原样返回
+    assert updater._fix_zip_name("Tavily/Tavily.exe") == "Tavily/Tavily.exe"
+    assert updater._fix_zip_name("README.md") == "README.md"
+    assert updater._fix_zip_name("") == ""
+
+
+def test_download_update_fixes_mojibake_zip_names(monkeypatch, tmp_path):
+    """解压 release zip 时，乱码中文文件名被修复为正确中文名。"""
+    import zipfile
+    from pathlib import Path
+
+    monkeypatch.setattr(updater, "get_settings", lambda: _cfg())
+    monkeypatch.setattr(updater, "_fetch_latest", lambda repo: _release("1.0.0"))
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    def fake_download(url, dest):
+        with zipfile.ZipFile(dest, "w") as zf:
+            zf.writestr("Tavily/Tavily.exe", b"fake-exe")
+            # 模拟 release zip 内文件名已是乱码（GBK 字节按 CP437 解码的结果）
+            zf.writestr("Tavily/_internal/docs/wiki/CLI╩╣╙├/CLI╩╣╙├.md",
+                        "# CLI 使用".encode("utf-8"))
+        return 12345
+
+    monkeypatch.setattr(updater, "_download_file", fake_download)
+    updater.download_update()
+    st = updater.get_download_status()
+    assert st["state"] == "done"
+    base = Path(st["path"])
+    assert (base / "Tavily.exe").is_file()
+    fixed_md = base / "_internal" / "docs" / "wiki" / "CLI使用" / "CLI使用.md"
+    assert fixed_md.is_file(), "乱码文件名应被修复为正确中文名"
+    assert fixed_md.read_text(encoding="utf-8") == "# CLI 使用"
 
 
 def test_download_update_no_asset(monkeypatch):

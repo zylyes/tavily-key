@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -257,35 +258,21 @@ def check_update(force: bool = False) -> dict:
     return dict(result)
 
 
-def _notify_all(tray, webhook: str, title: str, message: str, payload: dict) -> bool:
-    """按配置推送单个通知（托盘 + webhook），返回是否至少推送了一个渠道。"""
-    sent = False
-    if tray is not None:
-        try:
-            tray.notify(title, message)
-            sent = True
-        except Exception:  # noqa: BLE001
-            pass
-    if webhook:
-        from notify import send_webhook
-        try:
-            payload.setdefault("title", title)
-            payload.setdefault("message", message)
-            sent = send_webhook(webhook, payload) or sent
-        except Exception:  # noqa: BLE001
-            pass
-    return sent
+def handle_auto_update(tray=None, webhook: str = "", window_open: bool = True,
+                       force: bool = False) -> dict:
+    """自动/手动检查主入口：发现新版本时通知用户（附带更新公告摘要）。
 
-
-def handle_auto_update(tray=None, webhook: str = "") -> dict:
-    """后台自动检查主入口：发现新版本时通知用户（附带更新公告摘要）。
-
-    自动更新已移除：新版本一律仅通知，由用户在面板「设置 → 关于与更新」
-    查看更新公告并手动点击「立即更新」。webhook 附带 release notes 摘要
-    （前 120 字）。按版本去重（同一版本只通知一次）。返回 check_update 结果。
+    自动更新已移除：新版本一律仅通知，由用户在面板查看更新公告并手动更新。
+    通知方式按主窗口是否打开区分：
+      - window_open=True（主窗口可见）：不弹系统托盘气泡——前端页面会轮询
+        /api/update/check 并显示右下角通知；仅 webhook 推送。
+      - window_open=False（主窗口未打开/托盘后台）：托盘气泡（系统通知），
+        点击气泡后打开主窗口并显示更新公告（mark_open_notice）。
+    force=True 强制刷新网络（托盘「检查更新」手动检查）。按版本去重
+    （同一版本只通知一次）。返回 check_update 结果。
     """
     global _notified_version
-    result = check_update()
+    result = check_update(force=force)
     if not result.get("ok") or not result.get("update_available"):
         return result
     latest = result.get("latest_version") or ""
@@ -296,16 +283,54 @@ def handle_auto_update(tray=None, webhook: str = "") -> dict:
     body = result.get("body") or ""
     summary = body[:120] + ("…" if len(body) > 120 else "")
     title = f"Tavily Key Pool 有新版本 {latest}"
-    message = (f"当前版本 {__version__}，发现新版本 {latest}。"
-               f"可在面板「设置 → 关于与更新」查看更新公告并手动更新。")
-    _notify_all(tray, webhook, title, message, {
-        "event": "update_available",
-        "current_version": __version__, "latest_version": latest,
-        "release_url": result.get("release_url", ""),
-        "summary": summary,
-    })
+    message = (f"当前版本 {__version__}，发现新版本 {latest}。点击查看更新公告。")
+    # 系统通知（托盘气泡）：仅主窗口未打开时推送，点击后打开窗口显示公告
+    if not window_open and tray is not None:
+        try:
+            tray.notify(title, message)
+            mark_open_notice(latest)
+        except Exception:  # noqa: BLE001
+            pass
+    # webhook 照常推送（不受窗口状态影响）
+    if webhook:
+        from notify import send_webhook
+        try:
+            payload = {
+                "event": "update_available",
+                "current_version": __version__, "latest_version": latest,
+                "release_url": result.get("release_url", ""),
+                "summary": summary,
+            }
+            payload.setdefault("title", title)
+            payload.setdefault("message", message)
+            send_webhook(webhook, payload)
+        except Exception:  # noqa: BLE001
+            pass
     _log.info("发现新版本 %s，已通知用户（含更新公告摘要）", latest)
     return result
+
+
+# ── 系统通知点击 → 打开窗口后显示公告 ────────────────────────
+# 主窗口未打开时通过托盘气泡（系统通知）提醒；用户点击气泡后打开主窗口，
+# 前端轮询 /api/update/notice-pending 消费该标记并展示更新公告弹窗。
+_notice_lock = threading.Lock()
+_pending_open_notice: str = ""
+
+
+def mark_open_notice(version: str) -> None:
+    """记录系统通知点击后待展示公告的版本（窗口打开后前端消费）。"""
+    global _pending_open_notice
+    with _notice_lock:
+        _pending_open_notice = version or ""
+
+
+def consume_open_notice() -> str:
+    """前端轮询：读取并清除待展示公告标记，返回版本（空=无）。"""
+    global _pending_open_notice
+    with _notice_lock:
+        v = _pending_open_notice
+        _pending_open_notice = ""
+        return v
 
 
 # ── 自动更新：下载 / 校验 / 解压 / 替换重启（仅打包版）────────
@@ -403,6 +428,25 @@ def _download_file(url: str, dest: Path) -> int:
         return received
 
 
+def _fix_zip_name(name: str) -> str:
+    """修复 zip 内被错误按 CP437 解码的中文（GBK）文件名。
+
+    中文 Windows 下用 7-Zip 等工具打包时，文件名按本地代码页（GBK）写入
+    且不带 UTF-8 标志位；Python zipfile 对无 UTF-8 标志的文件名按 CP437
+    解码 → 中文变成「CLI╩╣╙├」类乱码（GBK 字节被当作 CP437 字符）。
+    这里把乱码逆映射还原为正确中文名；非乱码名（CP437 编码失败或无中文
+    结果）原样返回。
+    """
+    try:
+        raw = name.encode("cp437")
+        fixed = raw.decode("gbk")
+        if fixed != name and any("\u4e00" <= c <= "\u9fff" for c in fixed):
+            return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    return name
+
+
 def download_update() -> None:
     """后台线程主体：下载最新打包 zip → 校验 → 解压到临时目录。
 
@@ -439,7 +483,19 @@ def download_update() -> None:
             if bad is not None:
                 raise RuntimeError(f"压缩包校验失败：{bad}")
             extracted = tmp / "extracted"
-            zf.extractall(extracted)
+            extracted.mkdir(parents=True, exist_ok=True)
+            # 手动逐条解压并修复 GBK 文件名乱码（zipfile.extractall 会把
+            # 无 UTF-8 标志的中文名按 CP437 解出乱码文件名，导致内置 wiki
+            # 文档目录名/文件名损坏）。
+            for info in zf.infolist():
+                fixed = _fix_zip_name(info.filename)
+                target = extracted / fixed
+                if info.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
         # 定位顶层目录（zip 内可能再套一层 Tavily/）
         top = extracted
         for child in extracted.iterdir():
@@ -454,7 +510,6 @@ def download_update() -> None:
         _log.info("自动更新下载已取消，清理临时文件")
         _set_dl(state="idle", received=0, total=0, error="", version="", path="", body="")
         if tmp is not None:
-            import shutil
             shutil.rmtree(tmp, ignore_errors=True)
     except Exception as e:  # noqa: BLE001
         err = str(e)[:300]

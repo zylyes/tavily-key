@@ -644,3 +644,7 @@ export interface UpdateAnnouncement {
 }
 export const getUpdateAnnouncement = () =>
   request<{ ok: true; announcement: UpdateAnnouncement | null }>('/api/update/announcement')
+
+/** GET /api/update/notice-pending —— 系统通知点击后待展示公告的版本（一次性读取清除） */
+export const getUpdateNoticePending = () =>
+  request<{ ok: true; version: string }>('/api/update/notice-pending')

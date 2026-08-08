@@ -38,6 +38,23 @@ _CATEGORY_LABELS = {
 }
 
 
+def _fix_mojibake(text: str) -> str:
+    """修复 zip 解压产生的乱码文件名（GBK 字节被按 CP437 解码）。
+
+    自动更新解压的 release zip 若文件名用本地代码页（GBK）且无 UTF-8 标志，
+    Python zipfile 会按 CP437 解码成「╩╣╙├」类乱码。这里尝试逆映射还原
+    为正确中文名（如 'CLI╩╣╙├' → 'CLI使用'）；非乱码名原样返回。
+    """
+    try:
+        raw = text.encode("cp437")
+        fixed = raw.decode("gbk")
+        if fixed != text and any("\u4e00" <= c <= "\u9fff" for c in fixed):
+            return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    return text
+
+
 def _title_from_md(text: str, fallback: str) -> str:
     """从 markdown 提取一级标题（首个 `# `），无则回退文件名。"""
     m = re.search(r"^#\s+(.+)$", text, re.MULTILINE)
@@ -73,9 +90,14 @@ def docs_tree() -> list[dict]:
         for f in sorted(d.glob("*.md")):
             rel = f.relative_to(root).as_posix()
             content = _read_safe(rel) or ""
-            docs.append({"name": f.stem, "path": rel, "title": _title_from_md(content, f.stem)})
+            fixed_stem = _fix_mojibake(f.stem)
+            docs.append({"name": fixed_stem, "path": rel,
+                         "title": _title_from_md(content, fixed_stem)})
         if docs:
-            tree.append({"category": _CATEGORY_LABELS.get(d.name, d.name), "docs": docs})
+            # 先修复乱码目录名再查展示标签（保证 'CLI╩╣╙├' → 'CLI使用' → 'CLI 使用'）
+            real_name = _fix_mojibake(d.name)
+            tree.append({"category": _CATEGORY_LABELS.get(real_name, real_name),
+                         "docs": docs})
     return tree
 
 
