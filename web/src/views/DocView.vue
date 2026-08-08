@@ -101,26 +101,13 @@ async function selectDoc(path: string): Promise<void> {
   min-height: 0;
 }
 .docs-cat { margin-bottom: 14px; }
-/* 分类名：accent 小方块标识 + 独立层级（与文档项形成缩进对比） */
+/* 分类名：独立层级（与文档项形成缩进对比） */
 .docs-cat-name {
-  position: relative;
-  padding: 3px 8px 7px 20px;
+  padding: 3px 8px 7px;
   font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.04em;
   color: var(--text-3);
-}
-.docs-cat-name::before {
-  content: '';
-  position: absolute;
-  left: 7px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 6px;
-  height: 6px;
-  border-radius: 2px;
-  background: var(--accent);
-  opacity: .75;
 }
 /* 文档项：相对分类名缩进 + 左侧竖线（悬停/选中），形成内容层级 */
 .docs-item {

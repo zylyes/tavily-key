@@ -680,7 +680,7 @@ function updatePct(): number {
           />
         </SettingRow>
         <template v-if="autoBackupEnabled">
-          <SettingRow label="备份间隔（天）" hint="每隔多少天自动备份一次">
+          <SettingRow class="sub-row" label="备份间隔（天）" hint="每隔多少天自动备份一次">
             <GInput
               v-model="autoBackupInterval"
               type="number"
@@ -688,7 +688,7 @@ function updatePct(): number {
               @change="saveAutoBackup"
             />
           </SettingRow>
-          <SettingRow label="保留份数" hint="超出后自动删除最旧备份">
+          <SettingRow class="sub-row" label="保留份数" hint="超出后自动删除最旧备份">
             <GInput
               v-model="autoBackupKeep"
               type="number"
@@ -925,6 +925,11 @@ function updatePct(): number {
 :deep(.setting-row.interval-disabled) {
   opacity: .55;
   filter: grayscale(.4);
+}
+
+/* ── 子设置：相对父设置项缩进，形成层级（如「定时自动备份」展开项）── */
+.sub-row {
+  padding-left: 24px;
 }
 
 /* ── 当前版本 + 检查更新（融合行：左版本信息，右按钮）── */

@@ -398,24 +398,10 @@ async function onSave(): Promise<void> {
 }
 
 .url-label {
-  position: relative;
   margin: 16px 0 8px;
-  padding-left: 14px;
   font-size: 12px;
   font-weight: 550;
   color: var(--text-2);
-}
-.url-label::before {
-  content: '';
-  position: absolute;
-  left: 1px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 6px;
-  height: 6px;
-  border-radius: 2px;
-  background: var(--accent);
-  opacity: .75;
 }
 .url-item { margin-bottom: 8px; padding-left: 14px; }
 .url-item-row {
