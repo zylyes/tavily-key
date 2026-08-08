@@ -5,6 +5,16 @@
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.12.2] - 2026-08-08
+
+### Added
+
+- **代码块语法高亮**：面板「文档」视图与更新公告弹窗中的围栏代码块
+  （```` ```lang ````）现按语言着色——内置零依赖轻量高亮器，覆盖
+  bash / python / javascript / typescript / json / yaml / sql / ini / toml /
+  mermaid，识别关键字（靛蓝加粗）、字符串（绿）、数字（黄）、行注释
+  （灰斜体）与内置命令/函数（蓝）；未识别语言回退纯文本（先转义防 XSS）。
+
 ## [0.12.1] - 2026-08-08
 
 ### Added

@@ -3,8 +3,9 @@ import { computed } from 'vue'
 
 /* MdView —— 轻量 Markdown 渲染（零依赖，先转义 HTML 再解析，防 XSS）
    支持语法：# 标题 / 无序·有序列表 / **加粗** / *斜体* / `行内代码` /
-             ``` 代码块 / > 引用 / --- 分割线 / [链接](url) / 表格 /
-             段落
+             ``` 代码块（轻量语法高亮：bash/python/js/ts/json/yaml/sql/
+             ini/toml/mermaid 等） / > 引用 / --- 分割线 / [链接](url) /
+             表格 / 段落
    用法：
      <MdView :text="markdown" /> */
 const props = withDefaults(defineProps<{ text?: string }>(), { text: '' })
@@ -74,11 +75,116 @@ function tryParseTable(lines: string[], start: number): { html: string; consumed
   return { html: `<table>${thead}${tbody}</table>`, consumed: i - start }
 }
 
+// ── 轻量代码语法高亮（零依赖）────────────────────────────────
+// 覆盖常见语言的关键字/内置/字符串/数字/行注释；未知语言仅转义（纯文本）。
+interface LangDef {
+  kw: string[]
+  builtin: string[]
+  comment: string[]
+}
+
+const LANGS: Record<string, LangDef> = {
+  bash: {
+    kw: ('if then else elif fi for while until do done case esac function in return '
+      + 'export local readonly select time').split(' '),
+    builtin: ('echo cd mkdir rm cp mv ls cat grep sed awk head tail wc xargs find sort '
+      + 'uniq tar chmod chown source set unset exit printf read sleep curl wget git '
+      + 'npm python pip node').split(' '),
+    comment: ['#'],
+  },
+  python: {
+    kw: ('def class import from as return if elif else for while try except finally with '
+      + 'lambda yield global nonlocal pass break continue raise assert in is not and or '
+      + 'del async await').split(' '),
+    builtin: ('print len range str int float list dict set tuple enumerate zip map filter '
+      + 'sorted type isinstance super self None True False').split(' '),
+    comment: ['#'],
+  },
+  javascript: {
+    kw: ('function return if else for while do const let var new typeof instanceof class '
+      + 'extends import export from async await try catch finally throw switch case break '
+      + 'continue default').split(' '),
+    builtin: 'console true false null undefined'.split(' '),
+    comment: ['//'],
+  },
+  typescript: {
+    kw: ('function return if else for while do const let var new typeof instanceof class '
+      + 'extends import export from async await try catch finally throw switch case break '
+      + 'continue default interface type enum implements public private readonly').split(' '),
+    builtin: 'console true false null undefined any string number boolean never void'.split(' '),
+    comment: ['//'],
+  },
+  json: { kw: 'true false null'.split(' '), builtin: [], comment: [] },
+  yaml: { kw: 'true false null yes no on off'.split(' '), builtin: [], comment: ['#'] },
+  sql: {
+    kw: ('select from where insert into values update set delete join left right inner outer '
+      + 'on group by order having limit offset as and or not like in is null').split(' '),
+    builtin: [], comment: ['--'],
+  },
+  ini: { kw: [], builtin: [], comment: [';', '#'] },
+  toml: { kw: 'true false'.split(' '), builtin: [], comment: ['#'] },
+  mermaid: {
+    kw: ('graph subgraph end if else then flowchart sequenceDiagram classDiagram stateDiagram '
+      + 'erDiagram journey gantt pie').split(' '),
+    builtin: [], comment: ['%%'],
+  },
+}
+// 语言别名归一；空串/未识别 → 不匹配（纯文本）
+const LANG_ALIAS: Record<string, string> = {
+  sh: 'bash', shell: 'bash', py: 'python', js: 'javascript', ts: 'typescript',
+  jsonc: 'json', yml: 'yaml', toml: 'toml', ini: 'ini', mermaid: 'mermaid',
+}
+
+const TOKEN_SRC = '"(?:[^"\\\\]|\\\\.)*"|\'(?:[^\'\\\\]|\\\\.)*\'|`(?:[^`\\\\]|\\\\.)*`|\\b\\d[\\d_.]*(?:[eE][+-]?\\d+)?\\b|\\b[A-Za-z_]\\w*\\b'
+
+function highlightTokens(s: string, d: LangDef): string {
+  const out: string[] = []
+  let last = 0
+  const re = new RegExp(TOKEN_SRC, 'g')
+  let m: RegExpExecArray | null
+  while ((m = re.exec(s)) !== null) {
+    const tok = m[0]
+    out.push(escapeHtml(s.slice(last, m.index)))
+    const c0 = tok[0]
+    let cls = ''
+    if (c0 === '"' || c0 === "'" || c0 === '`') cls = 'tok-s'
+    else if (/\d/.test(c0)) cls = 'tok-n'
+    else if (d.kw.includes(tok)) cls = 'tok-k'
+    else if (d.builtin.includes(tok)) cls = 'tok-b'
+    out.push(cls ? `<span class="${cls}">${tok}</span>` : tok)
+    last = m.index + tok.length
+  }
+  out.push(escapeHtml(s.slice(last)))
+  return out.join('')
+}
+
+function highlightLine(line: string, d: LangDef): string {
+  // 行注释：取最靠前的注释前缀，注释段整体置灰
+  let ci = -1
+  for (const c of d.comment) {
+    const i = line.indexOf(c)
+    if (i >= 0 && (ci < 0 || i < ci)) ci = i
+  }
+  if (ci >= 0) {
+    return highlightTokens(line.slice(0, ci), d) + `<span class="tok-c">${escapeHtml(line.slice(ci))}</span>`
+  }
+  return highlightTokens(line, d)
+}
+
+/** 代码块语法高亮；lang 未知时仅转义（纯文本）。 */
+function highlightCode(code: string, lang: string): string {
+  const l = LANG_ALIAS[lang] ?? lang
+  const d = LANGS[l]
+  if (!d) return escapeHtml(code)
+  return code.split('\n').map((ln) => highlightLine(ln, d)).join('\n')
+}
+
 function render(src: string): string {
   const lines = src.replace(/\r\n?/g, '\n').split('\n')
   const out: string[] = []
   let inCode = false
   let codeBuf: string[] = []
+  let codeLang = '' // 当前代码块语言（```lang 标记）
   let listType = '' // '' | 'ul' | 'ol'
   let para: string[] = []
 
@@ -103,13 +209,15 @@ function render(src: string): string {
     // 围栏代码块 ```lang
     if (/^```/.test(line)) {
       if (inCode) {
-        out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`)
+        out.push(`<pre><code class="lang-${codeLang || 'plain'}">${highlightCode(codeBuf.join('\n'), codeLang)}</code></pre>`)
         codeBuf = []
         inCode = false
+        codeLang = ''
       } else {
         flushPara()
         closeList()
         inCode = true
+        codeLang = line.slice(3).trim().toLowerCase()
       }
       i++
       continue
@@ -204,7 +312,7 @@ function render(src: string): string {
     i++
   }
 
-  // 收尾（未闭合的代码块 / 段落 / 列表）
+  // 收尾（未闭合的代码块 / 段落 / 列 class="lang-${codeLang || 'plain'}">${highlightCode(codeBuf.join('\n'), codeLang
   if (inCode) {
     out.push(`<pre><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`)
   }
@@ -277,6 +385,12 @@ const html = computed(() => render(props.text))
   font-size: 12px;
   line-height: 1.7;
 }
+/* 代码块语法高亮 token（在代码块底色上叠加主题色） */
+.md-view pre code .tok-k { color: var(--accent-text); font-weight: 600; }
+.md-view pre code .tok-s { color: var(--success); }
+.md-view pre code .tok-n { color: var(--warn); }
+.md-view pre code .tok-c { color: var(--text-3); font-style: italic; }
+.md-view pre code .tok-b { color: var(--info); }
 /* 引用：accent 左边框 + 柔和底 */
 .md-view blockquote {
   margin: 8px 0;
